@@ -233,5 +233,3 @@ tests:
       desc: Cancel the clone operation and validate error message
       polarion-id: CEPH-83574681
       abort-on-fail: false
-
-
