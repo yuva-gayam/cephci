@@ -105,6 +105,7 @@ class FsUtils(object):
                 "gcc",
                 "python3-devel",
                 "git",
+                "postgresql postgresql-server postgresql-contrib",
             ]
             if build.endswith("7") or build.startswith("3"):
                 pkgs.extend(
@@ -125,6 +126,27 @@ class FsUtils(object):
             if "smallfile" not in out:
                 client.node.exec_command(
                     cmd="git clone https://github.com/bengland2/smallfile.git"
+                )
+            if "iozone" not in out:
+                cmd = "cd /home/cephuser;wget http://www.iozone.org/src/current/iozone3_506.tar;"
+                cmd += "tar xvf iozone3_506.tar;cd iozone3_506/src/current/;make;make linux"
+                client.node.exec_command(cmd=cmd)
+            out, rc = client.node.exec_command(
+                sudo=True, cmd="rpm -qa | grep -w 'dbench'", check_ec=False
+            )
+            if "dbench" not in out:
+                log.info("Installing dbench")
+                client.node.exec_command(
+                    sudo=True,
+                    cmd=(
+                        "rhel_version=$(rpm -E %rhel) && "
+                        "dnf config-manager --add-repo="
+                        "https://download.fedoraproject.org/pub/epel/${rhel_version}/Everything/x86_64/"
+                    ),
+                )
+                client.node.exec_command(
+                    sudo=True,
+                    cmd="dnf install dbench -y --nogpgcheck",
                 )
         if (
             hasattr(clients[0].node, "vm_node")
@@ -662,8 +684,7 @@ class FsUtils(object):
         Return:
             returns ceph fs volume info dump in json format
         """
-        if fs_name:
-            fs_info_cmd = f"ceph fs volume info {fs_name} --format json"
+        fs_info_cmd = f"ceph fs volume info {fs_name} --format json"
         if kwargs.get("human_readable"):
             fs_info_cmd += " --human-readable"
 
@@ -3180,11 +3201,99 @@ os.system('sudo systemctl start  network')
                 long_running=True,
             )
 
+        def dbench():
+            log.info("IO tool scheduled : dbench")
+            io_params = {
+                "clients": random.choice(
+                    range(8, 33, 8)  # Randomly selects 8, 16, 24, or 32 for clients
+                ),
+                "duration": random.choice(
+                    range(60, 601, 60)
+                ),  # Randomly selects 60, 120, ..., 600 seconds
+                "testdir_prefix": "dbench_io_dir",
+            }
+            if kwargs.get("dbench_params"):
+                dbench_params = kwargs.get("dbench_params")
+                for io_param in io_params:
+                    if dbench_params.get(io_param):
+                        io_params[io_param] = dbench_params[io_param]
+
+            dir_suffix = "".join(
+                [
+                    random.choice(string.ascii_lowercase + string.digits)
+                    for _ in range(4)
+                ]
+            )
+            io_path = f"{mounting_dir}/{io_params['testdir_prefix']}_{dir_suffix}"
+            client.exec_command(sudo=True, cmd=f"mkdir {io_path}")
+
+            client.exec_command(
+                sudo=True,
+                cmd=f"dbench {io_params['clients']} -t {io_params['duration']} -D {io_path}",
+                long_running=True,
+            )
+
+        def postgresIO():
+            log.info("IO tool scheduled : PostgresIO")
+
+            io_params = {
+                "scale": random.choice(
+                    range(
+                        40, 101, 10
+                    )  # The size of the database(test data) increases linearly with the scale factor
+                ),
+                "workers": random.choice(range(4, 17, 4)),
+                "clients": random.choice(
+                    range(8, 56, 8)  # Randomly selects 8, 16, 24, 32,.. for clients
+                ),
+                "duration": random.choice(
+                    range(60, 601, 60)
+                ),  # Randomly selects 60, 120, ..., 600 seconds
+                "testdir_prefix": "postgres_io_dir",
+                "db_name": "",
+            }
+
+            if kwargs.get("postgresIO_params"):
+                postgresIO_params = kwargs.get("postgresIO_params")
+                for io_param in io_params:
+                    if postgresIO_params.get(io_param):
+                        io_params[io_param] = postgresIO_params[io_param]
+
+            dir_suffix = "".join(
+                [
+                    random.choice(string.ascii_lowercase + string.digits)
+                    for _ in range(4)
+                ]
+            )
+            io_path = f"{mounting_dir}/{io_params['testdir_prefix']}_{dir_suffix}"
+            client.exec_command(sudo=True, cmd=f"mkdir {io_path}")
+
+            # Initialize mode
+            client.exec_command(
+                sudo=True,
+                cmd=f"pgbench -i --scale={io_params['scale']} -U postgres -d {io_params['db_name']}",
+                long_running=True,
+            )
+
+            # Creating tables and populating data based on the scale factor
+            client.exec_command(
+                sudo=True,
+                cmd=(
+                    f"pgbench -c {io_params['clients']} "
+                    f"-j {io_params['workers']} "
+                    f"-T {io_params['duration']} "
+                    f"-U postgres -d {io_params['db_name']}"
+                ),
+                long_running=True,
+            )
+
         io_tool_map = {
             "dd": dd,
             "smallfile": smallfile,
             "wget": wget,
             "file_extract": file_extract,
+            "dbench": dbench,
+            "postgresIO": postgresIO,
         }
 
         log.info(f"IO tools planned to run : {io_tools}")
@@ -3494,6 +3603,72 @@ os.system('sudo systemctl start  network')
         # Setup Crefi pre-requisites : pyxattr
         node.exec_command(sudo=True, cmd="pip3 install pyxattr", long_running=True)
 
+    def setup_postgresql_IO(self, client, mount_dir, db_name):
+        """
+        Setup Steps:
+        1. Create the PostgreSQL data directory as Mount dir
+        2. Set permissions and owners for Mount dir
+        3. Initialise the Postgres Service
+        4. Create DB
+        """
+
+        log.info("Stopping PostgresSQL")
+        client.exec_command(sudo=True, cmd="systemctl stop postgresql", check_ec=False)
+
+        log.info("Setting up PostgresSQL")
+        client.exec_command(sudo=True, cmd=f"mkdir -p {mount_dir}")
+
+        log.debug(f"Setting up postgres persmission and user for the dir {mount_dir}")
+        client.exec_command(sudo=True, cmd=f"chown -R postgres:postgres {mount_dir}")
+        client.exec_command(sudo=True, cmd=f"chmod 700 {mount_dir}")
+
+        try:
+            log.debug("Initialise the Postgres Service")
+            client.exec_command(
+                sudo=True, cmd=f"sudo -u postgres /usr/bin/initdb -D {mount_dir}"
+            )
+        except Exception as e:
+            log.info(
+                f"Initialising the Postgres Service failed: {e}. Applying the Recovery.."
+            )
+            client.exec_command(sudo=True, cmd=f"rm -rf {mount_dir}/*")
+            client.exec_command(
+                sudo=True, cmd=f"sudo -u postgres /usr/bin/initdb -D {mount_dir}"
+            )
+
+        config_file = "/usr/lib/systemd/system/postgresql.service"
+        env_var = f"Environment=PGDATA={mount_dir}"
+
+        # Updates the postgres config to point to the correct backend dir
+        update_dir_command = (
+            f"sudo sed -i '/^Environment=PGDATA/c\\{env_var}' {config_file} || "
+            f"echo '{env_var}' | sudo tee -a {config_file} > /dev/null"
+        )
+        client.exec_command(sudo=True, cmd=update_dir_command)
+
+        client.exec_command(sudo=True, cmd="systemctl daemon-reload")
+
+        client.exec_command(sudo=True, cmd="sestatus")
+        client.exec_command(sudo=True, cmd="setenforce 0")
+        client.exec_command(sudo=True, cmd="systemctl restart postgresql")
+        client.exec_command(sudo=True, cmd=f"chcon -R -t postgresql_db_t {mount_dir}")
+
+        client.exec_command(sudo=True, cmd="setenforce 1")
+        client.exec_command(sudo=True, cmd="systemctl restart postgresql")
+
+        out, _ = client.exec_command(sudo=True, cmd="systemctl status postgresql")
+        log.debug(out)
+        if "active (running)" in out:
+            log.info("PostgreSQL is running")
+        else:
+            log.error("PostgreSQL is not running")
+
+        log.info(f"Creating the DB - {db_name}")
+        client.exec_command(
+            sudo=True, cmd=f"sudo -u postgres psql -c 'CREATE DATABASE {db_name};'"
+        )
+        log.info("DB creation is successful")
+
     def generate_all_combinations(
         self, client, ioengine, mount_dir, workloads, sizes, iodepth_values, numjobs
     ):
@@ -3656,6 +3831,23 @@ os.system('sudo systemctl start  network')
             raise CommandFailed(f"Ceph Cluster is in {health_status} State")
         log.info("Ceph Cluster is Healthy")
         return health_status
+
+    def monitor_ceph_health(self, client, retry, interval):
+        """
+        Monitors Ceph health and prints ceph status at regular intervals
+        Args:
+            client : client node.
+            retry  : Number of times to retry the command
+            intervals: Time duration between the retries (in seconds)
+        Return:
+            Prints Status of the Ceph Health.
+        """
+        for i in range(1, retry + 1):
+            log.info(f"Running health status: Iteration: {i}")
+            self.get_ceph_health_status(client)
+            fs_status_info = self.get_fs_status_dump(client)
+            log.info(f"FS Status: {fs_status_info}")
+            time.sleep(interval)
 
     @retry(CommandFailed, tries=10, delay=30)
     def wait_for_host_online(self, client1, node):
@@ -4464,16 +4656,18 @@ os.system('sudo systemctl start  network')
                 clients.exec_command(sudo=True, cmd=create_path_cmd)
 
             log.info(f"Path exists or created successfully: {path}")
+            file = "create_files.sh"
+            clients.upload_file(
+                sudo=True,
+                src="tests/cephfs/cephfs_multi_mds/create_files.sh",
+                dst=f"/root/{file}",
+            )
 
-            for i in range(0, num_of_files, batch_size):
-                batch_end = min(i + batch_size, num_of_files)
-                for j in range(i, batch_end):
-                    file_path = os.path.join(path, f"file_{j}.txt")
-                    create_file_cmd = (
-                        f"echo 'Created files {j}' | sudo tee {file_path} > /dev/null"
-                    )
-                    clients.exec_command(sudo=True, cmd=create_file_cmd)
-                log.info(f"Created files {i} to {batch_end - 1}")
+            clients.exec_command(
+                sudo=True,
+                cmd=f"bash /root/{file} {path} {num_of_files} {batch_size}",
+                timeout=3600,
+            )
             log.info(f"Successfully created {num_of_files} files in {path}")
         except Exception as e:
             log.error(f"An error occurred: {e}")
@@ -5464,7 +5658,7 @@ os.system('sudo systemctl start  network')
         )
         return fs_status_dict
 
-    def collect_fs_volume_info_for_validation(self, client, fs_name):
+    def collect_fs_volume_info_for_validation(self, client, fs_name, **kwargs):
         """
         Gets the output using fs volume info and collected required info
         Args:
@@ -5474,7 +5668,10 @@ os.system('sudo systemctl start  network')
             returns data_avail,data_used,meta_avail,meta_used and mon addrs from ceph fs volume info in dict format
         """
         fs_volume_info_dict = {}
-        fs_vol_info = self.get_fs_info_dump(client, fs_name, human_readable=False)
+
+        fs_vol_info = self.get_fs_info_dump(
+            client, fs_name, human_readable=kwargs.get("human_readable", False)
+        )
         log.debug(f"Output: {fs_vol_info}")
 
         data_avail = self.fetch_value_from_json_output(
@@ -5677,3 +5874,40 @@ os.system('sudo systemctl start  network')
                         log.error(f"Key '{key}' mismatch: Values = {values}")
                         return False
         return True
+
+    def rename_volume(self, client, old_name, new_name):
+        log.info(f"[Fail {old_name} before renaming it]")
+        client.exec_command(
+            sudo=True, cmd=f"ceph fs fail {old_name} --yes-i-really-mean-it"
+        )
+        log.info("[Set refuse_client_session to true]")
+        client.exec_command(
+            sudo=True, cmd=f"ceph fs set {old_name} refuse_client_session true"
+        )
+        log.info("[Rename the volume]")
+        rename_cmd = f"ceph fs rename {old_name} {new_name} --yes-i-really-mean-it"
+        out, ec = client.exec_command(sudo=True, cmd=rename_cmd)
+        if "renamed." not in ec:
+            log.error(ec)
+            log.error(f"Failed to rename the volume: {out}")
+            return 1
+        out, ec = client.exec_command(sudo=True, cmd="ceph fs ls")
+        if new_name not in out:
+            log.error(f"Volume not renamed: {out}")
+            return 1
+        log.info(f"Volume renamed successfully: {out}")
+        log.info("Put it back to previous state")
+        client.exec_command(
+            sudo=True, cmd="ceph fs set " + new_name + " refuse_client_session false"
+        )
+        client.exec_command(sudo=True, cmd=f"ceph fs set {new_name} joinable true")
+        timer = 10
+        while timer > 0:
+            out, ec = client.exec_command(sudo=True, cmd=f"ceph fs status {new_name}")
+            if "active" in out:
+                break
+            time.sleep(5)
+            timer -= 1
+        log.info(f"Volume {new_name} is active now")
+        log.info("Renaming and verification of volume successful")
+        return 0
