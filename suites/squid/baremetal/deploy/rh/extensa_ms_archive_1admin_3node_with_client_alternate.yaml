@@ -338,7 +338,6 @@ tests:
               - "ceph config set client.rgw.shared.pri.io rgw_zonegroup shared"
               - "ceph config set client.rgw.shared.pri.io rgw_zone primary"
               - "ceph config set client.rgw.shared.pri.io rgw_run_sync_thread false"
-              - "ceph config set global cluster_network 172.20.20.0/24"
               - "ceph orch restart {service_name:shared.pri.io}"
               - "ceph orch restart {service_name:shared.pri.sync}"
         ceph-sec:
@@ -357,7 +356,6 @@ tests:
               - "ceph config set client.rgw.shared.sec.io rgw_zonegroup shared"
               - "ceph config set client.rgw.shared.sec.io rgw_zone secondary"
               - "ceph config set client.rgw.shared.sec.io rgw_run_sync_thread false"
-              - "ceph config set global cluster_network 172.20.20.0/24"
               - "ceph orch restart {service_name:shared.sec.io}"
               - "ceph orch restart {service_name:shared.sec.sync}"
         ceph-arc:
