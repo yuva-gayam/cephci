@@ -2,7 +2,7 @@ globals:
   - ceph-cluster:
       name: ceph-pri
       networks:
-        public: ['10.8.128.0/21']
+        public: ['10.1.172.0/21']
       nodes:
         - hostname: extensa024
           ip: 10.1.172.124
@@ -62,7 +62,7 @@ globals:
   - ceph-cluster:
       name: ceph-sec
       networks:
-        public: ['10.8.128.0/21']
+        public: ['10.1.172.0/21']
       nodes:
         - hostname: extensa028
           ip: 10.1.172.128
@@ -124,7 +124,7 @@ globals:
   - ceph-cluster:
       name: ceph-arc
       networks:
-        public: ['10.8.128.0/21']
+        public: ['10.1.172.0/21']
       nodes:
         - hostname: extensa032
           ip: 10.1.172.132
