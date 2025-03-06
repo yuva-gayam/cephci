@@ -400,7 +400,7 @@ tests:
         ceph-sec:
           config:
             haproxy_clients:
-              - mextensa028
+              - extensa028
             rgw_endpoints:
               - "extensa028:8080"
               - "extensa029:8080"
