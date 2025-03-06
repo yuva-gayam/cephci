@@ -431,7 +431,7 @@ tests:
             cephadm: true
             commands:
               - "sleep 120"
-              - "radosgw-admin zone modify --rgw-zone secondary --endpoints=http://10.1.172.124:5000 --access-key test123 --secret-key test123"
+              - "radosgw-admin zone modify --rgw-zone secondary --endpoints=http://10.1.172.128:5000 --access-key test123 --secret-key test123"
               - "radosgw-admin period update --commit"
       desc: Setting up RGW multisite replication environment
       module: exec.py
