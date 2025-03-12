@@ -173,7 +173,7 @@ tests:
         script-name: test_swift_basic_ops.py
         config-file-name: test_swift_version_copy_op.yaml
       desc: test restoring of versioned objects in swift
-      module: sanity_rgw_multisite.py
+      module: sanity_rgw.py
       name: swift versioning copy 
       polarion-id: CEPH-10646
 
