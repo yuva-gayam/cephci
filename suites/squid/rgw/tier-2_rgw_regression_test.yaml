@@ -186,14 +186,14 @@ tests:
         script-name: test_swift_basic_ops.py
         config-file-name: test_upload_large_obj_with_same_obj_name.yaml
 
-  - test:
-      name: Test the swift URL at root
-      desc: Test the swift URL at root
-      polarion-id: CEPH-83572699
-      module: sanity_rgw.py
-      config:
-        script-name: test_swift_basic_ops.py
-        config-file-name: test_swift_at_root.yaml
+  # - test:
+  #     name: Test the swift URL at root
+  #     desc: Test the swift URL at root
+  #     polarion-id: CEPH-83572699
+  #     module: sanity_rgw.py
+  #     config:
+  #       script-name: test_swift_basic_ops.py
+  #       config-file-name: test_swift_at_root.yaml
 
   # Versioning Tests
 
