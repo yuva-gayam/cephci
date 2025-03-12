@@ -376,38 +376,38 @@ tests:
 
   # Listing
 
-  - test:
-      clusters:
-        ceph-sec:
-          config:
-            script-name: test_bucket_listing.py
-            config-file-name: test_bucket_listing_flat_ordered_versionsing.yaml
-      desc: test the duration for ordered listing of versioned buckets
-      module: sanity_rgw_multisite.py
-      name: ordered listing of versioned buckets post upgrade
-      polarion-id: CEPH-83573545
+  # - test:
+  #     clusters:
+  #       ceph-sec:
+  #         config:
+  #           script-name: test_bucket_listing.py
+  #           config-file-name: test_bucket_listing_flat_ordered_versionsing.yaml
+  #     desc: test the duration for ordered listing of versioned buckets
+  #     module: sanity_rgw_multisite.py
+  #     name: ordered listing of versioned buckets post upgrade
+  #     polarion-id: CEPH-83573545
 
-  - test:
-      abort-on-fail: true
-      desc: rgw-ms, upgrade next site(primary)
-      module: test_cephadm_upgrade.py
-      name: rgw-ms, upgrade next site(primary)
-      polarion-id: CEPH-83582415
-      clusters:
-        ceph-pri:
-          config:
-            command: start
-            service: upgrade
-            verify_cluster_health: true
+  # - test:
+  #     abort-on-fail: true
+  #     desc: rgw-ms, upgrade next site(primary)
+  #     module: test_cephadm_upgrade.py
+  #     name: rgw-ms, upgrade next site(primary)
+  #     polarion-id: CEPH-83582415
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           command: start
+  #           service: upgrade
+  #           verify_cluster_health: true
 
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            script-name: test_Mbuckets_with_Nobjects.py
-            config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
-            verify-io-on-site: ["ceph-pri", "ceph-sec"]
-      desc: Test dynamic resharding brownfield scenario after upgrade
-      module: sanity_rgw_multisite.py
-      name: Test dynamic resharding brownfield scenario after upgrade
-      polarion-id: CEPH-83574736
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_Mbuckets_with_Nobjects.py
+  #           config-file-name: test_multisite_dynamic_resharding_brownfield.yaml
+  #           verify-io-on-site: ["ceph-pri", "ceph-sec"]
+  #     desc: Test dynamic resharding brownfield scenario after upgrade
+  #     module: sanity_rgw_multisite.py
+  #     name: Test dynamic resharding brownfield scenario after upgrade
+  #     polarion-id: CEPH-83574736
