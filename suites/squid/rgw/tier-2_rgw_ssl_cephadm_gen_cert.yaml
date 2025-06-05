@@ -201,7 +201,6 @@ tests:
     name: setup multisite
     polarion-id: CEPH-10362
 
-
   - test:
       abort-on-fail: true
       clusters:
