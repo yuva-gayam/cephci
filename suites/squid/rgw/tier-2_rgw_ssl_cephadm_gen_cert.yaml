@@ -7,7 +7,7 @@
 
 # conf: conf/squid/rgw/rgw_multisite.yaml
 # The deployment is evaluated by running IOs across the environments.
----
+
 tests:
 
   # Cluster deployment stage
