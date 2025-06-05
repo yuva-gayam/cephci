@@ -7,7 +7,7 @@
 
 # conf: conf/squid/rgw/rgw_multisite.yaml
 # The deployment is evaluated by running IOs across the environments.
-
+---
 tests:
 
   # Cluster deployment stage
@@ -152,54 +152,54 @@ tests:
       module: test_client.py
       name: configure client
 
-- test:
-    abort-on-fail: true
-    clusters:
-      ceph-pri:
-        config:
-          commands:
-            - "radosgw-admin realm create --rgw-realm india --default"
-            - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
-            - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
-            - "radosgw-admin period update --rgw-realm india --commit"
-            - "radosgw-admin user create --uid=repuser --display_name='Replication user' --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --rgw-realm india --system"
-            - "radosgw-admin zone modify --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-            - "radosgw-admin period update --rgw-realm india --commit"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
-            - "ceph config set client.rgw rgw_verify_ssl False"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
-            - "ceph orch restart {service_name:shared.pri}"
-            - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
-            - "sudo yum install -y sshpass"
-            - "sleep 20"
-            - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node5}:/etc/pki/ca-trust/source/anchors/"
-            - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node6}:/etc/pki/ca-trust/source/anchors/"
-      ceph-sec:
-        config:
-          commands:
-            - "sudo update-ca-trust"
-            - "ceph config set client.rgw rgw_verify_ssl False"
-            - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-            - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-            - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-            - "radosgw-admin period update --rgw-realm india --commit"
-            - "ceph config set client.rgw rgw_verify_ssl False"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_verify_ssl False"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
-            - "ceph orch restart {service_name:shared.sec}"
-            - "sudo yum install -y sshpass"
-            - "sleep 120"
-            - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
-            - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node5}:/etc/pki/ca-trust/source/anchors/"
-            - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node6}:/etc/pki/ca-trust/source/anchors/"
-    desc: Setting up RGW multisite replication environment
-    module: exec.py
-    name: setup multisite
-    polarion-id: CEPH-10362
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            commands:
+              - "radosgw-admin realm create --rgw-realm india --default"
+              - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
+              - "radosgw-admin period update --rgw-realm india --commit"
+              - "radosgw-admin user create --uid=repuser --display_name='Replication user' --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --rgw-realm india --system"
+              - "radosgw-admin zone modify --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin period update --rgw-realm india --commit"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
+              - "ceph config set client.rgw rgw_verify_ssl False"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
+              - "ceph orch restart {service_name:shared.pri}"
+              - "ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt"
+              - "sudo yum install -y sshpass"
+              - "sleep 20"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node5}:/etc/pki/ca-trust/source/anchors/"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node6}:/etc/pki/ca-trust/source/anchors/"
+        ceph-sec:
+          config:
+            commands:
+              - "sudo update-ca-trust"
+              - "ceph config set client.rgw rgw_verify_ssl False"
+              - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
+              - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin period update --rgw-realm india --commit"
+              - "ceph config set client.rgw rgw_verify_ssl False"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_verify_ssl False"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
+              - "ceph orch restart {service_name:shared.sec}"
+              - "sudo yum install -y sshpass"
+              - "sleep 120"
+              - "ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node5}:/etc/pki/ca-trust/source/anchors/"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node6}:/etc/pki/ca-trust/source/anchors/"
+      desc: Setting up RGW multisite replication environment
+      module: exec.py
+      name: setup multisite
+      polarion-id: CEPH-10362
 
   - test:
       abort-on-fail: true
