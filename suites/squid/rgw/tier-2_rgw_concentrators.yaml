@@ -1,3 +1,11 @@
+# Test suite for evaluating RGW ssl-multi-site upgrade scenario.
+#
+# This suite deploys a single realm (India) spanning across two RHCS clusters. It has a
+# zonegroup (shared) which also spans across the clusters. There exists a master (pri)
+# and secondary (sec) zones within this group. The master zone is part of the pri
+# cluster whereas the sec zone is part of the sec datacenter (cluster).
+
+# conf : conf/squid/rgw/rgw_multisite.yaml
 tests:
   - test:
       abort-on-fail: true
