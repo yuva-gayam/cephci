@@ -62,11 +62,13 @@ tests:
         install_packages:
           - ceph-common
         copy_admin_keyring: true
+        git_clone: true
+        git_node_role: client
       desc: Configure the RGW client system
+      polarion-id: CEPH-83573758
       destroy-cluster: false
       module: test_client.py
       name: configure client
-
   # - test:
   #   name: Test RGW Concentrator Frontend
   #   module: concentrator.py
