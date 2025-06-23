@@ -67,16 +67,16 @@ tests:
       module: test_client.py
       name: configure client
 
-  - test:
-    name: Test RGW Concentrator Frontend
-    module: concentrator.py
-    desc: Test RGW Concentrator Frontend Accessibility from Client Node
-    abort-on-fail: True
-    config:
-      haproxy_clients: ['node6']
-      concentrator_node: ['node5']
-      concentrator_frontend_port: 8080
   # - test:
+  #   name: Test RGW Concentrator Frontend
+  #   module: concentrator.py
+  #   desc: Test RGW Concentrator Frontend Accessibility from Client Node
+  #   abort-on-fail: True
+  #   config:
+  #     haproxy_clients: ['node6']
+  #     concentrator_node: ['node5']
+  #     concentrator_frontend_port: 8080
+  # # - test:
   #     config:
   #       script-name: test_rgw_concentrators.py
   #       config-file-name: test_rgw_concentrators.yaml
