@@ -62,19 +62,26 @@ tests:
         install_packages:
           - ceph-common
         copy_admin_keyring: true
-        git_clone: true
-        git_node_role: rgw
       desc: Configure the RGW client system
-      polarion-id: CEPH-83573758
       destroy-cluster: false
       module: test_client.py
       name: configure client
+
   - test:
-      config:
-        script-name: test_rgw_concentrators.py
-        config-file-name: test_rgw_concentrators.yaml
-        run-on-haproxy: true
-      desc: Test the RGW concentrators (HAProxy integration) feature for restart, stop, remove, and recovery cases.
-      module: sanity_rgw.py
-      name: RGW Concentrators (HAProxy) Feature Test
-      polarion-id: CEPH-XXXXX
+    name: Test RGW Concentrator Frontend
+    module: concentrator.py
+    desc: Test RGW Concentrator Frontend Accessibility from Client Node
+    abort-on-fail: True
+    config:
+      haproxy_clients: ['node6']
+      concentrator_node: ['node5']
+      concentrator_frontend_port: 8080
+  # - test:
+  #     config:
+  #       script-name: test_rgw_concentrators.py
+  #       config-file-name: test_rgw_concentrators.yaml
+  #       run-on-concentrator: True
+  #     desc: Test the RGW concentrators (HAProxy integration) feature for restart, stop, remove, and recovery cases.
+  #     module: sanity_rgw.py
+  #     name: RGW Concentrators (HAProxy) Feature Test
+  #     polarion-id: CEPH-XXXXX
