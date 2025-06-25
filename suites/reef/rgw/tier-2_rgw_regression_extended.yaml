@@ -69,23 +69,12 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: configure client
-  - test:
-      abort-on-fail: true
-      config:
-        haproxy_clients:
-          - node6
-        rgw_endpoints:
-          - node5:80
-      desc: "Configure HAproxy"
-      module: haproxy.py
-      name: "Configure HAproxy"
 
   - test:
       name: Test BucketNotification with users in same tenant and different tenant
       desc: BucketNotification with users in same tenant and different tenant
       polarion-id: CEPH-11204
       module: sanity_rgw.py
-      comments: Known issue BZ-2358562 targeted to 7.1z4
       config:
         run-on-rgw: true
         extra-pkgs:
@@ -112,6 +101,17 @@ tests:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lc_incomplete_multipart.yaml
 
+  - test:
+      name: RGW Orphan Utility Validation
+      desc: Validates RGW object consistency using the rgw-orphan-list utility.
+      polarion-id: CEPH-83614243
+      module: sanity_rgw.py
+      config:
+        cephadm: true
+        install_common: false
+        script-name: test_rgw_orphan_list.py
+        config-file-name: test_rgw_orphan_list.yaml
+
   # Object lock no overwrite
   - test:
       name: object lock no overwrite
@@ -129,7 +129,6 @@ tests:
       config:
         script-name: ../s3cmd/test_s3cmd.py
         config-file-name: ../../s3cmd/configs/test_get_s3cmd.yaml
-        run-on-haproxy: true
 
   - test:
       name: Swift user with read access
@@ -255,6 +254,7 @@ tests:
       config:
         branch: ceph-reef
       desc: Run the external S3test suites.
+      comments: Known issue BZ-2312113 targeted to 7.1z4
       destroy-cluster: false
       module: test_s3.py
       name: execute s3tests
@@ -316,10 +316,12 @@ tests:
       name: Test Tags added during multipart upload are retrievable
       desc: Test Tags added during multipart upload are retrievable
       polarion-id: CEPH-83604857
+      comments: Known issue BZ-2336077 targeted to 7.1z4
       module: sanity_rgw.py
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_multipart_upload_with_tagging.yaml
+
 
   # test customer RFE: Public access block
 
@@ -365,21 +367,3 @@ tests:
         script-name: test_bucket_policy_ops.py
         config-file-name: test_public_access_block_restricted_public_buckets.yaml
       comments: known issue - Bug 2344730
-
-  - test:
-      name: test_bi_purge for a bucket
-      desc: test bi_purge should not error
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575234
-      config:
-        script-name: test_Mbuckets_with_Nobjects.py
-        config-file-name: test_bi_purge.yaml
-  - test:
-      name: Indexless buckets
-      desc: Indexless (blind) buckets
-      polarion-id: CEPH-10354 # also applies to CEPH-10357
-      module: sanity_rgw.py
-      config:
-        test-version: v2
-        script-name: test_indexless_buckets.py
-        config-file-name: test_indexless_buckets_s3.yaml
