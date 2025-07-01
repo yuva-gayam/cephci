@@ -50,7 +50,6 @@ import yaml
 from utility import utils
 from utility.log import Log
 from utility.utils import (
-    config_keystone_ldap,
     configure_kafka_security,
     install_start_kafka,
     setup_cluster_access,
@@ -88,7 +87,6 @@ def run(ceph_cluster, **kw):
     install_start_kafka_broker = config.get("install_start_kafka")
     configure_kafka_broker_security = config.get("configure_kafka_security")
     cloud_type = config.get("cloud-type")
-    log.info(f"Cloud Type is {cloud_type}")
     test_config = {"config": config.get("test-config", {})}
     rgw_node = rgw_ceph_object.node
     client_node = client_ceph_object.node
@@ -128,7 +126,7 @@ def run(ceph_cluster, **kw):
     log.info("Flushing iptables")
     exec_from.exec_command(cmd="sudo iptables -F", check_ec=False)
     config["git-url"] = config.get(
-        "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
+        "git-url", "https://github.com/yuva-gayam/ceph-qe-scripts.git"
     )
 
     test_folder = "rgw-tests"
@@ -160,9 +158,6 @@ def run(ceph_cluster, **kw):
         install_start_kafka(rgw_node, cloud_type)
     if configure_kafka_broker_security:
         configure_kafka_security(rgw_node, cloud_type)
-
-    if cloud_type:
-        config_keystone_ldap(rgw_node, cloud_type)
 
     out, err = exec_from.exec_command(cmd="ls -l venv", check_ec=False)
     if not out:
