@@ -201,7 +201,7 @@ tests:
           config:
             cephadm: true
             commands:
-              - "sleep 120"
+              - "sleep 180"
               - "radosgw-admin realm pull --rgw-realm india --url http://{node_ip:ceph-pri#node6}:5000 --access-key a123 --secret s123 --default"
               - "radosgw-admin period pull --url http://{node_ip:ceph-pri#node6}:5000 --access-key a123 --secret s123"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints http://{node_ip:node6}:5000 --access-key a123 --secret s123 "
