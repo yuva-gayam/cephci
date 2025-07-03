@@ -167,10 +167,7 @@ def enable_ports(node: CephNode, port: int = 5000) -> None:
     except CommandFailed:
         LOG.debug(f"Failed to list firewall ports on {node.shortname}. Trying to add port anyway.")
 
-    node.exec_command(
-        sudo=True,
-        cmd=f"firewall-cmd --zone public --permanent --add-port={port}/tcp"
-    )
+    node.exec_command(sudo=True, cmd="firewall-cmd --add-port={port}/tcp --permanent")
     node.exec_command(sudo=True, cmd="firewall-cmd --reload")
     LOG.info(f"Port {port}/tcp opened and firewall reloaded on {node.shortname}.")
 
