@@ -153,24 +153,22 @@ def enable_ports(node: CephNode, port: int = 5000) -> None:
     try:
         out, err = node.exec_command(sudo=True, cmd="firewall-cmd --state")
         if out.lower().strip() != "running":
-            LOG.debug(f"Firewall not running on {node.shortname}. Skipping port opening.")
+            LOG.debug("Firewall not running on %s. Skipping port opening.", node.shortname)
             return
     except CommandFailed:
-        LOG.debug(f"{node.shortname} has no firewall configuration.")
+        LOG.debug("%s has no firewall configuration.", node.shortname)
         return
 
     try:
         ports_out, _ = node.exec_command(sudo=True, cmd="firewall-cmd --list-ports")
         if f"{port}/tcp" in ports_out.split():
-            LOG.debug(f"Port {port}/tcp already open on {node.shortname}.")
+            LOG.debug("Port %s/tcp already open on %s.", port, node.shortname)
             return
     except CommandFailed:
-        LOG.debug(f"Failed to list firewall ports on {node.shortname}. Trying to add port anyway.")
-
-    node.exec_command(sudo=True, cmd="firewall-cmd --add-port={port}/tcp --permanent")
+        LOG.debug("Failed to list firewall ports on %s. Trying to add port anyway.", node.shortname)
+    node.exec_command(sudo=True, cmd=f"firewall-cmd --add-port={port}/tcp --permanent")
     node.exec_command(sudo=True, cmd="firewall-cmd --reload")
-    LOG.info(f"Port {port}/tcp opened and firewall reloaded on {node.shortname}.")
-
+    LOG.info("Port %s/tcp opened and firewall reloaded on %s.", port, node.shortname)
 
 def generate_endpoint_list(ceph_cluster: Ceph, endpoints):
     """Generates the list of endpoints.
