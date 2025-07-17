@@ -64,20 +64,17 @@ tests:
                     - service_type: rgw
                       service_id: shared.pri
                       service_name: rgw.shared.pri
-                      spec:
-                        generate_cert: true
-                        ssl: true
-                        rgw_exit_timeout_secs: 120
-                        rgw_frontend_port: 443
-                        rgw_frontend_type: beast
-                        rgw_realm: india
-                        rgw_zone: primary
-                        rgw_zonegroup: shared
-                        zonegroup_hostnames:
-                          - s3.example.com
                       placement:
                         nodes:
                           - node5
+                      spec:
+                        generate_cert: true
+                        rgw_exit_timeout_secs: 120
+                        rgw_frontend_port: 443
+                        rgw_frontend_type: beast
+                        ssl: true
+                        zonegroup_hostnames:
+                          - s3.example.com
         ceph-sec:
           config:
             verify_cluster_health: true
@@ -127,9 +124,6 @@ tests:
                         rgw_exit_timeout_secs: 120
                         rgw_frontend_port: 443
                         rgw_frontend_type: beast
-                        rgw_realm: india
-                        rgw_zonegroup: shared
-                        rgw_zone: secondary
                         zonegroup_hostnames:
                           - s3.example.com
                       placement:
@@ -165,6 +159,59 @@ tests:
       destroy-cluster: false
       module: test_client.py
       name: configure client
+  # - test:
+  #     abort-on-fail: true
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           commands:
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch restart rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.pri"
+  #             - "sleep 120"
+  #       ceph-sec:
+  #         config:
+  #           commands:
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch restart rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #             - "ceph orch ps | grep rgw.shared.sec"
+  #             - "sleep 120"
+  #     desc: checking rgw service status
+  #     module: exec.py
+  #     name: checking rgw service status
+  #     polarion-id: CEPH-10362
 
   - test:
       abort-on-fail: true
@@ -172,7 +219,7 @@ tests:
         ceph-pri:
           config:
             commands:
-              - "ceph orch ps | grep rgw.shared.pri "
+              - "ceph orch ps | grep rgw.shared.sec"
               - "radosgw-admin realm create --rgw-realm india --default"
               - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
@@ -183,8 +230,8 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
-              - "ceph config set client.rgw rgw_verify_ssl False"
-              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
+              - "ceph config set client.rgw rgw_verify_ssl true"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl true"
               - "ceph orch restart {service_name:shared.pri}"
               - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
               - "sudo yum install -y sshpass"
@@ -289,7 +336,7 @@ tests:
   #     module: exec.py
   #     name: get shared realm info on secondary
 
-  # Test work flow
+  # # Test work flow
 
   # - test:
   #     clusters:
