@@ -63,12 +63,16 @@ tests:
                   specs:
                     - service_type: rgw
                       service_id: shared.pri
+                      service_name: rgw.shared.pri
                       spec:
                         generate_cert: true
                         ssl: true
                         rgw_exit_timeout_secs: 120
                         rgw_frontend_port: 443
                         rgw_frontend_type: beast
+                        rgw_realm: india
+                        rgw_zone: primary
+                        rgw_zonegroup: shared
                         zonegroup_hostnames:
                           - s3.example.com
                       placement:
@@ -116,12 +120,16 @@ tests:
                   specs:
                     - service_type: rgw
                       service_id: shared.sec
+                      service_name: rgw.shared.sec
                       spec:
                         generate_cert: true
                         ssl: true
                         rgw_exit_timeout_secs: 120
                         rgw_frontend_port: 443
                         rgw_frontend_type: beast
+                        rgw_realm: india
+                        rgw_zonegroup: shared
+                        rgw_zone: secondary
                         zonegroup_hostnames:
                           - s3.example.com
                       placement:
@@ -164,6 +172,7 @@ tests:
         ceph-pri:
           config:
             commands:
+              - "ceph orch ps | grep rgw.shared.pri "
               - "radosgw-admin realm create --rgw-realm india --default"
               - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
@@ -185,6 +194,7 @@ tests:
         ceph-sec:
           config:
             commands:
+              - "ceph orch ps | grep rgw.shared.sec"
               - "sudo update-ca-trust"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
