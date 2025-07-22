@@ -110,7 +110,7 @@ tests:
                       spec:
                         ssl: true
                         rgw_frontend_ssl_certificate: create-cert
-   - test:
+  - test:
       clusters:
         ceph-pri:
           config:
