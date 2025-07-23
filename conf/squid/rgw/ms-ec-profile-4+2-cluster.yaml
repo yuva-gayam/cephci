@@ -5,14 +5,11 @@ globals:
       name: ceph-pri
 
       node1:
-        disk-size: 20
-        no-of-volumes: 4
         role:
           - _admin
           - installer
           - mgr
           - mon
-          - osd
 
       node2:
         disk-size: 20
@@ -39,14 +36,11 @@ globals:
       name: ceph-sec
 
       node1:
-        disk-size: 20
-        no-of-volumes: 4
         role:
           - _admin
           - installer
           - mgr
           - mon
-          - osd
 
       node2:
         disk-size: 20
