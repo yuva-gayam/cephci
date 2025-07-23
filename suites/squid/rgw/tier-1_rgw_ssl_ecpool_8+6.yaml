@@ -106,7 +106,7 @@ tests:
                       service_id: shared.sec
                       placement:
                         nodes:
-                          - node7
+                          - node3
                       spec:
                         ssl: true
                         rgw_frontend_ssl_certificate: create-cert
