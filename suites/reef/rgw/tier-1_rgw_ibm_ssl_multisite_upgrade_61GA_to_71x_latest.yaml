@@ -240,8 +240,7 @@ tests:
             commands:
               - "timedatectl status"
               - "sleep 120"
-              - "ceph orch ps | grep rgw
-              - "ceph orch ps | grep rgw | grep {node_ip:node5}"
+              - "ceph orch ps | grep rgw"
               - "echo 'Attempting curl to primary endpoint with HTTP'"
               - "curl -s -o /dev/null -w '%{http_code}\n' http://{node_ip:ceph-pri#node5}:80"
               - "echo 'Attempting curl to primary endpoint with HTTPS, ignoring SSL validation'"
