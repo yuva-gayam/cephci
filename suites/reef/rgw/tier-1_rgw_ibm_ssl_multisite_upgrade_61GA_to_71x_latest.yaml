@@ -208,60 +208,59 @@ tests:
       module: test_client.py
       name: configure client
       polarion-id: CEPH-83573758
-
- - test:
-    abort-on-fail: true
-    clusters:
-      ceph-pri:
-        config:
-          cephadm: true
-          commands:
-            - "ceph orch ps | grep rgw"
-            - "radosgw-admin realm create --rgw-realm india --default"
-            - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
-            - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
-            - "radosgw-admin period update --rgw-realm india --commit"
-            - "ceph orch ps | grep rgw"
-            - "radosgw-admin user create --uid=repuser --display_name='Replication user' --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --rgw-realm india --system"
-            - "radosgw-admin zone modify --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-            - "radosgw-admin period update --rgw-realm india --commit"
-            - "ceph orch ps | grep rgw"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
-            - "ceph config set client.rgw rgw_verify_ssl False"
-            - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
-            - "ceph orch restart {service_name:shared.pri}"
-            - "sleep 120"
-            - "ceph orch ps | grep rgw"
-            - "timedatectl status"
-      ceph-sec:
-        config:
-          commands:
-            - "timedatectl status"
-            - "sleep 120"
-            - "ceph orch ps | grep rgw
-            - "ceph orch ps | grep rgw | grep {node_ip:node5}"
-            - "echo 'Attempting curl to primary endpoint with HTTP'"
-            - "curl -s -o /dev/null -w '%{http_code}\n' http://{node_ip:ceph-pri#node5}:80"
-            - "echo 'Attempting curl to primary endpoint with HTTPS, ignoring SSL validation'"
-            - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
-            - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation'; if curl --verbose --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable and SSL is valid.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
-            - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-            - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-            - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-            - "radosgw-admin period update --rgw-realm india --commit"
-            - "ceph config set client.rgw rgw_verify_ssl False"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_verify_ssl False"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
-            - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
-            - "ceph orch restart {service_name:shared.sec}"
-            - "sleep 120"
-    desc: Setting up RGW multisite replication environment
-    module: exec.py
-    name: setup multisite
-    polarion-id: CEPH-10362
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            cephadm: true
+            commands:
+              - "ceph orch ps | grep rgw"
+              - "radosgw-admin realm create --rgw-realm india --default"
+              - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
+              - "radosgw-admin period update --rgw-realm india --commit"
+              - "ceph orch ps | grep rgw"
+              - "radosgw-admin user create --uid=repuser --display_name='Replication user' --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --rgw-realm india --system"
+              - "radosgw-admin zone modify --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin period update --rgw-realm india --commit"
+              - "ceph orch ps | grep rgw"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
+              - "ceph config set client.rgw rgw_verify_ssl False"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
+              - "ceph orch restart {service_name:shared.pri}"
+              - "sleep 120"
+              - "ceph orch ps | grep rgw"
+              - "timedatectl status"
+        ceph-sec:
+          config:
+            commands:
+              - "timedatectl status"
+              - "sleep 120"
+              - "ceph orch ps | grep rgw
+              - "ceph orch ps | grep rgw | grep {node_ip:node5}"
+              - "echo 'Attempting curl to primary endpoint with HTTP'"
+              - "curl -s -o /dev/null -w '%{http_code}\n' http://{node_ip:ceph-pri#node5}:80"
+              - "echo 'Attempting curl to primary endpoint with HTTPS, ignoring SSL validation'"
+              - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
+              - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation'; if curl --verbose --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable and SSL is valid.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
+              - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
+              - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin period update --rgw-realm india --commit"
+              - "ceph config set client.rgw rgw_verify_ssl False"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_verify_ssl False"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
+              - "ceph orch restart {service_name:shared.sec}"
+              - "sleep 120"
+      desc: Setting up RGW multisite replication environment
+      module: exec.py
+      name: setup multisite
+      polarion-id: CEPH-10362
 
   - test:
       abort-on-fail: true
