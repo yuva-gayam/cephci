@@ -246,6 +246,7 @@ tests:
             cephadm: true
             commands:
               - "sleep 120"
+              - "for i in {1..12}; do curl -s -o /dev/null -w '%{http_code}\\n' http://{node_ip:ceph-pri#node5}:80; sleep 5; done"
               - "radosgw-admin realm pull --rgw-realm india --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
               - "radosgw-admin period pull --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints http://{node_ip:node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
