@@ -208,7 +208,25 @@ tests:
       module: test_client.py
       name: configure client
       polarion-id: CEPH-83573758
-
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            cephadm: false
+            role: client
+            commands:
+              - "timedatectl status"
+        ceph-sec:
+          config:
+            cephadm: false
+            role: client
+            commands:
+              - "timedatectl status"
+      desc: checking if both clusters are in same time and zone
+      module: exec.py
+      name: checking if both clusters are in same time and zone
+      polarion-id: CEPH-10362
   - test:
       abort-on-fail: true
       clusters:
@@ -234,11 +252,9 @@ tests:
               - "ceph orch restart {service_name:shared.pri}"
               - "sleep 120"
               - "ceph orch ps | grep rgw"
-              - "timedatectl status"
         ceph-sec:
           config:
             commands:
-              - "timedatectl status"
               - "sleep 120"
               - "ceph orch ps | grep rgw"
               - "echo 'Attempting curl to primary endpoint with HTTP'"
