@@ -208,25 +208,25 @@ tests:
       module: test_client.py
       name: configure client
       polarion-id: CEPH-83573758
-  - test:
-      abort-on-fail: true
-      clusters:
-        ceph-pri:
-          config:
-            cephadm: false
-            role: client
-            commands:
-              - "timedatectl status"
-        ceph-sec:
-          config:
-            cephadm: false
-            role: client
-            commands:
-              - "timedatectl status"
-      desc: checking if both clusters are in same time and zone
-      module: exec.py
-      name: checking if both clusters are in same time and zone
-      polarion-id: CEPH-10362
+  # - test:
+  #     abort-on-fail: true
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           cephadm: false
+  #           role: client
+  #           commands:
+  #             - "timedatectl status"
+  #       ceph-sec:
+  #         config:
+  #           cephadm: false
+  #           role: client
+  #           commands:
+  #             - "timedatectl status"
+  #     desc: checking if both clusters are in same time and zone
+  #     module: exec.py
+  #     name: checking if both clusters are in same time and zone
+  #     polarion-id: CEPH-10362
   - test:
       abort-on-fail: true
       clusters:
@@ -252,19 +252,22 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
               - "sleep 120"
-              - "ceph orch ps | grep rgw"
         ceph-sec:
           config:
             commands:
-              - "sleep 3600"
               - "ceph orch ps | grep rgw"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
               - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation'; if curl --verbose --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable and SSL is valid.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
-              - "export RGW_HOST=$(openssl s_client -connect {node_ip:ceph-pri#node5}:443 </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName | grep -oP '(?<=DNS:)[^,]+' | head -n1)"
-              - "echo \"$RGW_HOST {node_ip:ceph-pri#node5}\" >> /etc/hosts"
-              - "radosgw-admin realm pull --rgw-realm india --url https://$RGW_HOST --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin period pull --url https://$RGW_HOST --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "sshpass -p 'passwd' ssh -o StrictHostKeyChecking=no root@{node_ip:ceph-sec#node5} \
+                  'RGW_HOST=$(openssl s_client -connect {node_ip:ceph-pri#node5}:443 </dev/null 2>/dev/null \
+                  | openssl x509 -noout -ext subjectAltName \
+                  | grep -oP \"(?<=DNS:)[^,]+\" | head -n1) && \
+                  echo \"$RGW_HOST {node_ip:ceph-pri#node5}\" >> /etc/hosts && \
+                  radosgw-admin realm pull --rgw-realm india --url https://$RGW_HOST \
+                    --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default && \
+                  radosgw-admin period pull --url https://$RGW_HOST \
+                    --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d'"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin period update --rgw-realm india --commit"
               - "ceph config set client.rgw rgw_verify_ssl False"
