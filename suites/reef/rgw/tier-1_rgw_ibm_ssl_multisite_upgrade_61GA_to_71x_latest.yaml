@@ -256,7 +256,7 @@ tests:
         ceph-sec:
           config:
             commands:
-              - "sleep 120"
+              - "sleep 3600"
               - "ceph orch ps | grep rgw"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
