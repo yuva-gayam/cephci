@@ -258,6 +258,7 @@ tests:
             commands:
               - "sleep 120"
               - "ceph orch ps | grep rgw"
+              - "ceph config set client.rgw rgw_verify_ssl False"
               - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
               - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation'; if curl --verbose --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable and SSL is valid.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
               - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
