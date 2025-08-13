@@ -235,6 +235,7 @@ tests:
             cephadm: true
             commands:
               - "ceph orch ps | grep rgw"
+              - "ceph config set client.rgw rgw_verify_ssl False"
               - "radosgw-admin realm create --rgw-realm india --default"
               - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
