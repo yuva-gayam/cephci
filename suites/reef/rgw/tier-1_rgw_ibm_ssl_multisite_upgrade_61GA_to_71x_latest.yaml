@@ -250,7 +250,7 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
-              - "ceph orch restart {service_name:shared.pri}"\
+              - "ceph orch restart {service_name:shared.pri}"
         ceph-sec:
           config:
             commands:
