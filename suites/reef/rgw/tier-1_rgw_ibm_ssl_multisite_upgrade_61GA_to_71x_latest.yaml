@@ -250,11 +250,11 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
-              - "ceph orch restart {service_name:shared.pri}"
-              - "sleep 120"
+              - "ceph orch restart {service_name:shared.pri}"\
         ceph-sec:
           config:
             commands:
+              - "sleep 6200"
               - "ceph orch ps | grep rgw"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
