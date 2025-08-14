@@ -56,17 +56,14 @@ tests:
                   args:
                     all-available-devices: true
               - config:
-                  command: apply_spec
-                  service: orch
-                  specs:
-                    - service_type: rgw
-                      service_id: shared.pri
-                      placement:
-                        nodes:
-                          - node5
-                      spec:
-                        ssl: true
-                        rgw_frontend_ssl_certificate: create-cert
+                  command: apply
+                  service: rgw
+                  pos_args:
+                    - shared.pri
+                  args:
+                    placement:
+                      nodes:
+                        - node5
         ceph-sec:
           config:
             verify_cluster_health: true
@@ -106,17 +103,14 @@ tests:
                   args:
                     all-available-devices: true
               - config:
-                  command: apply_spec
-                  service: orch
-                  specs:
-                    - service_type: rgw
-                      service_id: shared.sec
-                      placement:
-                        nodes:
-                          - node5
-                      spec:
-                        ssl: true
-                        rgw_frontend_ssl_certificate: create-cert
+                  command: apply
+                  service: rgw
+                  pos_args:
+                    - shared.sec
+                  args:
+                    placement:
+                      nodes:
+                        - node5
       desc: RHCS-ssl multisite cluster deployment using cephadm.
       polarion-id: CEPH-83575222
       destroy-cluster: false
@@ -234,54 +228,34 @@ tests:
           config:
             cephadm: true
             commands:
-              - "ceph orch ps | grep rgw"
-              - "ceph config set client.rgw rgw_verify_ssl False"
               - "radosgw-admin realm create --rgw-realm india --default"
-              - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
-              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
+              - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints http://{node_ip:node5}:80 --master --default"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints http://{node_ip:node5}:80 --master --default"
               - "radosgw-admin period update --rgw-realm india --commit"
-              - "ceph orch ps | grep rgw"
               - "radosgw-admin user create --uid=repuser --display_name='Replication user' --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --rgw-realm india --system"
               - "radosgw-admin zone modify --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin period update --rgw-realm india --commit"
-              - "ceph orch ps | grep rgw"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
-              - "ceph config set client.rgw rgw_verify_ssl False"
-              - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
         ceph-sec:
           config:
+            cephadm: true
             commands:
-              - "sleep 6200"
-              - "ceph orch ps | grep rgw"
-              - "ceph config set client.rgw rgw_verify_ssl False"
-              - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation bypassed'; if curl --verbose --insecure --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable with SSL bypassed.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
-              - "for i in {1..5}; do echo 'Attempt $i: Checking endpoint https://{node_ip:ceph-pri#node5} with SSL validation'; if curl --verbose --fail https://{node_ip:ceph-pri#node5}; then echo 'Endpoint is reachable and SSL is valid.'; break; else echo 'Attempt $i failed. Retrying in 12 seconds...'; sleep 12; fi; done"
-              - "sshpass -p 'passwd' ssh -o StrictHostKeyChecking=no root@{node_ip:ceph-sec#node5} \
-                  'RGW_HOST=$(openssl s_client -connect {node_ip:ceph-pri#node5}:443 </dev/null 2>/dev/null \
-                  | openssl x509 -noout -ext subjectAltName \
-                  | grep -oP \"(?<=DNS:)[^,]+\" | head -n1) && \
-                  echo \"$RGW_HOST {node_ip:ceph-pri#node5}\" >> /etc/hosts && \
-                  radosgw-admin realm pull --rgw-realm india --url https://$RGW_HOST \
-                    --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default && \
-                  radosgw-admin period pull --url https://$RGW_HOST \
-                    --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d'"
-              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "sleep 120"
+              - "radosgw-admin realm pull --rgw-realm india --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
+              - "radosgw-admin period pull --url http://{node_ip:ceph-pri#node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints http://{node_ip:node5}:80 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin period update --rgw-realm india --commit"
-              - "ceph config set client.rgw rgw_verify_ssl False"
-              - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
               - "ceph orch restart {service_name:shared.sec}"
-              - "sleep 120"
       desc: Setting up RGW multisite replication environment
       module: exec.py
       name: setup multisite
       polarion-id: CEPH-10362
-
 
   - test:
       abort-on-fail: true
