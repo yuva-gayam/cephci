@@ -1,4 +1,3 @@
-# tests/misc_env/install_vault.py
 """
 This module installs and configures HashiCorp's Vault on the given node.
 
