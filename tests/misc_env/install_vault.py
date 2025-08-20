@@ -101,9 +101,6 @@ def run(ceph_cluster: Ceph, config: Dict, **kwargs) -> int:
     """
     if "agent" not in config.get("install", []):
         return 0
-    import pdb
-
-    pdb.set_trace()
     cephci_cfg = get_cephci_config()
     vault_cfg = cephci_cfg.get("vault", {})
 
