@@ -1,3 +1,4 @@
+tests/misc_env/install_vault.py
 """
 This module installs and configures HashiCorp's Vault on the given node.
 
@@ -153,9 +154,7 @@ def _install_agent(cluster: Ceph, config: Dict, *, cloud_type: str) -> None:
     """
     rgw_nodes = cluster.get_nodes(role="rgw")
     for node in rgw_nodes:
-        LOG.debug(
-            f"{node.shortname}: Installing and configuring Vault agent (cloud_type={cloud_type})"
-        )
+        LOG.debug(f"{node.shortname}: Installing and configuring Vault agent (cloud_type={cloud_type})")
         _install_vault_packages(node, cloud_type=cloud_type)
         _create_agent_config(node, config)
         _create_agent_systemd(node)
@@ -168,9 +167,7 @@ def _install_vault_packages(node: CephNode, *, cloud_type: str) -> None:
     """
     try:
         if cloud_type == "ibmc":
-            LOG.debug(
-                f"{node.shortname}: Using HashiCorp official repo for IBM-Ceph (cloud_type=ibmc)"
-            )
+            LOG.debug(f"{node.shortname}: Using HashiCorp official repo for IBM-Ceph (cloud_type=ibmc)")
             repo_cmd = r"""
 cat <<'EOF' | sudo tee /etc/yum.repos.d/hashicorp.repo
 [hashicorp]
@@ -191,9 +188,7 @@ EOF
             node.exec_command(sudo=True, cmd=repo_cmd, check_ec=False)
 
         elif cloud_type == "openstack":
-            LOG.debug(
-                f"{node.shortname}: Using enterprise-internal repo for RH-Ceph/OpenStack (cloud_type=openstack)"
-            )
+            LOG.debug(f"{node.shortname}: Using enterprise-internal repo for RH-Ceph/OpenStack (cloud_type=openstack)")
             wget_cmd = (
                 "curl -fsSL -o /etc/yum.repos.d/hashicorp.repo "
                 "http://magna002.ceph.redhat.com/cephci-jenkins/hashicorp.repo"
@@ -202,9 +197,7 @@ EOF
 
         else:
             # Fallback: default to HashiCorp official repo if an unknown cloud_type is given
-            LOG.warning(
-                f"{node.shortname}: Unknown cloud_type='{cloud_type}', defaulting to HashiCorp official repo"
-            )
+            LOG.warning(f"{node.shortname}: Unknown cloud_type='{cloud_type}', defaulting to HashiCorp official repo")
             repo_cmd = r"""
 cat <<'EOF' | sudo tee /etc/yum.repos.d/hashicorp.repo
 [hashicorp]
