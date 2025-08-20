@@ -101,14 +101,16 @@ def run(ceph_cluster: Ceph, config: Dict, **kwargs) -> int:
     """
     if "agent" not in config.get("install", []):
         return 0
-    import pdb; pdb.set_trace()
+    import pdb
+
+    pdb.set_trace()
     cephci_cfg = get_cephci_config()
     vault_cfg = cephci_cfg.get("vault", {})
 
     # Determine the cloud type explicitly or default to 'openstack'
     cloud_type = config.get("cloud-type")
-    #cloud_type = config.get("cloud_type", "openstack").lower()
-    
+    # cloud_type = config.get("cloud_type", "openstack").lower()
+
     LOG.info(f"Selected cloud_type='{cloud_type}' for Vault configuration")
 
     if cloud_type not in vault_cfg:
@@ -155,7 +157,9 @@ def _install_agent(cluster: Ceph, config: Dict, *, cloud_type: str) -> None:
     """
     rgw_nodes = cluster.get_nodes(role="rgw")
     for node in rgw_nodes:
-        LOG.info(f"{node.shortname}: Installing and configuring Vault agent (cloud_type={cloud_type})")
+        LOG.info(
+            f"{node.shortname}: Installing and configuring Vault agent (cloud_type={cloud_type})"
+        )
         _install_vault_packages(node, cloud_type=cloud_type)
         _create_agent_config(node, config)
         _create_agent_systemd(node)
@@ -168,7 +172,9 @@ def _install_vault_packages(node: CephNode, *, cloud_type: str) -> None:
     """
     try:
         if cloud_type == "ibmc":
-            LOG.info(f"{node.shortname}: Using HashiCorp official repo for IBM-Ceph (cloud_type=ibmc)")
+            LOG.info(
+                f"{node.shortname}: Using HashiCorp official repo for IBM-Ceph (cloud_type=ibmc)"
+            )
             repo_cmd = r"""
 cat <<'EOF' | sudo tee /etc/yum.repos.d/hashicorp.repo
 [hashicorp]
@@ -189,7 +195,9 @@ EOF
             node.exec_command(sudo=True, cmd=repo_cmd, check_ec=False)
 
         elif cloud_type == "openstack":
-            LOG.debug(f"{node.shortname}: Using enterprise-internal repo for RH-Ceph/OpenStack (cloud_type=openstack)")
+            LOG.debug(
+                f"{node.shortname}: Using enterprise-internal repo for RH-Ceph/OpenStack (cloud_type=openstack)"
+            )
             wget_cmd = (
                 "curl -fsSL -o /etc/yum.repos.d/hashicorp.repo "
                 "http://magna002.ceph.redhat.com/cephci-jenkins/hashicorp.repo"
@@ -198,7 +206,9 @@ EOF
 
         else:
             # Fallback: default to HashiCorp official repo if an unknown cloud_type is given
-            LOG.warning(f"{node.shortname}: Unknown cloud_type='{cloud_type}', defaulting to HashiCorp official repo")
+            LOG.warning(
+                f"{node.shortname}: Unknown cloud_type='{cloud_type}', defaulting to HashiCorp official repo"
+            )
             repo_cmd = r"""
 cat <<'EOF' | sudo tee /etc/yum.repos.d/hashicorp.repo
 [hashicorp]
