@@ -459,3 +459,13 @@ tests:
           config:
             script-name: test_bucket_request_payer.py
             config-file-name: test_bucket_request_payer.yaml
+  - test:
+      name: bucket request payer2
+      desc: Basic test for bucket request payer2
+      polarion-id: CEPH-10352
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_bucket_request_payer22.py
+            config-file-name: test_bucket_request_payer2.yaml
