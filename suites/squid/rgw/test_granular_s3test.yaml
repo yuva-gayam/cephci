@@ -181,3 +181,16 @@ tests:
       module: test_s3.py
       name: execute s3tests suites test sns
       polarion-id: CEPH-83575225 #CEPH-83591682 #CEPH-83591676
+- test:
+      abort-on-fail: false
+      config:
+        branch: ceph-squid
+        execute_granular: true
+        path: test_sns
+        skip_setup : true
+        skip_teardown : false
+      desc: Run the Granular external S3test suites test sns2
+      destroy-cluster: false
+      module: test_s3.py
+      name: execute s3tests suites test sns2
+      polarion-id: CEPH-83575225 #CEPH-83591682 #CEPH-83591676
