@@ -427,3 +427,12 @@ tests:
       module: sanity_rgw_multisite.py
       name: Manual Resharding tests on Primary cluster
       polarion-id: CEPH-83574734
+
+  - test:
+      config:
+        script-name: test_sse_s3_kms_with_vault.py
+        config-file-name: test_sse_s3_per_object.yaml
+      desc: test_sse_s3_per_object_encryption
+      module: sanity_rgw.py
+      name: sse-s3 per object encryption test on a regular bucket
+      polarion-id: CEPH-83574040
