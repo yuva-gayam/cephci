@@ -162,3 +162,11 @@ tests:
       config:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lc_disable_object_exp.yaml
+  - test:
+      name: Enable lifecycle and disable it on a bucket before objects expires
+      desc: Enable lifecycle and disable it on a bucket before the objects get expired
+      polarion-id: CEPH-11196
+      module: sanity_rgw.py
+      config:
+        script-name: test_bucket_lifecycle_config_ops.py
+        config-file-name: test_bucket_lc_disable_object_exp.yaml
