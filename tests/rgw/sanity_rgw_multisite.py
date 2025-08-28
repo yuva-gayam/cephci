@@ -96,7 +96,7 @@ def run(**kw):
     config["git-url"] = config.get(
         "git-url", "https://github.com/red-hat-storage/ceph-qe-scripts.git"
     )
-    test_data = kw.get("test_data")
+    test_data = kw.get("test_data", {})
     custom_config = test_data.get("custom-config", {})
 
     set_env = config.get("set-env", False)
