@@ -1,0 +1,79 @@
+globals:
+  - ceph-cluster:
+      name: ceph
+      networks:
+        public: ['10.8.128.0/21']
+      nodes:
+        - hostname: folio22.ceph.redhat.com
+          ip: 10.8.128.138
+          id: node1
+          root_password: passwd
+          role:
+            - osd
+            - mon
+            - mgr
+            - node-exporter
+            - alertmanager
+            - crash
+            - rgw
+          volumes:
+            - /dev/nvme0n1
+            - /dev/nvme1n1
+            - /dev/nvme2n1
+            - /dev/nvme3n1
+            - /dev/nvme4n1
+            - /dev/nvme5n1
+            - /dev/nvme6n1
+        - hostname: folio23.ceph.redhat.com
+          ip: 10.8.128.139
+          id: node2
+          root_password: passwd
+          role:
+            - mon
+            - osd
+            - node-exporter
+            - crash
+            - rgw            
+            - alertmanager
+            - crash
+          volumes:
+            - /dev/nvme0n1
+            - /dev/nvme1n1
+            - /dev/nvme2n1
+            - /dev/nvme3n1
+            - /dev/nvme4n1
+            - /dev/nvme5n1
+            - /dev/nvme7n1
+        - hostname: folio24.ceph.redhat.com
+          ip: 10.8.128.140
+          id: node7
+          root_password: passwd
+          role:
+           - mon
+           - mgr
+           - osd
+           - node-exporter
+           - rgw
+           - crash
+          volumes:
+            - /dev/nvme0n1
+            - /dev/nvme1n1
+            - /dev/nvme2n1
+            - /dev/nvme3n1
+            - /dev/nvme4n1
+            - /dev/nvme5n1
+            - /dev/nvme7n1
+        - hostname: folio15.ceph.redhat.com
+          ip: 10.8.128.131
+          root_password: passwd
+          role:
+            - osd
+            - client 
+          volumes:
+            - /dev/nvme0n1
+            - /dev/nvme1n1
+            - /dev/nvme2n1
+            - /dev/nvme3n1
+            - /dev/nvme4n1
+            - /dev/nvme5n1
+            - /dev/nvme6n1
