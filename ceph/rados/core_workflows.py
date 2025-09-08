@@ -17,6 +17,7 @@ import re
 import time
 from collections import namedtuple
 
+from ceph.ceph import CommandFailed
 from ceph.ceph_admin import CephAdmin
 from ceph.parallel import parallel
 from ceph.rados import utils as osd_utils
@@ -2594,12 +2595,15 @@ class RadosOrchestrator:
 
         return pgid_list
 
-    def run_pool_sanity_check(self):
+    def run_pool_sanity_check(self, ignore_list=[]):
         """
         Runs sanity on the pools after triggering scrub and deep-scrub on pools, waiting 600 Secs
 
         This method is used to assess the health of Pools after any operation, where in a scrub and deep scrub is
         triggered, and the method scans the cluster for few health warnings, if generated
+
+        Args:
+            ignore_list : List of warnings that are to be ignored
 
         Returns: True-> Pass,  false -> Fail
         """
@@ -2612,7 +2616,7 @@ class RadosOrchestrator:
         while end_time > datetime.datetime.now():
             status_report = self.run_ceph_command(cmd="ceph report", client_exec=True)
             ceph_health_status = status_report["health"]
-            health_warns = (
+            health_warns = [
                 "PG_AVAILABILITY",
                 "PG_DEGRADED",
                 "PG_RECOVERY_FULL",
@@ -2624,8 +2628,8 @@ class RadosOrchestrator:
                 "OBJECT_MISPLACED",
                 "OBJECT_UNFOUND",
                 "RECENT_CRASH",
-            )
-
+            ]
+            health_warns = list(set(health_warns) - set(ignore_list))
             flag = (
                 False
                 if any(
@@ -3240,7 +3244,6 @@ EOF"""
             within timeout
         """
         daemon_map = dict()
-        success = False
         daemon_services = self.list_orch_services(service_type=daemon)
         # capture current start time for each daemon part of the services
         for service in daemon_services:
@@ -3267,6 +3270,7 @@ EOF"""
                 daemon_status_ls = self.run_ceph_command(
                     cmd=f"ceph orch ps --service_name {service} --refresh"
                 )
+                success_count = 0
                 for entry in daemon_status_ls:
                     try:
                         restart_time, _ = self.client.exec_command(
@@ -3275,21 +3279,28 @@ EOF"""
                         assert restart_time > daemon_map[entry["daemon_name"]]
                         assert entry["status_desc"] != "stopped"
                         log.info(f"{entry['daemon_name']} has started")
-                        success = True
+                        success_count += 1
                     except Exception:
                         log.info(
                             f"{daemon} daemon {entry['daemon_name']} is yet to restart. "
-                            f"Sleeping for 120 secs"
                         )
-                        self.client.exec_command(
-                            cmd=f"ceph orch daemon restart {entry['daemon_name']}",
-                            sudo=True,
-                        )
-                        time.sleep(120)
-                        success = False
-                        break
-                if success:
+                        """
+                        Adding "ceph orch daemon restart" in try except block, Since restarting OSDs throws below error,
+                        If all the OSDs of acting set are attempted to restart
+                        error -> "Error EINVAL: Unable to restart daemon osd.0: unsafe to stop osd(s) at this
+                         time (1 PGs are or would become offline). Warnings can be bypassed with the --force flag"
+                        """
+                        try:
+                            self.client.exec_command(
+                                cmd=f"ceph orch daemon restart {entry['daemon_name']}",
+                                sudo=True,
+                            )
+                        except CommandFailed as e:
+                            log.warning(e)
+                if success_count == len(daemon_status_ls):
                     break
+                log.info("Sleeping for 120 secs")
+                time.sleep(120)
             else:
                 log.error(
                     f"All the daemons part of the service {service} did not restart within "
@@ -4434,7 +4445,7 @@ EOF"""
 
         if mnt_name in out:
             log.info("Verification successful. Device is listed in mount points.")
-            return f"{mnt_path}{mnt_name}"
+            return mnt_path, mnt_name
         else:
             log.error("Verification failed. Device is not listed in mount points.")
             return None
@@ -4598,7 +4609,21 @@ EOF"""
                 cmd=f"{base_cmd} {daemon_type}.{daemon_id}", client_exec=True
             )
 
-        out = self.run_ceph_command(cmd=f"{base_cmd} {daemon_id}", client_exec=True)
+        for _ in range(3):
+            try:
+                out = self.run_ceph_command(
+                    cmd=f"{base_cmd} {daemon_id}", client_exec=True
+                )
+                break
+            except Exception as e:
+                debug_msg = f"Passed daemon type : {daemon_type}, Daemon ID : {daemon_id}, Error : {e}"
+                log.debug(debug_msg)
+                log.warning("ceph metadata command failed. retrying after 30 seconds.")
+                time.sleep(30)
+        else:
+            log.debug("Metadata command execution failed for 3 consecutive tries")
+            return None
+
         if out is None:
             log.error(
                 f"Metadata info for the input daemon: {daemon_type} {daemon_id} not found"
@@ -5586,3 +5611,17 @@ EOF"""
                 log.error("Error while removing contents of file")
                 return False
         return True
+
+    def get_balancer_status(self):
+        """
+        The method is used to send the balancer status
+        Args:
+            None
+        Return:
+            True -> If balancer status is active
+            False -> If balancer status in inactive
+        """
+
+        cmd_balancer_status = "ceph balancer status"
+        cmd_outPut = self.run_ceph_command(cmd_balancer_status)
+        return cmd_outPut["active"]
