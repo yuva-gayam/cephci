@@ -30,6 +30,7 @@ tests:
                   command: bootstrap
                   service: cephadm
                   args:
+                    registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
                     initial-dashboard-password: admin@123
@@ -79,8 +80,8 @@ tests:
                     - service_type: rgw
                       service_id: shared.pri
                       spec:
-                        ssl: true
                         generate_cert: true
+                        ssl: true
                       placement:
                         nodes:
                           - node7
@@ -92,6 +93,7 @@ tests:
                   command: bootstrap
                   service: cephadm
                   args:
+                    registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
                     initial-dashboard-password: admin@123
@@ -140,77 +142,18 @@ tests:
                   specs:
                     - service_type: rgw
                       service_id: shared.sec
+                      spec:
+                        generate_cert: true
+                        ssl: true
                       placement:
                         nodes:
                           - node7
-                      spec:
-                        ssl: true
-                        generate_cert: true
       desc: RHCS cluster deployment using cephadm.
-      polarion-id: CEPH-83575222
+      polarion-id: CEPH-83604472
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy cluster
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-        ceph-sec:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-      name: Monitoring Services deployment
-      desc: Add monitoring services using spec file.
-      module: test_cephadm.py
-      polarion-id: CEPH-83574727
+      name: deploy cluster and rgw with ssl gen-cert
+
   - test:
       abort-on-fail: true
       clusters:
@@ -231,52 +174,11 @@ tests:
               - ceph-common
             copy_admin_keyring: true
       desc: Configure the RGW client system
+      polarion-id: CEPH-83573758
       destroy-cluster: false
       module: test_client.py
       name: configure client
-      polarion-id: CEPH-83573758
-  - test:
-      abort-on-fail: true
-      clusters:
-        ceph-pri:
-          config:
-            commands:
-              - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
-              - "sudo yum install -y sshpass"
-              - "sleep 20"
-              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node5}:/etc/pki/ca-trust/source/anchors/"
-              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node6}:/etc/pki/ca-trust/source/anchors/"
-        ceph-sec:
-          config:
-            commands:
-              - "sudo yum install -y sshpass"
-              - "sleep 120"
-              - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
-              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node5}:/etc/pki/ca-trust/source/anchors/"
-              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node6}:/etc/pki/ca-trust/source/anchors/"
-      desc: copying root ca
-      module: exec.py
-      name: setup multisite
-      polarion-id: CEPH-10362
-  - test:
-      abort-on-fail: true
-      clusters:
-        ceph-pri:
-          config:
-            role: rgw
-            sudo: True
-            commands:
-              - "update-ca-trust"
-        ceph-sec:
-          config:
-            role: rgw
-            sudo: True
-            commands:
-              - "update-ca-trust"
-      desc: update-ca-trust on rgw nodes
-      polarion-id: CEPH-83575227
-      module: exec.py
-      name: update-ca-trust on rgw nodes
+
   - test:
       abort-on-fail: true
       clusters:
@@ -296,10 +198,16 @@ tests:
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
+              - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+              - "sudo yum install -y sshpass"
+              - "sleep 20"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node5}:/etc/pki/ca-trust/source/anchors/"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node6}:/etc/pki/ca-trust/source/anchors/"
         ceph-sec:
           config:
             commands:
-              - "sleep 120"
+              - "sudo update-ca-trust"
+              - "ceph config set client.rgw rgw_verify_ssl False"
               - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node7} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
               - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node7} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node7} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
@@ -310,11 +218,56 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
               - "ceph orch restart {service_name:shared.sec}"
+              - "sudo yum install -y sshpass"
+              - "sleep 120"
+              - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node5}:/etc/pki/ca-trust/source/anchors/"
+              - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node6}:/etc/pki/ca-trust/source/anchors/"
       desc: Setting up RGW multisite replication environment
       module: exec.py
       name: setup multisite
       polarion-id: CEPH-10362
+
   - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            role: rgw
+            sudo: True
+            commands:
+              - "update-ca-trust"
+        ceph-sec:
+          config:
+            role: rgw
+            sudo: True
+            commands:
+              - "update-ca-trust"
+      desc: update-ca-trust on rgw nodes
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: update-ca-trust on rgw nodes
+
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            role: client
+            sudo: True
+            commands:
+              - "update-ca-trust"
+        ceph-sec:
+          config:
+            role: client
+            sudo: True
+            commands:
+              - "update-ca-trust"
+      desc: update-ca-trust on client nodes
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: update-ca-trust on client nodes
+
       abort-on-fail: true
       clusters:
         ceph-pri:
