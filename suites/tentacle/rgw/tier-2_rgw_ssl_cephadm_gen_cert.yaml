@@ -5,7 +5,7 @@
 # and secondary (sec) zones within this group. The master zone is part of the pri
 # cluster whereas the sec zone is part of the sec datacenter (cluster).
 
-# conf: conf/tentacle/rgw/rgw_multisite.yaml
+# conf: conf/squid/rgw/rgw_multisite.yaml
 # The deployment is evaluated by running IOs across the environments.
 ---
 tests:
@@ -66,8 +66,6 @@ tests:
                       spec:
                         generate_cert: true
                         ssl: true
-                        zonegroup_hostnames:
-                          - s3.example.com
                       placement:
                         nodes:
                           - node5
@@ -116,8 +114,6 @@ tests:
                       spec:
                         generate_cert: true
                         ssl: true
-                        zonegroup_hostnames:
-                          - s3.example.com
                       placement:
                         nodes:
                           - node5
@@ -171,7 +167,7 @@ tests:
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
-              - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+              - "ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt"
               - "sudo yum install -y sshpass"
               - "sleep 20"
               - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-sec#node5}:/etc/pki/ca-trust/source/anchors/"
@@ -193,7 +189,7 @@ tests:
               - "ceph orch restart {service_name:shared.sec}"
               - "sudo yum install -y sshpass"
               - "sleep 120"
-              - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+              - "ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt"
               - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node5}:/etc/pki/ca-trust/source/anchors/"
               - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:ceph-pri#node6}:/etc/pki/ca-trust/source/anchors/"
       desc: Setting up RGW multisite replication environment
@@ -299,6 +295,18 @@ tests:
             script-name: test_Mbuckets_with_Nobjects.py
             verify-io-on-site: ["ceph-pri"]
             config-file-name: test_Mbuckets_with_Nobjects_compression.yaml
+
+  - test:
+      name: download objects on secondary
+      desc: test_Mbuckets_with_Nobjects_download on secondary
+      polarion-id: CEPH-14237
+      module: sanity_rgw_multisite.py
+      clusters:
+        ceph-sec:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            verify-io-on-site: ["ceph-pri"]
+            config-file-name: test_Mbuckets_with_Nobjects_download.yaml
 
   - test:
       name: test encryption on secondary
