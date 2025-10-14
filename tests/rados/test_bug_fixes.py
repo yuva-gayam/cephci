@@ -562,9 +562,13 @@ def run(ceph_cluster, **kw):
                 log.info(test["desc"])
                 log.info(test["expectation"])
 
-                if rhbuild.startswith("8") and not (test["unmanaged"] or test["zap"]):
+                if (
+                    rhbuild
+                    and rhbuild.split(".")[0] >= "8"
+                    and not (test["unmanaged"] or test["zap"])
+                ):
                     log.info(
-                        "Skipping this Scenario as it fails in Squid. Bug: 2368108"
+                        "Skipping this Scenario as it fails in Squid and Tentacle. Bug: 2368108"
                     )
                     continue
 
@@ -722,7 +726,7 @@ def run(ceph_cluster, **kw):
         log.info("Running test to Verify that OSDs can be added/moved to new spec")
 
         try:
-            if float(rhbuild.split("-")[0]) < 8.1:
+            if float(rhbuild.split("-")[0]) < 7.1:
                 log.info("Passing without execution, BZ yet to be backported")
                 return 0
 

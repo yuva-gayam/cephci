@@ -1,3 +1,4 @@
+import time
 import traceback
 
 from ceph.ceph_admin import CephAdmin
@@ -146,6 +147,13 @@ def run(ceph_cluster, **kw):
             )
 
         rados_obj.set_service_managed_type(service_type="osd", unmanaged=False)
+        time.sleep(10)
+        active_osd_list = rados_obj.get_osd_list(status="up")
+        in_osd_list = rados_obj.get_osd_list(status="in")
+        up_not_in = list(set(active_osd_list) - set(in_osd_list))
+        for osdid in up_not_in:
+            rados_obj.run_ceph_command(cmd=f"ceph osd in {osdid}")
+            time.sleep(2)
         rados_obj.change_recovery_threads(config=pool, action="rm")
         if config.get("delete_pools"):
             for name in config["delete_pools"]:
