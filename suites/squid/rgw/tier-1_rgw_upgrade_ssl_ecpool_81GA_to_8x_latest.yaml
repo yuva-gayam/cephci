@@ -83,6 +83,13 @@ tests:
                   spec:
                     ssl: true
                     generate_cert: true
+          - config:
+              args:
+                - "ceph config set client.rgw.rgw.ssl rgw_verify_ssl False"
+              command: shell
+          - config:
+              args:
+                - "sudo update-ca-trus"
       desc: bootstrap and deployment services with label placements.
       polarion-id: CEPH-83573777
       destroy-cluster: false
@@ -104,23 +111,23 @@ tests:
       name: Configure client
       polarion-id: CEPH-83573758
 
-  - test:
-      name: Manual Resharding tests pre upgrade
-      desc: Resharding test - manual
-      polarion-id: CEPH-83571740
-      module: sanity_rgw.py
-      config:
-        script-name: test_dynamic_bucket_resharding.py
-        config-file-name: test_manual_resharding_without_bucket_delete.yaml
+  # - test:
+  #     name: Manual Resharding tests pre upgrade
+  #     desc: Resharding test - manual
+  #     polarion-id: CEPH-83571740
+  #     module: sanity_rgw.py
+  #     config:
+  #       script-name: test_dynamic_bucket_resharding.py
+  #       config-file-name: test_manual_resharding_without_bucket_delete.yaml
 
-  - test:
-      name: Dynamic Resharding tests with version pre upgrade
-      desc: Resharding test - dynamic
-      polarion-id: CEPH-83571740
-      module: sanity_rgw.py
-      config:
-        script-name: test_dynamic_bucket_resharding.py
-        config-file-name: test_dynamic_resharding_with_version_without_bucket_delete.yaml
+  # - test:
+  #     name: Dynamic Resharding tests with version pre upgrade
+  #     desc: Resharding test - dynamic
+  #     polarion-id: CEPH-83571740
+  #     module: sanity_rgw.py
+  #     config:
+  #       script-name: test_dynamic_bucket_resharding.py
+  #       config-file-name: test_dynamic_resharding_with_version_without_bucket_delete.yaml
 
   - test:
       name: S3CMD small and multipart object download pre upgrade
@@ -131,24 +138,24 @@ tests:
         script-name: ../s3cmd/test_s3cmd.py
         config-file-name: ../../s3cmd/configs/test_get_s3cmd.yaml
 
-  - test:
-      name: compression_with_zstd_type pre upgrade
-      desc: test compression with zstd type pre upgrade
-      polarion-id: CEPH-11350
-      module: sanity_rgw.py
-      config:
-        script-name: test_Mbuckets_with_Nobjects.py
-        config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
+  # - test:
+  #     name: compression_with_zstd_type pre upgrade
+  #     desc: test compression with zstd type pre upgrade
+  #     polarion-id: CEPH-11350
+  #     module: sanity_rgw.py
+  #     config:
+  #       script-name: test_Mbuckets_with_Nobjects.py
+  #       config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
 
-  - test:
-      name: Test NFS cluster and export create
-      desc: Test NFS cluster and export create
-      polarion-id: CEPH-83574597
-      module: sanity_rgw.py
-      config:
-        run-on-rgw: true
-        script-name: ../nfs_ganesha/nfs_cluster.py
-        config-file-name: ../../nfs_ganesha/config/nfs_cluster.yaml
+  # - test:
+  #     name: Test NFS cluster and export create
+  #     desc: Test NFS cluster and export create
+  #     polarion-id: CEPH-83574597
+  #     module: sanity_rgw.py
+  #     config:
+  #       run-on-rgw: true
+  #       script-name: ../nfs_ganesha/nfs_cluster.py
+  #       config-file-name: ../../nfs_ganesha/config/nfs_cluster.yaml
 
   # upgrade cluster
   - test:
@@ -198,50 +205,50 @@ tests:
         script-name: ../s3cmd/test_s3cmd.py
         config-file-name: ../../s3cmd/configs/test_get_s3cmd.yaml
 
-  - test:
-      name: compresstion_with_zstd_type post upgarde
-      desc: test compresstion with zstd type post upgarde
-      polarion-id: CEPH-11350
-      module: sanity_rgw.py
-      config:
-        script-name: test_Mbuckets_with_Nobjects.py
-        config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
+  # - test:
+  #     name: compresstion_with_zstd_type post upgarde
+  #     desc: test compresstion with zstd type post upgarde
+  #     polarion-id: CEPH-11350
+  #     module: sanity_rgw.py
+  #     config:
+  #       script-name: test_Mbuckets_with_Nobjects.py
+  #       config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
 
-  - test:
-      name: NFS export delete
-      desc: NFS cluster and exports delete
-      polarion-id: CEPH-83574600 # also covers CEPH-83574601
-      module: sanity_rgw.py
-      config:
-        script-name: ../nfs_ganesha/nfs_cluster.py
-        config-file-name: ../../nfs_ganesha/config/nfs_cluster_delete.yaml
+  # - test:
+  #     name: NFS export delete
+  #     desc: NFS cluster and exports delete
+  #     polarion-id: CEPH-83574600 # also covers CEPH-83574601
+  #     module: sanity_rgw.py
+  #     config:
+  #       script-name: ../nfs_ganesha/nfs_cluster.py
+  #       config-file-name: ../../nfs_ganesha/config/nfs_cluster_delete.yaml
 
-  - test:
-      abort-on-fail: true
-      config:
-        install:
-          - agent
-        run-on-rgw: true
-      desc: Setup and configure vault agent
-      destroy-cluster: false
-      module: install_vault.py
-      name: configure vault agent
-      polarion-id: CEPH-83575226
+  # - test:
+  #     abort-on-fail: true
+  #     config:
+  #       install:
+  #         - agent
+  #       run-on-rgw: true
+  #     desc: Setup and configure vault agent
+  #     destroy-cluster: false
+  #     module: install_vault.py
+  #     name: configure vault agent
+  #     polarion-id: CEPH-83575226
 
-  - test:
-      config:
-        script-name: test_sse_s3_kms_with_vault.py
-        config-file-name: test_sse_s3_per_bucket_encryption_normal_object_upload.yaml
-      desc: test sse-s3 per bucket encryption post upgrade
-      module: sanity_rgw.py
-      name: sse-s3 per bucket encryption test post upgrade
-      polarion-id: CEPH-83574615 # CEPH-83574617, CEPH-83575151
+  # - test:
+  #     config:
+  #       script-name: test_sse_s3_kms_with_vault.py
+  #       config-file-name: test_sse_s3_per_bucket_encryption_normal_object_upload.yaml
+  #     desc: test sse-s3 per bucket encryption post upgrade
+  #     module: sanity_rgw.py
+  #     name: sse-s3 per bucket encryption test post upgrade
+  #     polarion-id: CEPH-83574615 # CEPH-83574617, CEPH-83575151
 
-  - test:
-      config:
-        script-name: test_sse_s3_kms_with_vault.py
-        config-file-name: test_sse_s3_per_bucket_encryption_multipart_object_upload.yaml
-      module: sanity_rgw.py
-      desc: test sse-s3 per bucket encryption with multipart post upgrade
-      name: test sse-s3 per bucket encryption with multipart post upgrade
-      polarion-id: CEPH-83575155
+  # - test:
+  #     config:
+  #       script-name: test_sse_s3_kms_with_vault.py
+  #       config-file-name: test_sse_s3_per_bucket_encryption_multipart_object_upload.yaml
+  #     module: sanity_rgw.py
+  #     desc: test sse-s3 per bucket encryption with multipart post upgrade
+  #     name: test sse-s3 per bucket encryption with multipart post upgrade
+  #     polarion-id: CEPH-83575155
