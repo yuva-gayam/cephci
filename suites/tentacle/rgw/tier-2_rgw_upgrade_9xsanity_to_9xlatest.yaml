@@ -20,7 +20,7 @@ tests:
               args:
                 rhcs-version: 9.0
                 release: stable
-                registry-url: cp.stg.icr.io/cp/
+                registry-url: cp.stg.icr.io
                 mon-ip: node1
                 orphan-initial-daemons: true
                 initial-dashboard-password: admin@123
