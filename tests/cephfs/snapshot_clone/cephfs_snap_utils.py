@@ -635,7 +635,7 @@ class SnapUtils(object):
         Returns : True on success
         """
         if daemon_type == "client" and kwargs.get("client_id"):
-            daemon_type += f"{daemon_type}.{kwargs['client_id']}"
+            daemon_type = f" {daemon_type}.{kwargs['client_id']}"
         cmd = f"ceph config {op_type} {daemon_type} client_respect_subvolume_snapshot_visibility "
         if op_type == "set":
             cmd += f" {kwargs['client_respect_snapshot_visibility']}"
@@ -666,13 +666,17 @@ class SnapUtils(object):
         str3 = "snapshot_visibility false,client config client_respect_snapshot_visibility false, .snap dir is visible"
         str4 = "snapshot_visibility true,mgr config client_respect_snapshot_visibility true, Snaphot ops allowed"
         str5 = "snapshot_visibility true,mgr config client_respect_snapshot_visibility false, Snaphot ops allowed"
-        str6 = "snapshot_visibility false,mgr config client_respect_snapshot_visibility true, Snaphot ops NOT allowed"
+        str6 = "snapshot_visibility false,mgr config client_respect_snapshot_visibility true, Snaphot ops allowed"
         str7 = "snapshot_visibility false,mgr config client_respect_snapshot_visibility false, Snaphot ops allowed"
         for str_tmp in [str0, str1, str2, str3, str4, str5, str6, str7]:
             log.info(str_tmp)
         snap_visibility_ops = {
             "1": {"true": "1", "false": "1"},
             "0": {"true": "0", "false": "1"},
+        }
+        snap_visibility_ops_mgr = {
+            "1": {"true": "1", "false": "1"},
+            "0": {"true": "1", "false": "1"},
         }
         # "Snapshot visibility test terminology - 1 - Visibile/Allowed, 0 - Not Visibile/Allowed"
         snapshot_visibility = self.snapshot_visibility(
@@ -687,7 +691,9 @@ class SnapUtils(object):
         exp_snap_visibility = snap_visibility_ops[snapshot_visibility][
             snapshot_visibility_client
         ]
-        exp_snap_ops = snap_visibility_ops[snapshot_visibility][snapshot_visibility_mgr]
+        exp_snap_ops = snap_visibility_ops_mgr[snapshot_visibility][
+            snapshot_visibility_mgr
+        ]
         if self.verify_snap_visibility(
             exp_snap_visibility, client, mnt_client, mnt_args
         ):
@@ -731,7 +737,8 @@ class SnapUtils(object):
             )
 
         mnt_path, _ = self.cephfs_common_utils.mount_ceph(mnt_type, mount_params)
-        snap_ls_err = "ls: cannot access '.snap': Operation not permitted"
+        snap_ls_err = f"ls: cannot access '{mnt_path}/.snap': Operation not permitted"
+        actual_snap_visibility = None
         try:
             out, _ = mnt_client.exec_command(sudo=True, cmd=f"ls {mnt_path}/.snap")
             log.info(out)

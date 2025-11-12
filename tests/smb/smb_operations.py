@@ -196,6 +196,7 @@ def smbclient_check_shares(
                     elif auth_mode == "user":
                         cmd = (
                             f"smbclient -U {smb_user_name}%{smb_user_password}"
+                            f" -p {smb_port} "
                             f" //{public_addr.split('/')[0]}/{smb_share} -c ls"
                         )
                         client.exec_command(
@@ -220,6 +221,7 @@ def smbclient_check_shares(
                     elif auth_mode == "user":
                         cmd = (
                             f"smbclient -U {smb_user_name}%{smb_user_password}"
+                            f" -p {smb_port} "
                             f" //{smb_node.ip_address}/{smb_share} -c ls"
                         )
                         client.exec_command(
@@ -436,6 +438,19 @@ def create_smb_share(
             log.error("Samba shares list count not matching")
     except Exception as e:
         raise CephadmOpsExecutionError(f"Fail to create smb shares, Error {e}")
+
+
+def get_smb_shares(installer, smb_cluster_id):
+    """Get SMB shares
+    Args:
+        installer (obj): Installer node obj
+        smb_cluster_id (str): Smb cluster id
+    Return:
+        List of shares
+    """
+    shares = CephAdm(installer).ceph.smb.share.ls(smb_cluster_id)
+    list_shares = json.loads(shares)
+    return list_shares
 
 
 def verify_smb_service(node, service_name):

@@ -245,7 +245,6 @@ class CephFSCommonUtils(FsUtils):
             )
             sv_list = setup_params["sv_list"]
             fs_name = setup_params["fs_name"]
-            group_name = setup_params["subvolumegroup"]["group_name"]
             for i in range(len(sv_list)):
                 subvol_name = sv_list[i]["subvol_name"]
                 fs_name = sv_list[i]["vol_name"]
@@ -275,7 +274,13 @@ class CephFSCommonUtils(FsUtils):
                     validate=True,
                     group_name=sv_list[i].get("group_name", None),
                 )
-            self.remove_subvolumegroup(client, fs_name, group_name, validate=True)
+            if setup_params.get("subvolumegroup"):
+                self.remove_subvolumegroup(
+                    client,
+                    fs_name,
+                    setup_params["subvolumegroup"]["group_name"],
+                    validate=True,
+                )
         except CommandFailed as ex:
             log.error("Cleanup failed with error : %s", ex)
             return 1
@@ -647,3 +652,26 @@ class CephFSCommonUtils(FsUtils):
                 time.sleep(retry_interval)  # Retry after the specified interval
 
         return 1
+
+    def is_subscription_registered(self, client):
+        """Identify if the system is subscribed or not"""
+        try:
+            cmd = (
+                "subscription-manager status | grep 'Overall Status' | awk '{print $3}'"
+            )
+            out, _ = client.exec_command(sudo=True, cmd=cmd)
+            status = out.strip()
+            log.info("Subscription status output: {}".format(status))
+            # In RHEL-9, "Disabled" means registered
+            # In RHEL-10, "Registered" means registered
+            is_subscribed = status.lower() in ["registered", "disabled"]
+            log.info(
+                "System is {}".format(
+                    "subscribed" if is_subscribed else "not subscribed"
+                )
+            )
+            return is_subscribed
+        except Exception as e:
+            raise CommandFailed(
+                "Failed to identify subscription status \n error: {0}".format(e)
+            )

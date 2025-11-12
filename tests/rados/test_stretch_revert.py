@@ -6,7 +6,13 @@ includes:
 3. revert from netsplit scenario to default crush rule
 4. revert from netsplit scenario to custom crush rule
 5. revert from site down stretch mode to default crush rule
-6. revert from tiebreaker site down stretch mode to custom crush rule
+6. revert from site down stretch mode to custom crush rule
+7. Revert to regular cluster when 1 mon daemon from DC1 is down and 1
+ mon daemon from DC2 is down
+8. Revert to regular cluster when tiebreaker mon is down
+9. Revert to regular cluster when all mons from DC1 is down
+10. Revert stretch mode during 1 MON host in DC1 and 1 MON host in DC2 is down
+11. Revert stretch mode during tiebreaker MON host is down
 """
 
 import time
@@ -18,6 +24,7 @@ from ceph.rados.monitor_workflows import MonitorWorkflows
 from ceph.rados.pool_workflows import PoolFunctions
 from ceph.rados.serviceability_workflows import ServiceabilityMethods
 from ceph.utils import find_vm_node_by_hostname
+from tests.rados.monitor_configurations import MonElectionStrategies
 from tests.rados.stretch_cluster import wait_for_clean_pg_sets
 from tests.rados.test_stretch_revert_class import (
     RevertStretchModeFunctionalities,
@@ -45,7 +52,13 @@ def run(ceph_cluster, **kw):
         3. revert from netsplit scenario to default crush rule
         4. revert from netsplit scenario to custom crush rule
         5. revert from site down stretch mode to default crush rule
-        6. revert from site down stretch mode to custome crush rule
+        6. revert from site down stretch mode to custom crush rule
+        7. Revert to regular cluster when 1 mon daemon from DC1 is down and 1
+         mon daemon from DC2 is down
+        8. Revert to regular cluster when tiebreaker mon is down
+        9. Revert to regular cluster when all mons from DC1 is down
+        10. Revert stretch mode during 1 MON host in DC1 and 1 MON host in DC2 is down
+        11. Revert stretch mode during tiebreaker MON host is down
     """
 
     log.info(run.__doc__)
@@ -61,6 +74,8 @@ def run(ceph_cluster, **kw):
     add_network_delay = config.get("add_network_delay", False)
     client_node = ceph_cluster.get_nodes(role="client")[0]
     mon_obj = MonitorWorkflows(node=cephadm)
+    mon_election_obj = MonElectionStrategies(rados_obj=rados_obj)
+    test_seprator = "-" * 30
     scenarios_to_run = config.get(
         "scenarios_to_run",
         [
@@ -70,6 +85,11 @@ def run(ceph_cluster, **kw):
             "scenario4",
             "scenario5",
             "scenario6",
+            "scenario7",
+            "scenario8",
+            "scenario9",
+            "scenario10",
+            "scenario11",
         ],
     )
     config = {
@@ -78,9 +98,10 @@ def run(ceph_cluster, **kw):
         "tiebreaker_mon_site_name": tiebreaker_mon_site_name,
         "stretch_bucket": stretch_bucket,
         "client_node": client_node,
+        "mon_obj": mon_obj,
+        "mon_election_obj": mon_election_obj,
     }
     try:
-
         revert_stretch_mode_scenarios = RevertStretchModeScenarios(**config)
         custom_crush_rule_name = "test_rule"
         custom_crush_rule_id = (
@@ -95,30 +116,67 @@ def run(ceph_cluster, **kw):
         tiebreaker_hosts = revert_stretch_mode_scenarios.tiebreaker_hosts
 
         if "scenario1" in scenarios_to_run:
+            log.info(test_seprator)
             revert_stretch_mode_scenarios.scenario1(default_crush_rule)
+            log.info(test_seprator)
 
         if "scenario2" in scenarios_to_run:
+            log.info(test_seprator)
             revert_stretch_mode_scenarios.scenario2(custom_crush_rule)
+            log.info(test_seprator)
 
         if "scenario3" in scenarios_to_run:
+            log.info(test_seprator)
             revert_stretch_mode_scenarios.netsplit_scenario(
                 default_crush_rule, dc_1_hosts, dc_2_hosts
             )
+            log.info(test_seprator)
 
         if "scenario4" in scenarios_to_run:
+            log.info(test_seprator)
             revert_stretch_mode_scenarios.netsplit_scenario(
                 custom_crush_rule, dc_1_hosts, dc_2_hosts
             )
+            log.info(test_seprator)
 
         if "scenario5" in scenarios_to_run:
+            log.info(test_seprator)
             revert_stretch_mode_scenarios.shutdown_scenario(
                 default_crush_rule, dc_1_hosts, ceph_cluster, config, mon_obj
             )
+            log.info(test_seprator)
 
         if "scenario6" in scenarios_to_run:
+            log.info(test_seprator)
             revert_stretch_mode_scenarios.shutdown_scenario(
                 custom_crush_rule, tiebreaker_hosts, ceph_cluster, config, mon_obj
             )
+            log.info(test_seprator)
+
+        if "scenario7" in scenarios_to_run:
+            log.info(test_seprator)
+            revert_stretch_mode_scenarios.scenario7(default_crush_rule)
+            log.info(test_seprator)
+
+        if "scenario8" in scenarios_to_run:
+            log.info(test_seprator)
+            revert_stretch_mode_scenarios.scenario8(default_crush_rule)
+            log.info(test_seprator)
+
+        if "scenario9" in scenarios_to_run:
+            log.info(test_seprator)
+            revert_stretch_mode_scenarios.scenario9(default_crush_rule)
+            log.info(test_seprator)
+
+        if "scenario10" in scenarios_to_run:
+            log.info(test_seprator)
+            revert_stretch_mode_scenarios.scenario10(default_crush_rule, ceph_cluster)
+            log.info(test_seprator)
+
+        if "scenario11" in scenarios_to_run:
+            log.info(test_seprator)
+            revert_stretch_mode_scenarios.scenario11(default_crush_rule, ceph_cluster)
+            log.info(test_seprator)
 
     except Exception as e:
         log.error(f"Failed with exception: {e.__doc__}")
@@ -191,7 +249,12 @@ class RevertStretchModeScenarios(RevertStretchModeFunctionalities):
         "stretch_mode_bucket": 0,
     }
 
-    def scenario1(self, crush_rule: dict):
+    def scenario1(
+        self,
+        crush_rule: dict,
+        skip_wait_for_clean_pg_sets=False,
+        skip_stretch_enabled_checks=False,
+    ):
         """
         Scenario 1:- Revert stretch mode from health stretch cluster to default crush rules
         Steps:-
@@ -205,18 +268,21 @@ class RevertStretchModeScenarios(RevertStretchModeFunctionalities):
         8) Re-enter stretch mode for next scenario
         """
         log.info(self.scenario1.__doc__)
-        log.info(
-            "Step 1 -> Wait for clean PGs before starting scenario and Check if stretch mode is enabled"
-        )
-        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
-            raise Exception(
-                "PG did not reach active+clean before start of site down scenario"
+        if not skip_wait_for_clean_pg_sets:
+            log.info(
+                "Step 1 -> Wait for clean PGs before starting scenario and Check if stretch mode is enabled"
             )
-        if not stretch_enabled_checks(self.rados_obj):
-            log.error(
-                "The cluster has not cleared the pre-checks to run stretch tests. Exiting..."
-            )
-            raise Exception("Test pre-execution checks failed")
+            if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+                raise Exception(
+                    "PG did not reach active+clean before start of site down scenario"
+                )
+
+        if not skip_stretch_enabled_checks:
+            if not stretch_enabled_checks(self.rados_obj):
+                log.error(
+                    "The cluster has not cleared the pre-checks to run stretch tests. Exiting..."
+                )
+                raise Exception("Test pre-execution checks failed")
 
         log.info("Step 2 -> Create a pool and write IO")
         pool_name = "revert_scenario_1_pool"
@@ -235,14 +301,34 @@ class RevertStretchModeScenarios(RevertStretchModeFunctionalities):
         log.info("Step 6 -> Validate stretch mode related configs are reset in MON map")
         self.validate_mon_configurations_post_revert(self.expected_mon_map_values)
 
-        log.info("Step 7 -> Validate PGs reach active+clean")
-        wait_for_clean_pg_sets(rados_obj=self.rados_obj)
+        if skip_wait_for_clean_pg_sets:
+            log.info("[SKIPPED] Step 7 -> Validate PGs reach active+clean ")
+        else:
+            log.info("Step 7 -> Validate PGs reach active+clean")
+            if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+                raise Exception(
+                    "PGs did not reach active+clean post revert from stretch mode"
+                )
 
         log.info(
             "Step 8 ->  Re-enter stretch mode for next scenario and wait till PGs are active+clean"
         )
         self.enable_stretch_mode(self.tiebreaker_mon)
-        wait_for_clean_pg_sets(rados_obj=self.rados_obj)
+        if skip_wait_for_clean_pg_sets:
+            log.info(
+                "[SKIPPED] Validating PGs reach active+clean post enabling stretch mode"
+            )
+        else:
+            if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+                raise Exception(
+                    "PGs did not reach active+clean post re-enabling stretch mode"
+                )
+
+            if not stretch_enabled_checks(self.rados_obj):
+                log.error(
+                    "The cluster has not cleared the pre-checks to run stretch tests. Exiting..."
+                )
+                raise Exception("Test pre-execution checks failed")
 
     def scenario2(self, crush_rule: dict):
         """
@@ -290,13 +376,25 @@ class RevertStretchModeScenarios(RevertStretchModeFunctionalities):
         self.validate_mon_configurations_post_revert(self.expected_mon_map_values)
 
         log.info("Step 8 -> validate PG's reached active+clean")
-        wait_for_clean_pg_sets(rados_obj=self.rados_obj)
+        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+            raise Exception(
+                "PGs did not reach active+clean post revert from stretch mode"
+            )
 
         log.info(
             "Step 9 ->  Re-enter stretch mode for next scenario and wait till PGs are active+clean"
         )
         self.enable_stretch_mode(self.tiebreaker_mon)
-        wait_for_clean_pg_sets(rados_obj=self.rados_obj)
+        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+            raise Exception(
+                "PGs did not reach active+clean post revert from stretch mode"
+            )
+
+        if not stretch_enabled_checks(self.rados_obj):
+            log.error(
+                "The cluster has not cleared the pre-checks to run stretch tests. Exiting..."
+            )
+            raise Exception("Test pre-execution checks failed")
 
     def netsplit_scenario(self, crush_rule: dict, group_1_hosts: list, group_2_hosts):
         """
@@ -395,6 +493,12 @@ class RevertStretchModeScenarios(RevertStretchModeFunctionalities):
             raise Exception(
                 "PG did not reach active+clean post enabling stretch mode for next scenario"
             )
+
+        if not stretch_enabled_checks(self.rados_obj):
+            log.error(
+                "The cluster has not cleared the pre-checks to run stretch tests. Exiting..."
+            )
+            raise Exception("Test pre-execution checks failed")
 
     def shutdown_scenario(
         self,
@@ -593,3 +697,290 @@ class RevertStretchModeScenarios(RevertStretchModeFunctionalities):
             raise Exception(
                 "PG did not reach active+clean post enabling stretch mode for next scenario"
             )
+
+        if not stretch_enabled_checks(self.rados_obj):
+            log.error(
+                "The cluster has not cleared the pre-checks to run stretch tests. Exiting..."
+            )
+            raise Exception("Test pre-execution checks failed")
+
+    def scenario7(self, crush_rule):
+        """
+        Scenario 7:- Revert stretch mode during 1 mon daemon in DC1 Host1 and 1 mon daemon in DC2 Host1 failure
+        Steps:-
+            1) Shutdown 1 mon daemon in DC1 Host1 and 1 mon daemon in DC2 Host1
+            2) Check stretch mode is enabled
+            3) Create a pool and write IO
+            4) Revert from healthy stretch mode
+            5) Validate all pools are reverted to default rules
+            6) Validate stretch mode related configs are reset in OSD map
+            7) Validate stretch mode related configs are reset in MON map
+            8) Validate PGs reach active+clean
+            9) Re-enter stretch mode for next scenario
+        """
+        # Stop MON in stretch mode
+        # shutdown 1 mon in DC1
+        # shutdown 1 mon in DC2
+        log.info(
+            "Scenario 7 ->  Shutdown 1 mon daemon in DC1 Host1 and 1 mon daemon in DC2 Host1"
+        )
+        for mon in [self.site_1_mon_hosts[0], self.site_2_mon_hosts[0]]:
+            log.debug(f"Proceeding to shutdown MON {mon}")
+            if not self.rados_obj.change_daemon_systemctl_state(
+                action="stop",
+                daemon_type="mon",
+                daemon_id=mon,
+            ):
+                log.error(f"Failed to stop mon on host {mon}")
+                raise Exception("Mon stop failure error")
+            log.info(f"Completed shutdown of mons ->  {mon}.")
+
+        # Revert stretch mode -> perform validation -> enable stretch mode
+        self.scenario1(crush_rule, skip_stretch_enabled_checks=True)
+
+        # Restart MON in stretch mode
+        # start 1 mon in DC1
+        # start 1 mon in DC2
+        for mon in [self.site_1_mon_hosts[0], self.site_2_mon_hosts[0]]:
+            log.debug(f"Proceeding to start MON {mon}")
+            if not self.rados_obj.change_daemon_systemctl_state(
+                action="start",
+                daemon_type="mon",
+                daemon_id=mon,
+            ):
+                log.error(f"Failed to start mon on host {mon}")
+                raise Exception("Mon start failure error")
+            log.info(f"Completed startup of mons ->  {mon}.")
+
+        self.check_mon_in_running_state()
+
+    def scenario8(self, crush_rule):
+        """
+        Scenario 8:- Revert stretch mode during tiebreaker mon daemon failure
+        Steps:-
+            1) Shutdown tiebreaker mon daemon
+            2) Check stretch mode is enabled
+            3) Create a pool and write IO
+            4) Revert from healthy stretch mode
+            5) Validate all pools are reverted to default rules
+            6) Validate stretch mode related configs are reset in OSD map
+            7) Validate stretch mode related configs are reset in MON map
+            8) Validate PGs reach active+clean
+            9) Re-enter stretch mode for next scenario
+        """
+        # stop the tiebreaker mon
+        log.info("Scenario 8 ->  Shutdown tiebreaker mon daemon")
+        mon = self.tiebreaker_mon
+        log.debug(f"Proceeding to shutdown MON {mon}")
+        if not self.rados_obj.change_daemon_systemctl_state(
+            action="stop",
+            daemon_type="mon",
+            daemon_id=mon,
+        ):
+            log.error(f"Failed to stop mon on host {mon}")
+            raise Exception("Mon stop failure error")
+        log.info(f"Completed shutdown of mons ->  {mon}.")
+
+        # Revert stretch mode -> perform validation -> enable stretch mode
+        self.scenario1(crush_rule, skip_stretch_enabled_checks=True)
+
+        #  start the tiebreaker mon
+        log.debug(f"Proceeding to start MON {mon}")
+        if not self.rados_obj.change_daemon_systemctl_state(
+            action="start",
+            daemon_type="mon",
+            daemon_id=mon,
+        ):
+            log.error(f"Failed to start mon on host {mon}")
+            raise Exception("Mon start failure error")
+        log.info(f"Completed startup of mons ->  {mon}.")
+
+        self.check_mon_in_running_state()
+
+    def scenario9(self, crush_rule):
+        """
+        Scenario 9:- Revert stretch mode during all mon daemons in DC1 failure
+        Steps:-
+            1) stop all mon daemons in DC1 using systemctl
+            2) Check stretch mode is enabled
+            3) Create a pool and write IO
+            4) Revert from healthy stretch mode
+            5) Validate all pools are reverted to default rules
+            6) Validate stretch mode related configs are reset in OSD map
+            7) Validate stretch mode related configs are reset in MON map
+            8) Validate PGs reach active+clean
+            9) Re-enter stretch mode for next scenario
+        """
+        # stop all mons in DC1
+        log.info("Scenario 9 ->  Stop all mon daemons in DC1 using systemctl")
+        for mon in self.site_1_mon_hosts:
+            log.debug(f"Proceeding to shutdown MON {mon}")
+            if not self.rados_obj.change_daemon_systemctl_state(
+                action="stop",
+                daemon_type="mon",
+                daemon_id=mon,
+            ):
+                log.error(f"Failed to stop mon on host {mon}")
+                raise Exception("Mon stop failure error")
+            log.info(f"Completed shutdown of mons ->  {mon}.")
+
+        # Wait till stretch mode enters degraded state
+        self.wait_till_stretch_mode_status(degraded=True)
+
+        # Revert stretch mode -> perform validation -> enable stretch mode
+        self.scenario1(
+            crush_rule,
+            skip_wait_for_clean_pg_sets=True,
+            skip_stretch_enabled_checks=True,
+        )
+
+        # Restart all mons from DC1
+        for mon in self.site_1_mon_hosts:
+            log.debug(f"Proceeding to start MON {mon}")
+            if not self.rados_obj.change_daemon_systemctl_state(
+                action="start",
+                daemon_type="mon",
+                daemon_id=mon,
+            ):
+                log.error(f"Failed to start mon on host {mon}")
+                raise Exception("Mon start failure error")
+            log.info(f"Completed startup of mons ->  {mon}.")
+
+        self.check_mon_in_running_state()
+        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+            raise Exception(
+                "PGs did not reach active+clean post starting all Mons from DC1"
+            )
+
+    def scenario10(self, crush_rule, ceph_cluster):
+        """
+        Scenario 10:- Revert stretch mode during 1 MON host in DC1 and 1 MON host in DC2 is down
+        Steps:-
+            1) Shutdown 1 MON host in DC1 and 1 MON host in DC2
+            2) Disable stretch mode
+            3) Validate all pools are reverted to default rules
+            4) Validate stretch mode related configs are reset in OSD map
+            5) Validate stretch mode related configs are reset in MON map
+            6)  Wait for clean PG sets
+            7) Reboot 1 MON host in DC1 and 1 MON host in DC2
+            8) Re-enter stretch mode for next scenario
+            9) Wait for PGs to reach active+clean
+            10) Perform stretch mode checks
+        """
+        log.info(self.scenario10.__doc__)
+        # Shut down 1 MON host in DC1 and 1 MON host in DC2
+        log.info("Scenario 10 ->  1 MON host in DC1 and 1 MON host in DC2")
+        DC1_mon_host = self.site_1_mon_hosts[0]
+        DC2_mon_host = self.site_2_mon_hosts[0]
+
+        log.info("Step 1 -> Shutdown 1 MON host in DC1 and 1 MON host in DC2")
+        for mon_host in [DC1_mon_host, DC2_mon_host]:
+            log.debug(f"Proceeding to shutdown host {mon_host}")
+            target_node = find_vm_node_by_hostname(ceph_cluster, mon_host)
+            target_node.shutdown(wait=True)
+            log.info(f"Completed shutdown of mon host ->  {mon_host}.")
+
+        log.info("Step 2 ->  Disable stretch mode")
+        self.revert_stretch_mode()
+
+        log.info("Step 3 -> Validate all pools are reverted to default rules")
+        self.expected_pool_properties["crush_rule"] = crush_rule["id"]
+        self.validate_pool_configurations_post_revert(self.expected_pool_properties)
+
+        log.info("Step 4 -> Validate stretch mode related configs are reset in OSD map")
+        self.validate_osd_configurations_post_revert(self.expected_osd_map_values)
+
+        log.info("Step 5 -> Validate stretch mode related configs are reset in MON map")
+        self.validate_mon_configurations_post_revert(self.expected_mon_map_values)
+
+        log.info("Step 6 -> Wait for clean PG sets")
+        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+            raise Exception(
+                "PGs did not reach active+clean post starting tiebreaker mon host"
+            )
+
+        log.info("Step 7 -> Reboot 1 MON host in DC1 and 1 MON host in DC2")
+        for mon_host in [DC1_mon_host, DC2_mon_host]:
+            log.debug(f"Proceeding to restart host {mon_host}")
+            target_node = find_vm_node_by_hostname(ceph_cluster, mon_host)
+            target_node.power_on()
+            log.info(
+                f"Completed Reboot of 1 MON host in DC1 and 1 MON host in DC2 ->  {mon_host}."
+            )
+
+        log.info("Step 8 -> Enable Stretch mode")
+        self.enable_stretch_mode(self.tiebreaker_mon)
+
+        log.info("Step 9 -> Wait for clean PG sets")
+        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+            raise Exception(
+                "PGs did not reach active+clean post starting Reboot 1 MON host in DC1 and 1 MON host in DC2"
+            )
+
+        log.info("Step 10 -> Perform stretch mode checks")
+        if not stretch_enabled_checks(self.rados_obj):
+            log.error("The cluster has not cleared the stretch mode checks. Exiting...")
+            raise Exception("Stretch mode checks failed")
+
+    def scenario11(self, crush_rule, ceph_cluster):
+        """
+        Scenario 11:- Revert stretch mode during tiebreaker MON host is down
+        Steps:-
+            1) Shutdown Tiebreaker mon host
+            2) Revert from stretch mode
+            3) Validate all pools are reverted to default rules
+            4) Validate stretch mode related configs are reset in OSD map
+            5) Validate stretch mode related configs are reset in MON map
+            6) Enable stretch mode
+            7) Restart Tiebreaker MON host
+            8) Wait for clean PG sets
+            9) Perform stretch mode checks
+        """
+        log.info(self.scenario11.__doc__)
+        log.info("Scenario 11 ->  Shut down tiebreaker host")
+        mon_host = self.tiebreaker_mon
+
+        log.debug(f"Step 1 -> Proceeding to shutdown host {mon_host}")
+        target_node = find_vm_node_by_hostname(ceph_cluster, mon_host)
+        target_node.shutdown(wait=True)
+        log.info(f"Completed shutdown of mon host ->  {mon_host}.")
+
+        log.info("Step 2 ->  Disable stretch mode")
+        self.revert_stretch_mode()
+
+        log.info("Step 3 -> Validate all pools are reverted to default rules")
+        self.expected_pool_properties["crush_rule"] = crush_rule["id"]
+        self.validate_pool_configurations_post_revert(self.expected_pool_properties)
+
+        log.info("Step 4 -> Validate stretch mode related configs are reset in OSD map")
+        self.validate_osd_configurations_post_revert(self.expected_osd_map_values)
+
+        log.info("Step 5 -> Validate stretch mode related configs are reset in MON map")
+        self.validate_mon_configurations_post_revert(self.expected_mon_map_values)
+
+        # Method needs to be updated to handle client request, since installer node
+        # is down
+        # if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+        #     raise Exception(
+        #         "PGs did not reach active+clean post starting tiebreaker mon host"
+        #     )
+
+        log.info("Step 6 -> Enable stretch mode")
+        self.enable_stretch_mode(self.tiebreaker_mon)
+
+        log.info("Step 7 -> Restart Tiebreaker MON host")
+        log.debug(f"Proceeding to restart host {mon_host}")
+        target_node = find_vm_node_by_hostname(ceph_cluster, mon_host)
+        target_node.power_on()
+        log.info(f"Completed Reboot of Tiebreaker MON host ->  {mon_host}.")
+
+        log.info("Step 8 -> Wait for clean PG sets")
+        if wait_for_clean_pg_sets(rados_obj=self.rados_obj) is False:
+            raise Exception(
+                "PGs did not reach active+clean post starting tiebreaker mon host"
+            )
+
+        log.info("Step 9 -> Perform stretch mode checks")
+        if not stretch_enabled_checks(self.rados_obj):
+            log.error("The cluster has not cleared the stretch mode checks. Exiting...")
+            raise Exception("Stretch mode checks failed")

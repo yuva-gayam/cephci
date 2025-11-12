@@ -9,6 +9,7 @@ More operations to be added as needed
 
 """
 
+import ast
 import concurrent.futures as cf
 import datetime
 import json
@@ -1473,7 +1474,7 @@ class RadosOrchestrator:
         """
         pool_name = kwargs.get("pool_name")
         set_osd_release = kwargs.get("set_osd_release", True)
-        set_min_client = kwargs.get("set_min_client", True)
+        # set_min_client = kwargs.get("set_min_client", True)
         set_overwrites = kwargs.get("set_overwrites", True)
 
         # 1. Check Ceph version (must be tentacle/>=9)
@@ -1483,7 +1484,7 @@ class RadosOrchestrator:
 
         cluster_dump = self.run_ceph_command(cmd="ceph osd dump")
         osd_release = cluster_dump.get("require_osd_release")
-        client_release = cluster_dump.get("min_compat_client")
+        # client_release = cluster_dump.get("min_compat_client")
 
         # 2. Ensure OSD release correct
         if osd_release != "tentacle":
@@ -1494,13 +1495,14 @@ class RadosOrchestrator:
                 log.warning("OSD release is %s, not tentacle", osd_release)
 
         # 3. Ensure min compat client correct
-        if client_release != "tentacle":
-            if set_min_client:
-                config_cmd = "ceph osd set-require-min-compat-client tentacle --yes-i-really-mean-it"
-                self.client.exec_command(cmd=config_cmd, sudo=True)
-                log.info("Set min_compat_client to tentacle")
-            else:
-                log.warning("min_compat_client is %s, not tentacle", client_release)
+        # Required only for direct reads. This feature is missing from 9.0.
+        # if client_release != "tentacle":
+        #     if set_min_client:
+        #         config_cmd = "ceph osd set-require-min-compat-client tentacle --yes-i-really-mean-it"
+        #         self.client.exec_command(cmd=config_cmd, sudo=True)
+        #         log.info("Set min_compat_client to tentacle")
+        #     else:
+        #         log.warning("min_compat_client is %s, not tentacle", client_release)
 
         # 4. Ensure EC overwrites
         ec_overwrites = self.get_pool_property(
@@ -1548,17 +1550,22 @@ class RadosOrchestrator:
                     2. lrc -> Upstream Only
                     3. clay -> Upstream Only
                     4. isa ( default from Tentacle )
-                6. pool_name -> pool name to create and associate with the EC profile being created
-                7. force -> Override an existing profile by the same name.
-                8. crush-osds-per-failure-domain -> number of OSDs per failure domain
-                9. crush-num-failure-domains -> Number of failure domains present on the cluster
-                10. create_rule -> Arg to specify if the CRUSH rule should be created or not
-                11. profile_name -> Name of the profile to be created
-                12. yes_i_mean_it -> Needed to be passed for profile modification along with --force from 8.0
-                13. name: Name of the profile/rule to create if none is provided
-                14. negative_test -> pass true if performing -ve tests. min_compact_client won't be updated for pool
+                6. technique -> erasure code technique to be used with the plugin (str)
+                    supported techniques vary by plugin:
+                    jerasure: reed_sol_van, reed_sol_r6_op, cauchy_orig, cauchy_good, liberation, blaum_roth, liber8tion
+                    isa: reed_sol_van, cauchy
+                    clay: reed_sol_van, reed_sol_r6_op, cauchy_orig, cauchy_good, liber8tion
+                7. pool_name -> pool name to create and associate with the EC profile being created
+                8. force -> Override an existing profile by the same name.
+                9. crush-osds-per-failure-domain -> number of OSDs per failure domain
+                10. crush-num-failure-domains -> Number of failure domains present on the cluster
+                11. create_rule -> Arg to specify if the CRUSH rule should be created or not
+                12. profile_name -> Name of the profile to be created
+                13. yes_i_mean_it -> Needed to be passed for profile modification along with --force from 8.0
+                14. name: Name of the profile/rule to create if none is provided
+                15. negative_test -> pass true if performing -ve tests. min_compact_client won't be updated for pool
                 creation when this param is set to true. Required for MSR EC pool tests with min_compact_client
-                15. enable_fast_ec_features -> Pass true if the Fast EC features need to be enabled on the created pool
+                16. enable_fast_ec_features -> Pass true if the Fast EC features need to be enabled on the created pool
         Returns: True -> pass, False -> fail
         """
         failure_domain = kwargs.get("crush-failure-domain", "osd")
@@ -1574,6 +1581,7 @@ class RadosOrchestrator:
         major_version = int(self.rhbuild.split(".")[0])
         default_plugin = "jerasure" if major_version < 9 else "isa"
         plugin = kwargs.get("plugin", default_plugin)
+        technique = kwargs.get("technique")
         pool_name = kwargs.get("pool_name", "test-ec-pool")
         if not pool_name:
             log.error("No name provided. Exiting")
@@ -1591,13 +1599,16 @@ class RadosOrchestrator:
             f"ceph osd erasure-code-profile set {profile_name}"
             f" crush-failure-domain={failure_domain} k={k} m={m} plugin={plugin}"
         )
+        if technique:
+            cmd = cmd + f" technique={technique}"
         if crush_osds_per_failure_domain:
             if major_version >= 8:
                 min_client_version = self.run_ceph_command(cmd="ceph osd dump")[
                     "require_min_compat_client"
                 ]
                 log.debug(
-                    f"require_min_compat_client before starting the tests is {min_client_version}"
+                    "require_min_compat_client before starting the tests is %s",
+                    min_client_version,
                 )
                 if not negative_test:
                     if min_client_version not in ["squid"]:
@@ -1611,9 +1622,9 @@ class RadosOrchestrator:
                             "Set the min_compact client on the cluster to Squid on the cluster"
                         )
                 cmd = (
-                    cmd
-                    + f" crush-osds-per-failure-domain={crush_osds_per_failure_domain} "
-                    f" crush-num-failure-domains={crush_num_failure_domains}"
+                    cmd + " crush-osds-per-failure-domain=%s "
+                    " crush-num-failure-domains=%s"
+                    % (crush_osds_per_failure_domain, crush_num_failure_domains)
                 )
             else:
                 log.info(
@@ -1630,22 +1641,22 @@ class RadosOrchestrator:
         if yes_i_mean_it:
             cmd = cmd + " --yes-i-really-mean-it "
 
-        log.debug(f"Final command to create EC Profile : {cmd}")
+        log.debug("Final command to create EC Profile : %s", cmd)
         try:
             self.run_ceph_command(cmd=cmd)
             time.sleep(5)
             profiles = self.get_ec_profiles()
             if profile_name not in profiles:
                 raise Exception(
-                    f"Profile not found in list error.\n profile name :{profile_name} "
-                    f"\n profiles on cluster : {profiles}"
+                    "Profile not found in list error.\n profile name :%s "
+                    "\n profiles on cluster : %s" % (profile_name, profiles)
                 )
         except Exception as err:
-            log.error(f"Failed to create ec profile : {profile_name}")
+            log.error("Failed to create ec profile : %s", profile_name)
             log.error(err)
             return False
 
-        cmd = f"ceph osd erasure-code-profile get {profile_name}"
+        cmd = "ceph osd erasure-code-profile get %s" % profile_name
         log.info("Profile created : \n %s", self.run_ceph_command(cmd=cmd))
         log.debug("EC profile created. Proceeding to create pool")
 
@@ -1658,7 +1669,9 @@ class RadosOrchestrator:
             rule_list = self.get_crush_rule_names()
             if rule_name not in rule_list:
                 log.error(
-                    f"unable to create rule: {rule_name}. list obtained from cluster: {rule_list}"
+                    "unable to create rule: %s. list obtained from cluster: %s",
+                    rule_name,
+                    rule_list,
                 )
                 return False
             if create_ecpool:
@@ -1667,7 +1680,7 @@ class RadosOrchestrator:
                     crush_rule=rule_name,
                     **kwargs,
                 ):
-                    log.error(f"Failed to create Pool {pool_name}")
+                    log.error("Failed to create Pool %s", pool_name)
                     return False
         else:
             if create_ecpool:
@@ -1675,7 +1688,7 @@ class RadosOrchestrator:
                     ec_profile_name=profile_name,
                     **kwargs,
                 ):
-                    log.error(f"Failed to create Pool {pool_name}")
+                    log.error("Failed to create Pool %s", pool_name)
                     return False
 
         # Checking if enable Fast EC features flag passed
@@ -1687,7 +1700,8 @@ class RadosOrchestrator:
                 log.info("Enabled Fast EC feature on the EC pool created")
             except Exception as err:
                 log.error(
-                    f"Exception hit while enabling Fast EC features on the pool created: {err}"
+                    "Exception hit while enabling Fast EC features on the pool created: %s",
+                    err,
                 )
                 return False
 
@@ -1695,10 +1709,10 @@ class RadosOrchestrator:
             log.info(f"Created the ec profile : {profile_name} and pool : {pool_name}")
             cmd = f"ceph osd crush rule dump {pool_name}"
             log.debug(
-                f"Printing the crush rule used : \n{self.run_ceph_command(cmd=cmd)}\n"
+                "Printing the crush rule used : \n%s\n", self.run_ceph_command(cmd=cmd)
             )
         except Exception as err:
-            log.error(f"Exception hit while listing the EC Crush rule used: {err}")
+            log.error("Exception hit while listing the EC Crush rule used: %s", err)
         return True
 
     def change_osd_state(self, action: str, target: int, timeout: int = 180) -> bool:
@@ -3363,54 +3377,6 @@ EOF"""
                 obj_list.append(omap_obj["name"])
         return obj_list
 
-    def get_object_key_list(self, osd_id, pg_id, object_name):
-        """
-        Method returns the key list of an object
-        Args:
-            osd: osd id number
-            pg_id: pg id number
-            object_name: object name
-
-        Returns: List of keys mapped to that object
-
-        """
-        cmd_base = f"cephadm shell --name osd.{osd_id} --"
-        acting_osd_node = self.fetch_host_node(daemon_type="osd", daemon_id=osd_id)
-        cmd_get_obj_key = (
-            f"{cmd_base} ceph-objectstore-tool --data-path /var/lib/ceph/osd/ceph-"
-            f"{osd_id} --pgid {pg_id} {object_name}  list-omap"
-        )
-        out_put = acting_osd_node.exec_command(sudo=True, cmd=cmd_get_obj_key)
-        key_list = list(filter(None, out_put[0].split("\n")))
-        return key_list
-
-    def rm_object_key(self, osd_id, pg_id, object_name, object_key):
-        """
-        Method removes the object key
-        Args:
-            osd_id: osd id number
-            pg_id: pg id number
-            object_name: object name
-            object_key: object key to remove that mapped to the object
-
-        Returns: True -> Key deleted False -> Key not deleted
-        """
-        cmd_base = f"cephadm shell --name osd.{osd_id} --"
-        acting_osd_node = self.fetch_host_node(daemon_type="osd", daemon_id=osd_id)
-        cmd_rm_obj_key = (
-            f"{cmd_base} ceph-objectstore-tool --data-path /var/lib/ceph/osd/ceph-"
-            f"{osd_id} --pgid {pg_id} {object_name}  rm-omap {object_key}"
-        )
-        try:
-            acting_osd_node.exec_command(sudo=True, cmd=cmd_rm_obj_key)
-        except Exception:
-            log.error(
-                f"{object_key} object key is not removed for the {object_name} object"
-            )
-            return False
-        log.info(f"{object_key} object key is removed for the {object_name} object")
-        return True
-
     def get_inconsistent_pg_list(self, pool_name):
         """
         Method returns the inconsistent pg list
@@ -3473,79 +3439,107 @@ EOF"""
             log.error("Failed to clean pg inconsistent in the cluster")
             return False
 
-    def create_inconsistent_object(self, pool_name, object_name, num_keys: int = 3):
+    def create_inconsistent_object(self, objectstore_obj, pool_name, no_of_objects):
         """
-        The method converts the object into inconsistent object
+        Method creates the inconsistent object list.
         The logic implemented in the code is-
-        1. Get the primary osd and pg_id
-        2. Stopping the OSD
-        3. Get the key list of the object
-        4. Remove few keys that is mapped to the object
-        5. Start the OSD and perform deep-scrub on that pg id
-        6. Check the status
-        Args:
-            pool_name: pool name
-            object_name: object name in the pool
-            num_keys: number of keys to be deleted for inconsistent object to be generated
-        Returns: After converting the object in to inconsistent,method returns the pg id
-        """
-        osd_map_output = self.get_osd_map(pool=pool_name, obj=object_name)
-        primary_osd = osd_map_output["acting_primary"]
-        log.info(f"The object stored in the primary osd number-{primary_osd}")
-        pg_id = osd_map_output["pgid"]
-        log.info(f"The object {object_name} is created in the pg-{pg_id}")
+        1. Create an object and set the object key and value.
+        2. Get the primary osd and pg_id
+        3. Stop the OSD
+        4. Remove keys that is mapped to the object
+        5. Start the OSD and perform deep-scrub.
+        6. Check the inconsistent object count
 
-        # stopping the OSD
-        if not self.change_osd_state(action="stop", target=primary_osd):
-            log.error(f"Unable to stop the OSD : {primary_osd}")
-            raise Exception("Execution error")
-        log.debug(f"Stopped OSD : {primary_osd} to create inconsistent object")
-        time.sleep(5)
-        # Getting the key list
-        key_list = self.get_object_key_list(primary_osd, pg_id, object_name)
-        log.debug(f"Key list before deletion : {key_list}")
-        rm_key_count = 0
-        deleted_keys = []
-        for obj_key in key_list:
-            log.info(f" Deleting the key :{obj_key} in the {object_name} object")
-            self.rm_object_key(primary_osd, pg_id, object_name, obj_key)
+        Args:
+            objectstore_obj - Object store object
+            pool_name - Pool name
+            no_of_objects - Number of objects
+        Return: The object name is used as the key, and the corresponding pg_id is stored as the value,
+                indicating which object has become inconsistent.
+                None -> if any error
+        """
+        object_list = []
+        osd_object_map = {}
+        object_pgid_map = {}
+        org_file_create = "echo 'The actual message' > /tmp/original"
+        self.client.exec_command(cmd=org_file_create, sudo=True)
+        try:
+            for count in range(no_of_objects):
+                obj_name = f"OBJ_{count}"
+                object_list.append(obj_name)
+                # Creating object
+                msg_object = f"Creating the {obj_name} object in the pool {pool_name}"
+                log.info(msg_object)
+                cmd_put_obj = f"rados --pool {pool_name} put {obj_name} /tmp/original"
+                self.client.exec_command(cmd=cmd_put_obj, sudo=True)
+                msg_omap_val = f"Setting the key-{obj_name} key and  val-{obj_name} value to the  {obj_name} object"
+                log.info(msg_omap_val)
+                cmd_set_omapval = f"rados --pool {pool_name} setomapval {obj_name} key-{obj_name} val-{obj_name}"
+                self.client.exec_command(cmd=cmd_set_omapval, sudo=True)
             time.sleep(5)
-            new_key_list = self.get_object_key_list(primary_osd, pg_id, object_name)
-            if obj_key in new_key_list:
-                log.error(
-                    f"The key:{obj_key} from object:{object_name} could not be deleted. Fail"
-                )
-                raise Exception("Object key not deleted error")
-            rm_key_count += 1
-            deleted_keys.append(obj_key)
-            log.debug(
-                f"Successfully Deleted the {obj_key} from object: {object_name}"
-                f"Total keys deleted on the object : {rm_key_count}"
-                f"Keys removed : {deleted_keys}"
+            for object_name in object_list:
+                osd_map_details = self.get_osd_map(pool=pool_name, obj=object_name)
+                primary_osd = osd_map_details["acting_primary"]
+                pg_id = osd_map_details["pgid"]
+                osd_object_map.setdefault(primary_osd, []).append(object_name)
+                object_pgid_map[object_name] = pg_id
+            msg_osd_object = f"The object and osd mappings are- {osd_object_map}"
+            log.info(msg_osd_object)
+            msg_object_pgid = f"The object and pgid mappings are -{object_pgid_map}"
+            log.info(msg_object_pgid)
+
+            for osd_id, objects_list in osd_object_map.items():
+                for obj_name in objects_list:
+
+                    obj_str = objectstore_obj.list_objects(
+                        osd_id=osd_id, obj_name=obj_name
+                    )
+
+                    obj_pg_id = ast.literal_eval(obj_str)[0]
+                    json_data = json.dumps(ast.literal_eval(obj_str)[1])
+
+                    objectstore_obj.remove_omap(
+                        osd_id=osd_id,
+                        pgid=obj_pg_id,
+                        obj=json_data,
+                        key=f"key-{obj_name}",
+                    )
+                    msg_obj_remove_omap = f"The {obj_name} object omap is removed"
+                    log.info(msg_obj_remove_omap)
+
+                if not self.change_osd_state(action="start", target=int(osd_id)):
+                    msg_osd_start = f"Could not start OSD.{osd_id}"
+                    log.error(msg_osd_start)
+                    raise Exception("OSD not started")
+            log.info("Starting user initiated deep-scrub")
+            self.run_deep_scrub(pool=pool_name)
+            log.info("The user initiated deep scrub is completed")
+            assert self.check_inconsistent_health(inconsistent_present=True)
+
+            inconsistent_obj_count = 0
+            unique_pg_ids = set(object_pgid_map.values())
+            for pg_id in unique_pg_ids:
+                inconsistent_details = self.get_inconsistent_object_details(pg_id)
+                obj_count = len(inconsistent_details["inconsistents"])
+                msg_count = f"The inconsistent count in the {pg_id} is - {obj_count}"
+                log.info(msg_count)
+                inconsistent_obj_count += obj_count
+            msg_total_count = (
+                f"The total inconsistent object count is - {inconsistent_obj_count}"
             )
-            if rm_key_count == num_keys:
-                break
-        log.debug(
-            f"Done with deleting KW pairs on the OSD : {primary_osd} for Obj : object_name"
-        )
-        key_list = self.get_object_key_list(primary_osd, pg_id, object_name)
-        log.debug(f"Key list After deletion : {key_list}")
-        if not self.change_osd_state(action="start", target=primary_osd):
-            log.error(f"Unable to start the OSD : {primary_osd}")
-            raise Exception("OSD could not be started error")
-        log.debug(
-            f"Started the OSD: {primary_osd} and performing deep scrubs on the PG"
-        )
-        log.info(f"Performing the deep-scrub on the pg-{pg_id}")
-        if not self.start_check_deep_scrub_complete(pg_id=pg_id):
-            log.debug(f"deep-scrubbing could not be completed on PG : {pg_id}")
-            raise Exception("PG not deep-scrubbed error")
-        log.debug(f"Completed deep-scrubbing the pg : {pg_id}")
-        # sleeping for 10 seconds
-        time.sleep(10)
-        assert self.check_inconsistent_health(inconsistent_present=True)
-        log.info(f"The inconsistent object is created in the pg: {pg_id}")
-        return pg_id
+            log.info(msg_total_count)
+
+            if inconsistent_obj_count != no_of_objects:
+                msg_error = (
+                    f"The requested number of inconsistent objects are not created. The requested is  "
+                    f"is - {no_of_objects} and generated count is {inconsistent_obj_count} "
+                )
+                log.error(msg_error)
+                return None
+            return object_pgid_map
+        except Exception as error:
+            log.error(f"Hit Exception while creating inconsistent object : {error}.")
+            return None
 
     def start_check_scrub_complete(
         self, pg_id, pg_dump=None, user_initiated: bool = True, wait_time: int = 900
