@@ -18,7 +18,7 @@ tests:
               command: bootstrap
               service: cephadm
               args:
-                custom_repo: "http://download-01.beak-001.prod.iad2.dc.redhat.com/rhel-9/composes/auto/ceph-9.0-rhel-9/RHCEPH-9.0-RHEL-9-20251027.ci.0"
+                custom_repo: "https://download-01.beak-001.prod.iad2.dc.redhat.com/rhel-9/composes/auto/ceph-9.0-rhel-9/RHCEPH-9.0-RHEL-9-20251030.ci.0/"
                 custom_image: "quay.io/rhceph-ci/rhceph@sha256:1f234c628924b61e869c9f36c2c7c39fe9bd0212596177fab6af480b30091722"
                 registry-url: registry.redhat.io
                 mon-ip: node1
