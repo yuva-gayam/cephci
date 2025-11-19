@@ -85,6 +85,10 @@ tests:
                     generate_cert: true
           - config:
               args:
+                - "ceph config set client.rgw.rgw.ssl rgw_verify_ssl False"
+              command: shell
+          - config:
+              args:
                 - "ceph orch certmgr cert get cephadm_root_ca_cert"
               command: shell
       desc: bootstrap and deployment services with label placements.
@@ -92,7 +96,6 @@ tests:
       destroy-cluster: false
       module: test_cephadm.py
       name: Deploy RHCS-ssl cluster using cephadm
-
   - test:
       abort-on-fail: true
       config:
@@ -107,6 +110,22 @@ tests:
       module: test_client.py
       name: Configure client
       polarion-id: CEPH-83573758
+
+  - test:
+      abort-on-fail: true
+      config:
+        commands:
+          - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+          - "sudo yum install -y sshpass"
+          - "sleep 20"
+          - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:node7}:/etc/pki/ca-trust/source/anchors/"
+          - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:node8}:/etc/pki/ca-trust/source/anchors/"
+      name: copy-crt-nodes
+      desc: Copying crt to rgw and client node
+      polarion-id: CEPH-83575227
+      abort-on-fail: true
+      module: exec.py
+
   - test:
       abort-on-fail: true
       config:
@@ -129,7 +148,6 @@ tests:
       polarion-id: CEPH-83575227
       module: exec.py
       name: update-ca-trust on client node
-
 
   # - test:
   #     name: Manual Resharding tests pre upgrade
@@ -190,7 +208,7 @@ tests:
         #     name: Test download with M buckets with N objects
         #     polarion-id: CEPH-14237
         #     config:
-        # #       script-name: test_Mbuckets_with_Nobjects.py
+        #       script-name: test_Mbuckets_with_Nobjects.py
         #       config-file-name: test_Mbuckets_with_Nobjects_download.yaml
         - test:
             name: Upgrade cluster to latest 8.x ceph version
