@@ -107,8 +107,7 @@ tests:
       module: test_client.py
       name: Configure client
       polarion-id: CEPH-83573758
-  
-    - test:
+  - test:
       abort-on-fail: true
       config:
         role: rgw
