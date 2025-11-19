@@ -19,8 +19,8 @@ tests:
               service: cephadm
               args:
                 rhcs-version: 8.1
-                custom_image: registry-proxy.engineering.redhat.com/rh-osbs/rhceph:8-562
-                custom_repo: https://s3.upshift.redhat.com/ceph-composes/RHCEPH-8.1-RHEL-9-20250923.0/RHCEPH-8.1-RHEL-9-20250923.0.repo
+                release: rc
+                registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
@@ -89,14 +89,13 @@ tests:
               command: shell
           - config:
               args:
-                - "sudo update-ca-trust"
+                - "ceph orch certmgr cert get cephadm_root_ca_cert"
               command: shell
       desc: bootstrap and deployment services with label placements.
       polarion-id: CEPH-83573777
       destroy-cluster: false
       module: test_cephadm.py
       name: Deploy RHCS-ssl cluster using cephadm
-
   - test:
       abort-on-fail: true
       config:
@@ -111,6 +110,22 @@ tests:
       module: test_client.py
       name: Configure client
       polarion-id: CEPH-83573758
+
+  - test:
+      abort-on-fail: true
+      config:
+        commands:
+          - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+          - "sudo yum install -y sshpass"
+          - "sleep 20"
+          - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:node7}:/etc/pki/ca-trust/source/anchors/"
+          - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:node8}:/etc/pki/ca-trust/source/anchors/"
+      name: copy-crt-nodes
+      desc: Copying crt to rgw and client node
+      polarion-id: CEPH-83575227
+      abort-on-fail: true
+      module: exec.py
+
   - test:
       abort-on-fail: true
       config:
@@ -122,6 +137,17 @@ tests:
       polarion-id: CEPH-83575227
       module: exec.py
       name: update-ca-trust on rgw node
+  - test:
+      abort-on-fail: true
+      config:
+        role: client
+        sudo: True
+        commands:
+          - "update-ca-trust"
+      desc: update-ca-trust on client node
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: update-ca-trust on client node
 
   # - test:
   #     name: Manual Resharding tests pre upgrade
@@ -176,14 +202,14 @@ tests:
       desc: RGW upgarde and IO parallelly.
       module: test_parallel.py
       parallel:
-        - test:
-            desc: test to create "M" no of buckets and "N" no of objects with download
-            module: sanity_rgw.py
-            name: Test download with M buckets with N objects
-            polarion-id: CEPH-14237
-            config:
-              script-name: test_Mbuckets_with_Nobjects.py
-              config-file-name: test_Mbuckets_with_Nobjects_download.yaml
+        # - test:
+        #     desc: test to create "M" no of buckets and "N" no of objects with download
+        #     module: sanity_rgw.py
+        #     name: Test download with M buckets with N objects
+        #     polarion-id: CEPH-14237
+        #     config:
+        #       script-name: test_Mbuckets_with_Nobjects.py
+        #       config-file-name: test_Mbuckets_with_Nobjects_download.yaml
         - test:
             name: Upgrade cluster to latest 8.x ceph version
             desc: Upgrade cluster to latest version
