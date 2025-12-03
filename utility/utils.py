@@ -466,7 +466,7 @@ def retain_bucket_pol_at_archive(
             )
 
 
-def verify_sync_status(verify_io_on_site_node, retry=25, delay=60):
+def verify_sync_status(verify_io_on_site_node, retry=30, delay=60):
     """
     verify RGW multisite sync status
     """
