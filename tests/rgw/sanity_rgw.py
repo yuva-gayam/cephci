@@ -87,6 +87,7 @@ def run(ceph_cluster, **kw):
     extra_pkgs = config.get("extra-pkgs")
     install_start_kafka_broker = config.get("install_start_kafka")
     configure_kafka_broker_security = config.get("configure_kafka_security")
+    install_keystone_ldap = config.get("install_keystone_ldap")
     cloud_type = config.get("cloud-type")
     log.info(f"Cloud Type is {cloud_type}")
     test_config = {"config": config.get("test-config", {})}
@@ -146,22 +147,45 @@ def run(ceph_cluster, **kw):
         if ceph_cluster.rhcs_version.version[0] > 4:
             setup_cluster_access(ceph_cluster, rgw_node)
             setup_cluster_access(ceph_cluster, client_node)
-
         if ceph_cluster.rhcs_version.version[0] in [3, 4]:
             if ceph_cluster.containerized:
-                # install ceph-common on the host hosting the container
-                exec_from.exec_command(
-                    sudo=True,
-                    cmd="yum install -y ceph-common --nogpgcheck",
-                    check_ec=False,
-                )
+                # Wait for repos to be available to avoid 'no enabled repos' errors
+                log.info("Waiting for repository files to appear...")
+                for _ in range(60):
+                    out, _ = exec_from.exec_command(
+                        cmd="ls /etc/yum.repos.d/*.repo", check_ec=False
+                    )
+                    if out:
+                        break
+                    time.sleep(1)
+                else:
+                    raise Exception("Repository files did not appear in time")
+
+                # Retry yum install a few times (inline, no helper)
+                log.info("Installing ceph-common with retry...")
+                rc = 1
+                for attempt in range(1, 4):
+                    out, err, rc = exec_from.exec_command(
+                        sudo=True,
+                        cmd="yum install -y ceph-common --nogpgcheck",
+                        check_ec=False,
+                    )
+                    if rc == 0:
+                        break
+                    log.error(
+                        f"ceph-common install failed attempt {attempt}/3, retrying..."
+                    )
+                    time.sleep(5)
+
+                if rc != 0:
+                    raise Exception("Failed to install ceph-common after 3 attempts")
 
     if install_start_kafka_broker:
         install_start_kafka(rgw_node, cloud_type)
     if configure_kafka_broker_security:
         configure_kafka_security(rgw_node, cloud_type)
 
-    if cloud_type:
+    if install_keystone_ldap:
         config_keystone_ldap(rgw_node, cloud_type)
 
     out, err = exec_from.exec_command(cmd="ls -l venv", check_ec=False)
