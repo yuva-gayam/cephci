@@ -345,6 +345,19 @@ class BootstrapMixin:
         if rhbuild.split("-")[0] in ["5.1", "5.2"]:
             cmd += " --yes-i-know"
 
+        # Ensure /var/lib/ceph directory exists before bootstrap
+        # cephadm checks for this directory and fails if it's missing
+        # Create on installer node (where bootstrap command runs)
+        self.installer.exec_command(
+            cmd="mkdir -p /var/lib/ceph", sudo=True
+        )
+        # Create on mon node (where cluster will be bootstrapped)
+        # cephadm may check for this directory on the target node
+        if mon_node.ip_address != self.installer.node.ip_address:
+            mon_node.exec_command(
+                cmd="mkdir -p /var/lib/ceph", sudo=True
+            )
+
         out, err = self.installer.exec_command(
             sudo=True,
             cmd=cmd,
