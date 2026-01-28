@@ -1,6 +1,7 @@
 import random
 import secrets
 import string
+import time
 import traceback
 
 from ceph.ceph import CommandFailed
@@ -60,8 +61,10 @@ def run(ceph_cluster, **kw):
         if not fs_details:
             fs_util.create_fs(client1, default_fs)
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -127,12 +130,24 @@ def run(ceph_cluster, **kw):
         nfs_mounting_dir_2 = f"/mnt/cephfs_{mounting_dir}_2/"
         commands = [
             f"mkdir -p {nfs_mounting_dir_1}",
-            f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_1} {nfs_mounting_dir_1}",
             f"mkdir -p {nfs_mounting_dir_2}",
-            f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_2} {nfs_mounting_dir_2}",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command, long_running=True)
+            client1.exec_command(sudo=True, cmd=command)
+
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_1, nfs_mounting_dir_1
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
+
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_2, nfs_mounting_dir_2
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
 
         fs_util.run_ios(client1, nfs_mounting_dir_1)
         fs_util.run_ios(client1, nfs_mounting_dir_2)
@@ -157,4 +172,6 @@ def run(ceph_cluster, **kw):
             f"ceph nfs cluster rm {nfs_name}",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command, long_running=True)
+            client1.exec_command(sudo=True, cmd=command, timeout=600, check_ec=False)
+            log.info("Sleeping for 3 seconds between commands...")
+            time.sleep(3)

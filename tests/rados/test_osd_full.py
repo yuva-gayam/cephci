@@ -7,11 +7,13 @@ import datetime
 import json
 import time
 
+from ceph.ceph import SocketTimeoutException, TimeoutException
 from ceph.ceph_admin import CephAdmin
 from ceph.rados import utils
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.pool_workflows import PoolFunctions
 from ceph.rados.rados_bench import RadosBench
+from ceph.rados.utils import get_cluster_timestamp
 from ceph.utils import get_node_by_id
 from tests.ceph_installer.test_cephadm import run as add_osd
 from tests.cephadm.test_host import run as deploy_host
@@ -151,7 +153,8 @@ def run(ceph_cluster, **kw):
         config = config["pg_autoscaling"]
         log.info("Running pg rebalance with full OSDs test case")
         pool_target_configs = config["pool_config"]
-
+        start_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(f"Test workflow started. Start time: {start_time}")
         for entry in pool_target_configs.values():
             try:
                 rados_obj.configure_pg_autoscaler(**{"default_mode": "off"})
@@ -268,14 +271,19 @@ def run(ceph_cluster, **kw):
                     "max_objs": subseq_obj_full,
                     "check_ec": False,
                 }
-                if (
-                    rados_obj.bench_write(
-                        pool_name=pool_name, **osdfull_config, verify_stats=False
+                try:
+                    if (
+                        rados_obj.bench_write(
+                            pool_name=pool_name, **osdfull_config, verify_stats=False
+                        )
+                        is False
+                    ):
+                        err_msg = f"Error running rados bench using osdfull_config: {osdfull_config}"
+                        raise Exception(err_msg)
+                except (SocketTimeoutException, TimeoutException):
+                    log.warning(
+                        "rados bench socket Timeout because OSD(s) are full - Expected"
                     )
-                    is False
-                ):
-                    err_msg = f"Error running rados bench using osdfull_config: {osdfull_config}"
-                    raise Exception(err_msg)
 
                 assert rados_obj.verify_pool_stats(
                     pool_name=pool_name, exp_objs=total_objs
@@ -391,7 +399,13 @@ def run(ceph_cluster, **kw):
                 # log cluster health
                 rados_obj.log_cluster_health()
                 # check for crashes after test execution
-                if rados_obj.check_crash_status():
+                test_end_time = get_cluster_timestamp(rados_obj.node)
+                log.debug(
+                    f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+                )
+                if rados_obj.check_crash_status(
+                    start_time=start_time, end_time=test_end_time
+                ):
                     log.error("Test failed due to crash at the end of test")
                     return 1
 
@@ -425,7 +439,8 @@ def run(ceph_cluster, **kw):
             "Running test for PG rebalancing with full OSDs when new OSDs are added"
         )
         pool_target_configs = config["pool_config"]
-
+        start_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(f"Test workflow started. Start time: {start_time}")
         for entry in pool_target_configs.values():
             try:
                 rados_obj.configure_pg_autoscaler(**{"default_mode": "off"})
@@ -470,8 +485,16 @@ def run(ceph_cluster, **kw):
                     "b": f"{bench_obj_size_kb}KB",
                     "no-cleanup": True,
                     "max-objects": full_objs,
+                    "check_ec": False,
                 }
-                bench_obj.write(client=client_node, pool_name=pool_name, **full_config)
+                try:
+                    bench_obj.write(
+                        client=client_node, pool_name=pool_name, **full_config
+                    )
+                except (SocketTimeoutException, TimeoutException):
+                    log.warning(
+                        "rados bench socket Timeout because OSD(s) are full - Expected"
+                    )
 
                 assert rados_obj.verify_pool_stats(
                     pool_name=pool_name, exp_objs=full_objs
@@ -748,7 +771,13 @@ def run(ceph_cluster, **kw):
                     # log cluster health
                     rados_obj.log_cluster_health()
                     # check for crashes after test execution
-                    if rados_obj.check_crash_status():
+                    test_end_time = get_cluster_timestamp(rados_obj.node)
+                    log.debug(
+                        f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+                    )
+                    if rados_obj.check_crash_status(
+                        start_time=start_time, end_time=test_end_time
+                    ):
                         log.error("Test failed due to crash at the end of test")
                         return 1
             log.info(

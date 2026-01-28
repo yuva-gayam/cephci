@@ -3,6 +3,8 @@ Test suite that verifies the deployment of Ceph NVMeoF Gateway HA
  with supported entities like subsystems , etc.,
 """
 
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from json import loads
 
@@ -10,16 +12,13 @@ from looseversion import LooseVersion
 
 from ceph.ceph import Ceph
 from ceph.ceph_admin.orch import Orch
-from ceph.nvmegw_cli import NVMeGWCLI
-from ceph.parallel import parallel
+from ceph.utils import get_node_by_id
 from cephci.utils.configs import get_configs, get_registry_credentials
 from cli.utilities.containers import Registry
-from tests.nvmeof.test_ceph_nvmeof_high_availability import (
-    configure_subsystems,
-    teardown,
-)
-from tests.nvmeof.workflows.ha import HighAvailability
-from tests.nvmeof.workflows.nvme_utils import deploy_nvme_service
+from tests.nvmeof.workflows.gateway_entities import configure_gw_entities, teardown
+from tests.nvmeof.workflows.initiator import NVMeInitiator
+from tests.nvmeof.workflows.nvme_service import NVMeService
+from tests.nvmeof.workflows.nvme_utils import check_and_set_nvme_cli_image
 from tests.rbd.rbd_utils import initial_rbd_config
 from utility.log import Log
 
@@ -75,10 +74,8 @@ def upgrade_prerequisites(cluster, orch, **upg_cfg):
 
     # Set Repo based on release
     if not cdn:
-        orch.set_tool_repo()
-
         if overrides and not cdn:
-            override_dict = dict(item.split("=") for item in overrides)
+            override_dict = overrides
             supported_overrides = [
                 "grafana",
                 "keepalived",
@@ -110,11 +107,23 @@ def fetch_nvme_versions(gateways):
     """Fetch Gateway Versions"""
     info = dict()
     for gateway in gateways:
-        _, gw = gateway.gateway.info(**{"base_cmd_args": {"format": "json"}})
+        gw, _ = gateway.gateway.info(**{"base_cmd_args": {"format": "json"}})
         gw = loads(gw)
+        # We need to extract the SPDK version from the version string
+        # "SPDK v24.09 git sha1 316ca90fec66c0d524bfef41bb8996e0b11fb655",
+        # "SPDK v25.05 git sha1 c19d07f46274d31201c0c4db3775a655d68f5f38",
+        # "24.01.1",
+        # "SPDK v24.09"
+        spdk_version = None
+        pattern = re.compile(r"(?:v)?(\d+\.\d+(?:\.\d+)?)")
+        match = pattern.search(gw["version"])
+        if match:
+            spdk_version = match.group(1)
+        else:
+            spdk_version = gw["spdk_version"]
         node_info = {
             "version": gw["version"],
-            "spdk-version": gw["spdk_version"],
+            "spdk-version": spdk_version,
         }
         info[gateway.hostname] = node_info
 
@@ -190,46 +199,50 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
                       release: 7.1                  # if cdn, provide release
     """
     LOG.info("Upgrade Ceph cluster with NVMEoF Gateways")
+
     config = kwargs["config"]
-    rbd_pool = config["rbd_pool"]
+    ctm = config["manifest"]
+
     rbd_obj = initial_rbd_config(**kwargs)["rbd_reppool"]
-    ibm_build = config.get("ibm_build", False)
+
+    ibm_build = True if ctm.product == "ibm" else False
+
     orch = Orch(cluster=ceph_cluster, **config)
     container_image = config.get("container_image")
-    upgrade = config["upgrade"]
-    overrides = kwargs.get("test_data", {}).get("custom-config")
 
-    # Todo: Fix the CDN NVMe CLI image issue with framework support.
-    for key, value in dict(item.split("=") for item in overrides).items():
-        if key == "nvmeof_cli_image":
-            NVMeGWCLI.NVMEOF_CLI_IMAGE = value
-            break
+    upgrade = config["upgrade"]
+    overrides = kwargs.get("test_data", {}).get("custom_config_dict")
+
     io_tasks = []
     executor = ThreadPoolExecutor()
 
     try:
         if config.get("install"):
-            deploy_nvme_service(ceph_cluster, config)
+            custom_config = kwargs.get("test_data", {}).get("custom-config")
+            LOG.info("Check and set NVMe CLI image")
+            check_and_set_nvme_cli_image(ceph_cluster, config=custom_config)
+            nvme_service = NVMeService(config, ceph_cluster)
+            LOG.info("Deploy NVMe service")
+            nvme_service.deploy()
+            LOG.info("Initialize gateways")
+            nvme_service.init_gateways()
 
-        ha = HighAvailability(ceph_cluster, config["gw_nodes"], **config)
-        nvmegwcli = ha.gateways[0]
+        # ha = HighAvailability(ceph_cluster, config["gw_nodes"], **config)
+        nvmegwcli = nvme_service.gateways[0]
 
         # Configure Subsystem
         if config.get("subsystems"):
-            with parallel() as p:
-                for subsys_args in config["subsystems"]:
-                    subsys_args["ceph_cluster"] = ceph_cluster
-                    p.spawn(configure_subsystems, rbd_pool, ha, subsys_args)
+            configure_gw_entities(nvme_service, rbd_obj=rbd_obj, cluster=ceph_cluster)
 
-        pre_upg_versions = fetch_nvme_versions(ha.gateways)
+        pre_upg_versions = fetch_nvme_versions(nvme_service.gateways)
 
-        # Prepare and Run FIO on NVMe devices
-        namespaces = ha.fetch_namespaces(nvmegwcli)
-        initiators = config["initiators"]
-        ha.prepare_io_execution(nvmegwcli, initiators)
-        ha.compare_client_namespace([i["uuid"] for i in namespaces])
-        for initiator in ha.clients:
-            io_tasks.append(executor.submit(initiator.start_fio))
+        for initiator in config["initiators"]:
+            client = get_node_by_id(ceph_cluster, initiator["node"])
+            initiator_obj = NVMeInitiator(client)
+            initiator_obj.connect_targets(nvmegwcli, initiator)
+            paths = initiator_obj.list_devices()
+            i = initiator_obj.start_fio(paths=paths, **initiator)
+            LOG.info(f"FIO Result: {i}")
 
         # Setup regisgtry
         upg_cfg = {
@@ -239,6 +252,7 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
             "ibm_build": ibm_build,
         }
 
+        LOG.info("Upgrade prerequisites")
         upgrade_prerequisites(ceph_cluster, orch, **upg_cfg)
 
         # Install cephadm
@@ -247,15 +261,20 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
         # Check service versions vs available and target containers
         orch.upgrade_check(image=container_image)
 
+        LOG.info("Start Upgrade")
         # Start Upgrade
         config.update({"args": {"image": "latest"}})
         orch.start_upgrade(config)
 
+        LOG.info("Monitor upgrade status, till completion")
         # Monitor upgrade status, till completion
         orch.monitor_upgrade_status()
 
+        # Post upgrade nvmeof daemons are taking time to start, so wait for 60 seconds
+        time.sleep(60)
+        LOG.info("Validate upgraded versions of NVMe Gateways")
         # Validate upgraded versions of NVMe Gateways
-        post_upg_versions = fetch_nvme_versions(ha.gateways)
+        post_upg_versions = fetch_nvme_versions(nvme_service.gateways)
         compare_nvme_versions(pre_upg_versions, post_upg_versions)
 
         return 0
@@ -266,6 +285,6 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
             LOG.info("Waiting for completion of IOs.")
             executor.shutdown(wait=True, cancel_futures=True)
         if config.get("cleanup"):
-            teardown(ceph_cluster, rbd_obj, config)
+            teardown(nvme_service, rbd_obj)
 
     return 1

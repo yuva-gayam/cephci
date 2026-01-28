@@ -77,11 +77,17 @@ def run(ceph_cluster, **kw):
         client1 = clients[0]
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
         nfs_name = "cephnfs"
-        client1.exec_command(
-            sudo=True,
-            cmd=f'ceph nfs cluster create {nfs_name} "2 {nfs_servers[0].node.hostname} '
-            f'{nfs_servers[1].node.hostname} {nfs_servers[2].node.hostname}" '
-            f"--ingress --virtual-ip {virtual_ip}/{subnet}",
+        fs_util_v1.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=[
+                "2",
+                nfs_servers[0].node.hostname,
+                nfs_servers[1].node.hostname,
+                nfs_servers[2].node.hostname,
+            ],
+            ha=True,
+            vip=f"{virtual_ip}/{subnet}",
         )
 
         log.info("validate the services have started on nfs")
@@ -124,8 +130,12 @@ def run(ceph_cluster, **kw):
             )
             nfs_mounting_dir = f"/mnt/cephfs_nfs{mounting_dir}_1/"
             client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-            command = f"mount -t nfs -o port=2049 {virtual_ip}:{nfs_export} {nfs_mounting_dir}"
-            client1.exec_command(sudo=True, cmd=command, check_ec=False)
+            rc = fs_util_v1.cephfs_nfs_mount(
+                client1, virtual_ip, nfs_export, nfs_mounting_dir
+            )
+            if not rc:
+                log.error("cephfs nfs export mount failed")
+                return 1
             mount_dir.append(nfs_mounting_dir)
         active_nfs = get_active_nfs(nfs_servers, virtual_ip)
         backend_server = get_active_nfs_server(client1, nfs_name, ceph_cluster)

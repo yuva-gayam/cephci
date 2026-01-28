@@ -364,7 +364,13 @@ def setup_vm_node_ibm(node, ceph_nodes, **params):
 
 
 def create_ceph_nodes(
-    cluster_conf, inventory, osp_cred, run_id, instances_name=None, enable_eus=False
+    cluster_conf,
+    inventory,
+    osp_cred,
+    run_id,
+    instances_name=None,
+    enable_eus=False,
+    custom_config=None,
 ):
     log.info("Creating osp instances")
     osp_glbs = osp_cred.get("globals")
@@ -376,6 +382,7 @@ def create_ceph_nodes(
         inventory_path = os.path.abspath(ceph_cluster.get("inventory"))
         with open(inventory_path, "r") as inventory_stream:
             inventory = yaml.safe_load(inventory_stream)
+
     node_count = 0
     params["cloud-data"] = inventory.get("instance").get("setup")
     params["username"] = os_cred["username"]
@@ -399,8 +406,18 @@ def create_ceph_nodes(
             )
 
         params["cluster-name"] = ceph_cluster.get("name")
-        params["vm-size"] = inventory.get("instance").get("create").get("vm-size")
         params["vm-network"] = inventory.get("instance").get("create").get("vm-network")
+
+        # Process the VM flavor. Highest precedence goes to custom-config
+        params["vm-size"] = inventory.get("instance").get("create").get("vm-size")
+        if custom_config:
+            _custom_dict = dict(
+                item.split("=")
+                for item in custom_config
+                if item.startswith("openstack")
+            )
+            if "openstack_vm_profile" in _custom_dict:
+                params["vm-size"] = _custom_dict["openstack_vm_profile"]
 
         if params.get("root-login") is False:
             params["root-login"] = False
@@ -609,11 +626,11 @@ def setup_repos(
     base_url,
     platform=None,
     installer_url=None,
-    repos=None,
+    repos=["MON", "OSD", "Tools"],
     cloud_type="openstack",
     ibm_build=False,
 ):
-    if base_url.endswith(".repo") or ibm_build:
+    if base_url.endswith(".repo"):
         cmd = f"yum-config-manager --add-repo {base_url}"
         ceph.exec_command(sudo=True, cmd=cmd)
 
@@ -625,11 +642,9 @@ def setup_repos(
             add_centos_epel_repo(ceph, platform)
 
     else:
-        if not repos:
-            repos = ["MON", "OSD", "Tools"]
         base_repo = generate_repo_file(base_url, repos, cloud_type)
         base_file = ceph.remote_file(
-            sudo=True, file_name="/etc/yum.repos.d/rh_ceph.repo", file_mode="w"
+            sudo=True, file_name="/etc/yum.repos.d/ceph_build.repo", file_mode="w"
         )
         base_file.write(base_repo)
         base_file.flush()
@@ -643,6 +658,35 @@ def setup_repos(
         )
         inst_file.write(inst_repo)
         inst_file.flush()
+
+
+def remove_repos(
+    ceph_node,
+    exclude_repos=[
+        "hashicorp.repo",
+        "redhat.repo",
+        "appstream.repo",
+        "baseos.repo",
+        "crb.repo",
+    ],
+    repo_dir="/etc/yum.repos.d/",
+):
+    """Method to remove all repos from a desired directory except 'exclude_repos' entries
+    This method can also be used to remove general files from any directory on input node
+    Args:
+        ceph_node: node on which repos should be removed
+        exclude_repos: list of repos that will be excluded and retained
+        repo_dir: repo directory defaulted to '/etc/yum.repos.d/'
+    """
+    rm_repo_cmd = f"find {repo_dir} -type f -delete"
+    if exclude_repos:
+        rm_repo_cmd = (
+            f"find {repo_dir} -type f ! -name "
+            + " ! -name ".join(exclude_repos)
+            + " -delete"
+        )
+    for _cmd in [rm_repo_cmd, "yum clean all"]:
+        ceph_node.exec_command(sudo=True, cmd=_cmd)
 
 
 def check_ceph_healthly(
@@ -1397,3 +1441,33 @@ def is_client(ceph_node):
     Return True if client node else False
     """
     return len(ceph_node.role.role_list) == 1 and "client" in ceph_node.role.role_list
+
+
+def enable_coredump(node):
+    """
+    Method to enable coredump collection
+    Refer: https://bugzilla.redhat.com/show_bug.cgi?id=2170213#c1
+    Args:
+        node: ceph node object
+    Returns:
+        None
+    """
+    log.info("Enabling coredump collection on %s" % node.hostname)
+    log.debug("Ensure /etc/systemd/system.conf file exists or create it")
+    _, _, rc, _ = node.exec_command(
+        sudo=True, cmd="test -e /etc/systemd/system.conf", verbose=True
+    )
+    if rc:
+        log.debug("File /etc/systemd/system.conf does not exist, creating..")
+        node.exec_command(sudo=True, cmd="touch /etc/systemd/system.conf")
+    sys_cmds = [
+        "echo 'fs.suid_dumpable = 2' >> /etc/sysctl.conf",
+        "sysctl -p",
+        "sed -i '/DefaultLimitCORE/d' /etc/systemd/system.conf",
+        "echo 'DefaultLimitCORE=infinity' >> /etc/systemd/system.conf",
+        "systemctl daemon-reexec",
+    ]
+
+    for _cmd in sys_cmds:
+        out, err = node.exec_command(cmd=_cmd, sudo=True)
+        log.info("Out: %s \n Err: %s" % (out, err))

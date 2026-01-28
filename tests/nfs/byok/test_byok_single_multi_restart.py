@@ -1,16 +1,17 @@
+import traceback
+
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
 from cli.utilities.filesys import Unmount
-from tests.cephfs.lib.cephfs_common_lib import CephFSCommonUtils
 from tests.nfs.byok.byok_tools import (
     clean_up_gklm,
     create_multiple_nfs_instance_for_byok,
     create_nfs_instance_for_byok,
     get_enctag,
-    get_gklm_ca_certificate,
     load_gklm_config,
     perform_io_operations_and_validate_fuse,
     setup_gklm_infrastructure,
+    wait_for_gklm_server_restart,
 )
 from tests.nfs.nfs_operations import (
     cleanup_custom_nfs_cluster_multi_export_client,
@@ -190,6 +191,7 @@ def run(ceph_cluster, **kw):
     fs_name = config.get("fs_name", "cephfs")
     nfs_replication_number = int(config.get("nfs_replication_number", "1"))
     port = config.get("nfs_port", "2049")
+    global subvolume_group, gkml_client_name, gklm_cert_alias
     subvolume_group = "ganeshagroup"
 
     # Ensure sufficient clients
@@ -204,21 +206,18 @@ def run(ceph_cluster, **kw):
     gklm_ip = gklm_params["gklm_ip"]
     gklm_user = gklm_params["gklm_user"]
     gklm_password = gklm_params["gklm_password"]
-    gklm_node_username = gklm_params["gklm_node_username"]
-    gklm_node_password = gklm_params["gklm_node_password"]
     gklm_hostname = gklm_params["gklm_hostname"]
 
     gkml_client_name = "automation"
     gklm_cert_alias = "cert2"
     client_export_mount_dict = None
+    spec = config.get("spec")
 
     try:
         log.info("Step 1: Setting up GKLM infrastructure")
-        exe_node = setup_gklm_infrastructure(
+        setup_gklm_infrastructure(
             nfs_nodes=nfs_nodes,
             gklm_ip=gklm_ip,
-            gklm_node_username=gklm_node_username,
-            gklm_node_password=gklm_node_password,
             gklm_hostname=gklm_hostname,
         )
 
@@ -228,14 +227,28 @@ def run(ceph_cluster, **kw):
         )
 
         log.info("Step 3: generating certificates and keys, and CA_cert from GKLM")
-
-        ca_cert = get_gklm_ca_certificate(
-            gklm_ip=gklm_ip,
-            gklm_node_username=gklm_node_username,
-            gklm_node_password=gklm_node_password,
-            exe_node=exe_node,
-            gklm_rest_client=gklm_rest_client,
-            gkml_servering_cert_name=gklm_hostname,
+        if gklm_hostname not in [
+            x.get("alias") for x in gklm_rest_client.certificates.list_certificates()
+        ]:
+            log.info(f"Not Found CA cert alias {gklm_cert_alias}, creating ")
+            gklm_rest_client.certificates.create_system_certificate(
+                {
+                    "type": "Self-signed",
+                    "alias": gklm_hostname,
+                    "validity": "3650",
+                    "algorithm": "RSA",
+                    "usageSubtype": "KEYSERVING_TLS",
+                }
+            )
+            gklm_rest_client.server.restart_server()
+            wait_for_gklm_server_restart(
+                gklm_rest_client=gklm_rest_client,
+                timeout=500,
+                check_interval=10,
+                initial_wait=10,
+            )
+        ca_cert = gklm_rest_client.certificates.get_system_certificate(
+            cert_name=gklm_hostname
         )
 
         rsa_key, cert, _ = gklm_rest_client.certificates.get_certificates(
@@ -263,13 +276,21 @@ def run(ceph_cluster, **kw):
             volume=fs_name, group=subvolume_group
         )
 
+        Ceph(nfs_node).execute("systemctl start rpcbind", sudo=True)
+
         # Single cluster BYOK flow
         if nfs_replication_number == 1:
             log.info(">>> Running single-cluster BYOK with Fuse validation")
 
             log.info("Step 5: Deploying NFS Ganesha instance with BYOK")
             create_nfs_instance_for_byok(
-                installer, nfs_node, nfs_name, gklm_hostname, rsa_key, cert, ca_cert
+                installer=installer,
+                nfs_node=nfs_node,
+                nfs_name=nfs_name,
+                kmip_host_list=gklm_hostname,
+                rsa_key=rsa_key,
+                cert=cert,
+                ca_cert=ca_cert,
             )
 
             log.info("Step 6: Creating and mounting NFS exports")
@@ -321,8 +342,9 @@ def run(ceph_cluster, **kw):
                 f">>> Running multi-cluster BYOK: {nfs_replication_number} clusters"
             )
 
+            spec["placement"]["host_pattern"] = nfs_nodes[0].hostname
             multiclusters_dict = create_multiple_nfs_instance_for_byok(
-                spec=config.get("spec"),
+                spec=spec,
                 replication_number=nfs_replication_number,
                 installer=installer,
                 cert=cert,
@@ -338,9 +360,7 @@ def run(ceph_cluster, **kw):
             nfs_names = [x["service_id"] for x in multiclusters_dict]
 
             # Ensure we have enough NFS servers for all clusters
-            nfs_servers = [
-                nfs_nodes[i % len(nfs_nodes)].hostname for i in range(len(nfs_names))
-            ]
+            nfs_servers = nfs_nodes[0].hostname
             nfs_ports = [x["spec"]["port"] for x in multiclusters_dict]
 
             log.info(
@@ -376,6 +396,11 @@ def run(ceph_cluster, **kw):
 
         return 0
 
+    except Exception as e:
+        log.info(f"Failed with Exception: {e}")
+        log.error(traceback.format_exc())
+        return 1
+
     finally:
         log.info("Cleanup: GKLM, NFS clusters, and mounts")
         if config.get("check_sighup", False):
@@ -385,13 +410,6 @@ def run(ceph_cluster, **kw):
             ]
             if "certsighup" in all_certs:
                 gklm_cert_alias = "certsighup"
-
-        # Clean GKLM resources
-        clean_up_gklm(
-            gklm_rest_client=gklm_rest_client,
-            gkml_client_name=gkml_client_name,
-            gklm_cert_alias=gklm_cert_alias,
-        )
 
         # Cleanup single cluster or multi cluster accordingly
         if nfs_replication_number == 1 and client_export_mount_dict is not None:
@@ -417,9 +435,14 @@ def run(ceph_cluster, **kw):
             dynamic_cleanup_common_names(
                 clients,
                 mounts_common_name=config.get("nfs_mount_common_name", "nfs_byok"),
+                group_name=subvolume_group,
             )
 
-        if CephFSCommonUtils(ceph_cluster).wait_for_healthy_ceph(clients[0], 300):
-            log.error("Cluster health is not OK even after waiting for 300secs")
-            return 1
+        # Clean GKLM resources
+        clean_up_gklm(
+            gklm_rest_client=gklm_rest_client,
+            gkml_client_name=gkml_client_name,
+            gklm_cert_alias=gklm_cert_alias,
+        )
+
         log.info("Cleanup completed for all test resources.")

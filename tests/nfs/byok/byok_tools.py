@@ -1,11 +1,14 @@
 import json
+import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 
+import requests
 import yaml
 
+from ceph.waiter import WaitUntil
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError
-from cli.utilities.packages import Package
 from tests.nfs.nfs_operations import (
     create_multiple_nfs_instance_via_spec_file,
     create_nfs_via_file_and_verify,
@@ -184,9 +187,9 @@ def create_nfs_instance_for_byok(
         "service_id": nfs_name,
         "placement": {"host_pattern": nfs_node.hostname},
         "spec": {
-            "kmip_cert": "|\n" + cert.rstrip("\\n"),
-            "kmip_key": "|\n" + rsa_key.rstrip("\\n"),
-            "kmip_ca_cert": "|\n" + ca_cert.rstrip("\\n"),
+            "kmip_cert": cert.rstrip("\\n"),
+            "kmip_key": rsa_key.rstrip("\\n"),
+            "kmip_ca_cert": ca_cert.rstrip("\\n"),
             "kmip_host_list": [kmip_host_list],
         },
     }
@@ -198,42 +201,24 @@ def create_nfs_instance_for_byok(
     log.info("NFS Ganesha BYOK service creation successful")
 
 
-def setup_gklm_infrastructure(
-    nfs_nodes, gklm_ip, gklm_node_password, gklm_hostname, gklm_node_username
-):
+def setup_gklm_infrastructure(nfs_nodes, gklm_ip, gklm_hostname):
     """
-    Prepare cluster nodes for GKLM integration: install sshpass, set up passwordless SSH,
-    and ensure hostname/IP resolution is bidirectional between NFS nodes and GKLM server.
+    Ensure GKLM hostname resolution on all NFS nodes by updating `/etc/hosts`.
+
+    This helper updates `/etc/hosts` on each node in `nfs_nodes` to associate
+    `gklm_ip` with `gklm_hostname`. Existing entries that match the hostname or
+    the IP are removed before the new line is appended to avoid duplicates.
 
     Args:
-        nfs_nodes: List of node objects in the NFS cluster.
-        gklm_ip: IP address of the GKLM server.
-        gklm_password: Password for the node_username on the GKLM server.
-        gklm_hostname: Hostname of the GKLM server.
-        node_username: Username for SSH access to the GKLM server.
-
-    Returns:
-        Node: The execution node (first in nfs_nodes).
+        nfs_nodes (iterable): Iterable of node objects. Each node is expected to
+            have `hostname` and can be passed to `Ceph(node).execute`.
+        gklm_ip (str): IP address of the GKLM server to add to `/etc/hosts`.
+        gklm_hostname (str): Hostname of the GKLM server to add to `/etc/hosts`.
 
     Raises:
-        Exception: If any step fails, logs the error and re-raises.
+        Exception: Any exception raised by `Ceph(node).execute` will propagate
+            to the caller (for example SSH/command execution failures).
     """
-    log.info("Setting up GKLM requirments")
-    exe_node = nfs_nodes[0]
-    log.info(
-        f"Installing sshpass on node {exe_node.hostname} for non-interactive SSH to GKLM"
-    )
-    Package(exe_node).install("sshpass")
-
-    log.info(
-        f"Setting up passwordless SSH from node {exe_node.hostname} to GKLM server {gklm_ip} as {gklm_node_username}"
-    )
-    cmd = f"sshpass -p {gklm_node_password} ssh-copy-id {gklm_node_username}@{gklm_ip}"
-    Ceph(exe_node).execute(cmd)
-    log.info(
-        f"Passwordless SSH established to GKLM server {gklm_ip} as user {gklm_node_username}"
-    )
-
     for node in nfs_nodes:
         log.info(
             f"Updating /etc/hosts on NFS node {node.hostname} with GKLM server {gklm_hostname} at {gklm_ip}"
@@ -247,125 +232,6 @@ def setup_gklm_infrastructure(
         log.info(
             f"Updated /etc/hosts on {node.hostname} with GKLM entry. Result: {out}"
         )
-
-        log.info(
-            f"Updating /etc/hosts on GKLM server with NFS node {node.hostname} at {node.ip_address}"
-        )
-        cmd = (
-            rf"sshpass -p {gklm_node_password} ssh -o StrictHostKeyChecking=no {gklm_node_username}@{gklm_ip} "
-            rf'"gklm_ip={node.ip_address}; gklm_hostname={node.hostname}; '
-            rf'sudo sed -i -e "/$gklm_hostname\>/d" -e "/^$gklm_ip\>/d" /etc/hosts && '
-            rf'echo "$gklm_ip $gklm_hostname" | sudo tee -a /etc/hosts"'
-        )
-        out = Ceph(exe_node).execute(sudo=True, cmd=cmd)
-        log.info(
-            f"Updated /etc/hosts on GKLM server with NFS node {node.hostname} entry. Result: {out}"
-        )
-
-    log.info(
-        "GKLM infrastructure setup completed: sshpass installed, SSH keys exchanged, hostnames synchronized"
-    )
-    return exe_node
-
-
-def get_gklm_ca_certificate(
-    gklm_ip,
-    gklm_node_password,
-    gklm_node_username,
-    exe_node,
-    gklm_rest_client,
-    gkml_servering_cert_name="self-signed-cert1",
-):
-    """
-    Retrieve the GKLM CA certificate for use in the cluster:
-    - Locate the target certificate by alias and usage.
-    - Export to the GKLM filesystem if not already present.
-    - Read and return the certificate contents.
-
-    Args:
-        gklm_ip: IP address of the GKLM server.
-        gklm_password: Password for the node_username on the GKLM server.
-        node_username: Username for SSH access to the GKLM server.
-        exe_node: Node capable of executing remote commands.
-        gklm_rest_client: GKLM REST client for certificate operations.
-
-    Returns:
-        str: The CA certificate (PEM) content.
-
-    Raises:
-        Exception: If any step fails, logs the error and re-raises.
-    """
-    log.info(
-        "Locating target SSL server certificate (alias: self-signed-cert1, usage: SSLSERVER) in GKLM"
-    )
-    certs = gklm_rest_client.certificates.list_certificates()
-    try:
-        certificate_uuid_to_export = [
-            x["uuid"]
-            for x in certs
-            if x.get("usage") == "SSLSERVER"
-            and x.get("alias") == gkml_servering_cert_name
-        ][0]
-        log.info(f"Found target certificate with UUID: {certificate_uuid_to_export}")
-    except IndexError:
-        log.error(
-            f"No certificate with alias {gkml_servering_cert_name} and usage 'SSLSERVER' found in GKLM"
-        )
-        raise
-
-    log.info(
-        "Checking if CA certificate is already exported at "
-        f"/opt/IBM/WebSphere/Liberty/products/sklm/data/export1/{gkml_servering_cert_name}"
-    )
-    file_check_cmd = (
-        f"sshpass -p {gklm_node_password} ssh -o StrictHostKeyChecking=no {gklm_node_username}@{gklm_ip} "
-        f"'[ -f /opt/IBM/WebSphere/Liberty/products/sklm/data/export1/{gkml_servering_cert_name} ] && "
-        'echo "File exists" || echo "File does not exist"\''
-    )
-    log.debug(f"Executing remote file check: {file_check_cmd}")
-    is_cert_exists = Ceph(exe_node).execute(cmd=file_check_cmd)
-    if isinstance(is_cert_exists, (list, tuple)) and len(is_cert_exists) >= 1:
-        log.info(f"Remote file check result: {is_cert_exists[0]}")
-    else:
-        log.warning(f"Remote file check returned unexpected output: {is_cert_exists}")
-
-    if is_cert_exists[0] == "File does not exist\n":
-        log.info("CA certificate not found; initiating export via REST API")
-        mkdir_cmd = (
-            f"sshpass -p {gklm_node_password} ssh -o StrictHostKeyChecking=no {gklm_node_username}@{gklm_ip} "
-            '"mkdir -p /opt/IBM/WebSphere/Liberty/products/sklm/data/export1"'
-        )
-        Ceph(exe_node).execute(cmd=mkdir_cmd)
-        log.info("Created export directory for CA certificate")
-
-        chmod_cmd = (
-            f"sshpass -p {gklm_node_password} ssh -o StrictHostKeyChecking=no {gklm_node_username}@{gklm_ip} "
-            '"chmod 777 /opt/IBM/WebSphere/Liberty/products/sklm/data/export1"'
-        )
-        Ceph(exe_node).execute(sudo=True, cmd=chmod_cmd)
-        log.info("Set required permissions on export directory")
-
-        gklm_rest_client.certificates.export_certificate(
-            uuid=certificate_uuid_to_export,
-            file_name=f"export1/{gkml_servering_cert_name}",
-        )
-        log.info(
-            f"Exported certificate (UUID {certificate_uuid_to_export}) from GKLM server"
-        )
-    else:
-        log.info("CA certificate already exists at configured path; skipping export")
-
-    log.info(
-        "Fetching CA certificate contents from "
-        f"/opt/IBM/WebSphere/Liberty/products/sklm/data/export1/{gkml_servering_cert_name}"
-    )
-    cert_fetch_cmd = (
-        f"sshpass -p {gklm_node_password} ssh -o StrictHostKeyChecking=no {gklm_node_username}@{gklm_ip} "
-        f"'cat /opt/IBM/WebSphere/Liberty/products/sklm/data/export1/{gkml_servering_cert_name}'"
-    )
-    ca_cert = Ceph(exe_node).execute(cmd=cert_fetch_cmd)[0]
-    log.info("CA certificate successfully retrieved from GKLM server")
-    return ca_cert
 
 
 def pre_requisite_for_gklm_get_ca(
@@ -398,20 +264,13 @@ def pre_requisite_for_gklm_get_ca(
     """
     try:
         log.info("Starting GKLM infrastructure and CA certificate setup")
-        exe_node = setup_gklm_infrastructure(
+        setup_gklm_infrastructure(
             nfs_nodes=nfs_nodes,
             gklm_ip=gklm_ip,
-            gklm_node_password=gklm_node_password,
             gklm_hostname=gklm_hostname,
-            gklm_node_username=gklm_node_username,
         )
-        ca_cert = get_gklm_ca_certificate(
-            gklm_ip=gklm_ip,
-            gklm_node_password=gklm_node_password,
-            gklm_node_username=gklm_node_username,
-            exe_node=exe_node,
-            gklm_rest_client=gklm_rest_client,
-            gkml_servering_cert_name=gklm_hostname,
+        ca_cert = gklm_rest_client.certificates.get_system_certificate(
+            cert_name=gklm_hostname
         )
         log.info("Successfully retrieved GKLM CA certificate")
         return ca_cert
@@ -504,11 +363,7 @@ def load_gklm_config(custom_data, config, cephci_data):
     cloud_gklm = cephci_data.get("gklm_config", {}).get(lookup_type, {})
     if cloud_gklm:
         merged.update(cloud_gklm)
-        log.info(
-            "Loaded GKLM config from cephci_data for cloud '%s': %s",
-            lookup_type,
-            cloud_gklm,
-        )
+        log.info("Loaded GKLM config from cephci_data for cloud ")
     else:
         log.debug("No GKLM config in cephci_data for cloud '%s'", lookup_type)
 
@@ -561,7 +416,7 @@ def load_gklm_config(custom_data, config, cephci_data):
             "Provide via cephci_data, custom-config-file, or --custom-config."
         )
 
-    log.info("Final GKLM configuration: %s", {k: merged[k] for k in required})
+    log.info("Final GKLM configuration: %s", [k for k in required if k in merged])
     return merged
 
 
@@ -592,8 +447,6 @@ def nfs_byok_test_setup(byok_setup_params):
     gklm_ip = byok_setup_params["gklm_ip"]
     gklm_user = byok_setup_params["gklm_user"]
     gklm_password = byok_setup_params["gklm_password"]
-    gklm_node_user = byok_setup_params["gklm_node_user"]
-    gklm_node_password = byok_setup_params["gklm_node_password"]
     gklm_hostname = byok_setup_params["gklm_hostname"]
     gklm_client_name = byok_setup_params["gklm_client_name"]
     gklm_cert_alias = byok_setup_params["gklm_cert_alias"]
@@ -602,11 +455,9 @@ def nfs_byok_test_setup(byok_setup_params):
     installer = byok_setup_params["installer"]
     nfs_name = byok_setup_params["nfs_name"]
     try:
-        exe_node = setup_gklm_infrastructure(
+        setup_gklm_infrastructure(
             nfs_nodes=nfs_nodes,
             gklm_ip=gklm_ip,
-            gklm_node_username=gklm_node_user,
-            gklm_node_password=gklm_node_password,
             gklm_hostname=gklm_hostname,
         )
         gklm_rest_client = GklmClient(
@@ -642,13 +493,8 @@ def nfs_byok_test_setup(byok_setup_params):
         log.info(
             "Setting up SSH and CA certificate prerequisites on NFS and GKLM nodes"
         )
-        ca_cert = get_gklm_ca_certificate(
-            gklm_ip=gklm_ip,
-            gklm_node_username=gklm_node_user,
-            gklm_node_password=gklm_node_password,
-            exe_node=exe_node,
-            gklm_rest_client=gklm_rest_client,
-            gkml_servering_cert_name=gklm_hostname,
+        ca_cert = gklm_rest_client.certificates.get_system_certificate(
+            cert_name=gklm_hostname
         )
         log.info("CA certificate successfully retrieved \n %s", ca_cert)
 
@@ -695,13 +541,10 @@ def create_multiple_nfs_instance_for_byok(
     """
 
     try:
-        # Clean up certificate formatting — YAML style block string ('|')
-        # with proper newline termination, avoiding tuple creation
-        spec["kmip_cert"] = "|\n" + cert.strip("\n")
-        spec["kmip_key"] = "|\n" + rsa_key.strip("\n")
-        spec["kmip_ca_cert"] = "|\n" + ca_cert.strip("\n")
+        spec["kmip_cert"] = (cert.rstrip("\\n"),)
+        spec["kmip_key"] = (rsa_key.rstrip("\\n"),)
+        spec["kmip_ca_cert"] = (ca_cert.rstrip("\\n"),)
         spec["kmip_host_list"] = [kmip_host_list]
-
         log.debug(f"Prepared BYOK-enabled NFS Ganesha service spec:\n{spec}")
 
         # Call core spec deployment function
@@ -941,5 +784,113 @@ def perform_io_operations_and_validate_fuse(
             log.info(f"Completed IO operations for cluster: {cluster_name}")
     else:
         log.info("Running IO operations on single cluster")
-        _process_single_cluster(client_export_mount_dict, nfs_name, is_multicluster)
+        _process_single_cluster(
+            mount_dict=client_export_mount_dict,
+            nfs_name=nfs_name,
+            is_multicluster=is_multicluster,
+        )
         log.info("Completed all IO operations")
+
+
+def create_in_file_certs(certs_dict, node):
+    """
+    Create a temporary YAML file containing certificate specifications and return its path.
+    This function serializes the provided certificate documents into YAML (using
+    yaml.dump_all with sort_keys=False and an indent of 2), writes the encoded bytes
+    to a temporary file created with tempfile.NamedTemporaryFile, and returns the
+    temporary file path. If installer_node is a sequence, the first element is
+    used. The function opens a remote file handle via installer_node.remote_file(...)
+    with sudo=True and file_mode="wb" and writes the YAML bytes to that handle,
+    flushing the file before returning.
+    Args:
+        certs_dict: dict of certs
+        installer_node: installer
+    Returns:
+        str: The filesystem path of the created temporary YAML file (tempfile.NamedTemporaryFile.name).
+    Side effects:
+        - Creates a temporary file on the installer filesystem.
+        - Uses installer_node.remote_file to obtain a writable file handle (sudo=True)
+          and writes the YAML-encoded certificate data to that handle.
+        - Logs the path of the created temporary certificate spec file.
+    Raises:
+        Any exception raised by tempfile.NamedTemporaryFile, yaml.dump_all, the
+        installer_node.remote_file call, or the file write/flush operations may be
+        propagated to the caller.
+    Notes:
+        - The temporary file remains until explicitly removed or closed; callers
+          should clean up the file when it is no longer needed.
+        - The function encodes YAML output as UTF-8 before writing.
+    """
+    temp_file = tempfile.NamedTemporaryFile(suffix=".yaml", delete=False)
+
+    # Handle case where installer_node is a list
+    if isinstance(node, list):
+        node = node[0]
+
+    spec_file = node.remote_file(sudo=True, file_name=temp_file.name, file_mode="wb")
+    spec = yaml.dump(certs_dict, sort_keys=False, indent=2).encode("utf-8")
+    spec_file.write(spec)
+    spec_file.flush()
+    log.info(
+        f"Created temporary certificate spec file at {temp_file.name} in {node.hostname}"
+    )
+
+    return temp_file.name
+
+
+def wait_for_gklm_server_restart(
+    gklm_rest_client,
+    timeout: int = 300,
+    check_interval: int = 5,
+    initial_wait: int = 10,
+) -> bool:
+    """
+    Wait for GKLM server to restart and become healthy.
+
+    This method waits for the server to go down (health check fails) and then
+    come back up (health check succeeds).
+
+    Args:
+        timeout: Maximum time to wait for server restart in seconds (default: 300)
+        check_interval: Interval between health checks in seconds (default: 5)
+        initial_wait: Initial wait time before starting checks in seconds (default: 10)
+
+    Returns:
+        True if server restarted successfully, False if timeout occurred
+
+    Raises:
+        RuntimeError: If server health check fails unexpectedly
+    """
+    log.info(
+        "Waiting for GKLM server to restart with timeout of {} seconds".format(timeout)
+    )
+
+    # Initial wait to allow server shutdown
+    log.info("Waiting {} seconds for server to initiate shutdown".format(initial_wait))
+    time.sleep(initial_wait)
+
+    # Use WaitUntil for clean retry logic
+    waiter = WaitUntil(timeout=timeout, interval=check_interval)
+    for attempt in waiter:
+        try:
+            gklm_rest_client.login()  # Re-authenticate if needed
+            is_healthy = gklm_rest_client.server.health_check()
+
+            if is_healthy == '{"overall":true}':
+                log.info("Server has restarted successfully and is healthy")
+                return True
+            else:
+                log.debug("Server is still down, waiting for restart")
+                log.info(
+                    f"Attempt {attempt}: Server is still down, waiting for restart"
+                )
+
+        except requests.exceptions.RequestException as e:
+            log.debug(
+                "Connection error while waiting for server startup: {}".format(str(e))
+            )
+
+    # If we exit the loop, timeout occurred
+    if waiter.expired:
+        log.error("Server restart timed out after {} seconds".format(timeout))
+        return False

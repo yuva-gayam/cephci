@@ -299,6 +299,30 @@ tests:
         case_to_run:
           - case10
   - test:
+      name: Track availability- Inconsistent object check
+      desc: Verification of track availability tests on inconsistent object pool
+      module: test_track_availibility_status.py
+      polarion-id: CEPH-83620501
+      config:
+        replicated_pool:
+          create: true
+          pool_name: track_data_pool
+          pg_num_max: 1
+        case_to_run:
+          - case11
+  - test:
+      name: Track availability- Generating inactive PG
+      desc: Verification of track availability tests by generating inactive PG
+      module: test_track_availibility_status.py
+      polarion-id: CEPH-83620501
+      config:
+        replicated_pool:
+          create: true
+          pool_name: track_data_pool
+          pg_num_max: 1
+        case_to_run:
+          - case12
+  - test:
       name: Track availability- Reboot OSD node check
       desc: Verification of track availability tests by rebooting the osd node
       module: test_track_availibility_status.py
@@ -309,5 +333,67 @@ tests:
           pool_name: track_data_pool
           pg_num_max: 1
         case_to_run:
-          - case11
+          - case13
+
+# Bluestore compression tests - moved here as part of optimization to reduce RHOS-d run time
+# Tests:-
+# setup - setup phase for bluestore compression tests
+#     --> Cephfs - replicated & EC
+#     --> RBD - replicated & EC
+#     --> RGW - replicated
+# scenario 12 - data integrity tests with rbd, rgw and cephfs
+# scenario 13 - compression algorithm tests with rbd, rgw and cephfs
+# scenario 14 - compression mode tests with rbd, rgw and cephfs
+
+  - test:
+      name: Bluestore compression v1 - setup phase rbd, rgw and cephfs
+      module: test_bluestore_comp_enhancements.py
+      desc: Positive workflows for bluestore data compression enhancements
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_pools: true
+        cleanup_objects: true
+        cleanup_pools: false
+        scenarios_to_run:
+          - setup
+
+  - test:
+      name: Bluestore compression v1 - compression mode tests with rbd, rgw and cephfs
+      module: test_bluestore_comp_enhancements.py
+      desc: Positive workflows for bluestore data compression enhancements
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_pools: true
+        cleanup_objects: true
+        cleanup_pools: false
+        scenarios_to_run:
+          - scenario-14
+
+  - test:
+      name: Bluestore compression v1 - data integrity tests
+      module: test_bluestore_comp_enhancements.py
+      desc: Positive workflows for bluestore data compression enhancements
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_pools: true
+        cleanup_objects: true
+        cleanup_pools: false
+        scenarios_to_run:
+          - scenario-12
+
+  - test:
+      name: Bluestore compression v1 - compression algorithm tests
+      module: test_bluestore_comp_enhancements.py
+      desc: Positive workflows for bluestore data compression enhancements
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_pools: true
+        cleanup_objects: true
+        cleanup_pools: true
+        scenarios_to_run:
+          - scenario-13
 

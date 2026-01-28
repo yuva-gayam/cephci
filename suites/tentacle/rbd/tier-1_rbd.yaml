@@ -111,7 +111,7 @@ tests:
       config:
         script: rbd_groups.sh
         script_path: qa/workunits/rbd
-        branch: tentacle
+        branch: wip-rbd-cgsm-base
       desc: "Executing upstream RBD CLI Groups scenarios"
       module: test_rbd.py
       name: 1_rbd_cli_groups

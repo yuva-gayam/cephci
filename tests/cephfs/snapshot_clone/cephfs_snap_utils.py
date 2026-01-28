@@ -38,6 +38,18 @@ class SnapUtils(object):
         self.clients = ceph_cluster.get_ceph_objects("client")
         self.cephfs_common_utils = CephFSCommonUtils(ceph_cluster)
 
+    def get_snapshot(self, client, sv_obj):
+        """
+        This method gets a snapshot for given subvolume test object
+        """
+        listsnapshot_cmd = f"ceph fs subvolume snapshot ls {sv_obj['vol_name']} {sv_obj['subvol_name']}"
+        if sv_obj.get("group_name"):
+            listsnapshot_cmd += f" --group_name {sv_obj.get('group_name')}"
+        out, _ = client.exec_command(sudo=True, cmd=f"{listsnapshot_cmd} --format json")
+        snapshot_ls = json.loads(out)
+        snap_list = [i["name"] for i in snapshot_ls]
+        return random.choice(snap_list)
+
     def enable_snap_schedule(self, client):
         """
         Enables Snapshot schedule on Ceph
@@ -618,6 +630,7 @@ class SnapUtils(object):
             cmd += f" --value {kwargs['value']}"
 
         out, _ = client.exec_command(sudo=True, cmd=cmd)
+        log.info(out)
         return out.strip()
 
     def snapshot_visibility_client_mgr(self, client, daemon_type, op_type, **kwargs):
@@ -635,12 +648,13 @@ class SnapUtils(object):
         Returns : True on success
         """
         if daemon_type == "client" and kwargs.get("client_id"):
-            daemon_type += f"{daemon_type}.{kwargs['client_id']}"
+            daemon_type = f" {daemon_type}.{kwargs['client_id']}"
         cmd = f"ceph config {op_type} {daemon_type} client_respect_subvolume_snapshot_visibility "
         if op_type == "set":
             cmd += f" {kwargs['client_respect_snapshot_visibility']}"
         out, _ = client.exec_command(sudo=True, cmd=cmd)
         if op_type == "get":
+            log.info(out)
             return out.strip()
         return True
 
@@ -659,6 +673,7 @@ class SnapUtils(object):
         }
         Returns : 0 - Success, 1 - Failure
         """
+        retry_verify = mnt_args.get("retry", False)
         # Snapshot visibility validation
         str0 = "snapshot_visibility true,client config client_respect_snapshot_visibility true, .snap dir is visible"
         str1 = "snapshot_visibility true,client config client_respect_snapshot_visibility false, .snap dir is visible"
@@ -694,11 +709,30 @@ class SnapUtils(object):
         exp_snap_ops = snap_visibility_ops_mgr[snapshot_visibility][
             snapshot_visibility_mgr
         ]
+
+        @retry(ValueMismatchError, tries=5, delay=10)
+        def verify_snap_visibility_retry():
+            if self.verify_snap_visibility(
+                exp_snap_visibility, client, mnt_client, mnt_args
+            ):
+                raise ValueMismatchError
+            return 0
+
         if self.verify_snap_visibility(
             exp_snap_visibility, client, mnt_client, mnt_args
         ):
             log.error("Snapshot visibility validation failed")
-            return 1
+            if retry_verify:
+                log.info("Retrying..")
+                try:
+                    retry_status = verify_snap_visibility_retry()
+                    return retry_status
+                except ValueMismatchError as ex:
+                    log.error(
+                        "Snapshot visibility validation failed after retries:%s", ex
+                    )
+                    return 1
+
         if self.verify_snap_ops(exp_snap_ops, client, mnt_args):
             log.error("Snapshot ops validation failed")
             return 1
@@ -762,7 +796,6 @@ class SnapUtils(object):
         snap_str = f"Actual Snapshot visibilty : {actual_snap_visibility},"
         snap_str += f" Expected Snapshot visibility : {exp_snap_visibility}"
         log.info(snap_str)
-        time.sleep(300)
         if actual_snap_visibility != exp_snap_visibility:
             return 1
         return 0

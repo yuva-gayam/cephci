@@ -25,8 +25,8 @@ tests:
                   command: bootstrap
                   service: cephadm
                   args:
-                    rhcs-version: 8.0
-                    release: sanity
+                    rhcs-version: 8.1
+                    release: stable
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -73,7 +73,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 8.1
-                    release: sanity
+                    release: stable
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true

@@ -25,8 +25,9 @@ import paramiko
 from ceph.ceph import CommandFailed, SSHConnectionManager
 from ceph.parallel import parallel
 from ceph.utils import check_ceph_healthly
+from cli.ceph.ceph import Ceph
 from cli.cephadm.cephadm import CephAdm
-from mita.v2 import get_openstack_driver
+from compute.openstack import get_openstack_driver
 from tests.cephfs.exceptions import ValueMismatchError
 from utility.log import Log
 from utility.retry import retry
@@ -107,6 +108,7 @@ class FsUtils(object):
                 "python3-devel",
                 "git",
                 "lua",
+                "acl",
             ]
             if build.endswith("7") or build.startswith("3"):
                 pkgs.extend(
@@ -1199,20 +1201,30 @@ class FsUtils(object):
         Returns:
             tuple: A tuple containing the Ceph command output and command return code.
         """
-        nfs_cmd = f"ceph nfs cluster create {nfs_cluster_name}"
-        if kwargs.get("nfs_server_name"):
-            nfs_cmd += f" {kwargs.get('nfs_server_name')}"
-        if kwargs.get("placement"):
-            nfs_cmd += f" --placement '{kwargs.get('placement')}'"
-        nfs_port = kwargs.get("port")
-        if nfs_port:
-            nfs_cmd += f" --port {nfs_port}"
-        # BYOK / KMIP support
+        extra_args = {}
+        nfs_server = kwargs.get("nfs_server_name")
+
+        if not nfs_server and kwargs.get("placement"):
+            placement = kwargs["placement"].strip().split()
+            nfs_server = placement
+
+        # Port
+        if kwargs.get("port"):
+            extra_args["port"] = kwargs["port"]
+
+        # BYOK / KMIP
         if kwargs.get("byok_enabled", False):
-            yaml_path = kwargs.get("kmip_yaml_path", "/root/nfs_kmip.yaml")
-            nfs_cmd += f" -i {yaml_path}"
-        cmd_out, cmd_rc = client.exec_command(
-            sudo=True, cmd=nfs_cmd, check_ec=kwargs.get("check_ec", True)
+            extra_args["in-file"] = kwargs.get("kmip_yaml_path", "/root/nfs_kmip.yaml")
+
+        nfs_nodes = self.ceph_cluster.get_nodes("nfs")
+
+        # Execute via new API
+        cmd_out = Ceph(client).nfs.cluster.create(
+            name=nfs_cluster_name,
+            nfs_server=nfs_server,
+            check_ec=kwargs.get("check_ec", True),
+            nfs_nodes_obj=nfs_nodes,
+            **extra_args,
         )
 
         if validate:
@@ -1233,7 +1245,7 @@ class FsUtils(object):
                     f"Creation of NFS cluster: {nfs_cluster_name} failed"
                 )
 
-        return cmd_out, cmd_rc
+        return cmd_out
 
     @function_execution_time
     @retry(CommandFailed, tries=5, delay=60)
@@ -3227,7 +3239,7 @@ os.system('sudo systemctl start  network')
         :param nfs_mount_dir:
         """
         client.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mount_dir}")
-        command = f"mount -t nfs -o port={kwargs.get('port', '2049')} {nfs_server}:{nfs_export} {nfs_mount_dir}"
+        command = f"mount -t nfs -o vers=4,port={kwargs.get('port', '2049')} {nfs_server}:{nfs_export} {nfs_mount_dir}"
         if kwargs.get("fstab"):
             try:
                 client.exec_command(sudo=True, cmd="ls -lrt /etc/fstab.backup")
@@ -3787,7 +3799,7 @@ os.system('sudo systemctl start  network')
         nfs_client.exec_command(sudo=True, cmd=f"mkdir -p {mount_path}")
         assert self.wait_for_cmd_to_succeed(
             nfs_client,
-            cmd=f"mount -t nfs -o port=2049 {nfs_server}:{export_name} {mount_path}",
+            cmd=f"mount -t nfs -o vers=4,port=2049 {nfs_server}:{export_name} {mount_path}",
         )
         out, rc = nfs_client.exec_command(cmd="mount")
         mount_output = out.split()
@@ -3828,7 +3840,10 @@ os.system('sudo systemctl start  network')
         :param port:
         """
         client.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-        command = f"mount -t nfs -o port={port},nfsvers={nfs_version} {virtual_ip}:{psuedo_path} {nfs_mounting_dir}"
+        command = (
+            f"mount -t nfs -o vers=4,port={port},nfsvers={nfs_version} "
+            f"{virtual_ip}:{psuedo_path} {nfs_mounting_dir}"
+        )
         client.exec_command(sudo=True, cmd=command, check_ec=False)
 
     def mount_ceph(self, mnt_type, mount_params):

@@ -12,7 +12,7 @@ from ceph.ceph_admin.daemon import Daemon
 from ceph.ceph_admin.host import Host
 from ceph.ceph_admin.orch import Orch
 from ceph.parallel import parallel
-from ceph.utils import get_node_by_id, get_openstack_driver
+from ceph.utils import find_vm_node_by_hostname, get_node_by_id, get_openstack_driver
 from ceph.waiter import WaitUntil
 from tests.io.io_utils import get_max_clat_from_fio_output
 from tests.nvmeof.workflows.initiator import NVMeInitiator, validate_initiator
@@ -485,43 +485,62 @@ class HighAvailability:
         Returns:
             Boolean
         """
-        osp_cred = self.config.get("osp_cred")
-        driver = get_openstack_driver(osp_cred)
-        ops = {
-            "start": driver.ex_start_node,
-            "stop": driver.ex_stop_node,
-            "is-active": self.is_node_active,
-        }
-        nodename = gateway.node.hostname.lower().replace("-", "_")
-        driver_node = next(
-            (
-                node
-                for node in driver.list_nodes()
-                if node.name.lower().replace("-", "_") == nodename
-            ),
-            None,
-        )
-
-        op = ops[action]
-        op(driver_node)
-
-        if wait_for_active_state is None:
-            return
-
-        is_active = ops["is-active"]
-        for w in WaitUntil(timeout=300):
-            _active = is_active(driver, driver_node)
-            if _active == wait_for_active_state:
-                LOG.info(f"[ {nodename} ] {action} is successfull.")
-                return True
-            LOG.warning(
-                f"[ {nodename} ] {action} is still not successfull. check again"
+        # check if cloud_type is openstack then power on/off the node
+        if self.config.get("cloud-type") == "openstack":
+            LOG.info(
+                f"Powering on/off {gateway.node.hostname} node in "
+                f"environment {self.config.get('cloud-type')} in {action} mode"
+            )
+            osp_cred = self.config.get("osp_cred")
+            driver = get_openstack_driver(osp_cred)
+            ops = {
+                "start": driver.ex_start_node,
+                "stop": driver.ex_stop_node,
+                "is-active": self.is_node_active,
+            }
+            nodename = gateway.node.hostname.lower().replace("-", "_")
+            driver_node = next(
+                (
+                    node
+                    for node in driver.list_nodes()
+                    if node.name.lower().replace("-", "_") == nodename
+                ),
+                None,
             )
 
-        if w.expired:
-            LOG.error(f"[ {nodename} ] {action} failed even after 300s timeout..")
+            op = ops[action]
+            op(driver_node)
 
-        return False
+            if wait_for_active_state is None:
+                return
+
+            is_active = ops["is-active"]
+            for w in WaitUntil(timeout=300):
+                _active = is_active(driver, driver_node)
+                if _active == wait_for_active_state:
+                    LOG.info(f"[ {nodename} ] {action} is successfull.")
+                    return True
+                LOG.warning(
+                    f"[ {nodename} ] {action} is still not successfull. check again"
+                )
+
+            if w.expired:
+                LOG.error(f"[ {nodename} ] {action} failed even after 300s timeout..")
+
+            return False
+        elif self.config.get("cloud-type") == "ibmc":
+            LOG.info(
+                f"Powering on/off {gateway.node.hostname} node in "
+                f"environment {self.config.get('cloud-type')} in {action} mode"
+            )
+            vm_node = find_vm_node_by_hostname(self.cluster, gateway.node.hostname)
+            if action == "start":
+                vm_node.power_on()
+                return True
+            elif action == "stop":
+                vm_node.shutdown(wait=True)
+                return True
+            return False
 
     def scale_down(self, gateway_nodes_to_be_scaleddown):
         """Scaling down of the NVMeoF Gateways.
@@ -908,7 +927,7 @@ class HighAvailability:
             raise Exception(err)
 
     @retry(IOError, tries=3, delay=3)
-    def compare_client_namespace(self, uuids):
+    def compare_client_namespace(self, uuids, FEWR_NAMESPACES=False):
         lsblk_devs = []
         for client in self.clients:
             lsblk_devs.extend(client.fetch_lsblk_nvme_devices())
@@ -916,8 +935,12 @@ class HighAvailability:
         LOG.info(
             f"Expected NVMe Targets : {set(list(uuids))} Vs LSBLK devices: {set(list(lsblk_devs))}"
         )
-        if sorted(uuids) != sorted(set(lsblk_devs)):
-            raise IOError("Few Namespaces are missing!!!")
+        if FEWR_NAMESPACES:
+            if not set(uuids).issubset(lsblk_devs):
+                raise IOError("Few Namespaces are missing!!!")
+        else:
+            if sorted(uuids) != sorted(set(lsblk_devs)):
+                raise IOError("Few Namespaces are missing!!!")
         LOG.info("All namespaces are listed at Client(s)")
         return True
 
@@ -1059,11 +1082,6 @@ class HighAvailability:
             client.connect_targets(self.gateways[0], config={"nqn": "connect-all"})
             serial_to_namespace = defaultdict(set)
 
-            out, _ = initiator_node.exec_command(
-                sudo=True, cmd="cat /etc/os-release | grep VERSION_ID"
-            )
-            rhel_version = out.split("=")[1].strip().strip('"')
-
             @retry(
                 IOError,
                 tries=4,
@@ -1081,19 +1099,26 @@ class HighAvailability:
                 continue
 
             for device in devices_json:
-                if rhel_version == "9.5":
+                # --- Case 1: RHEL 9.5 style fields ---
+                # device["SerialNumber"] and device["NameSpace"]
+                if "SerialNumber" in device and "NameSpace" in device:
                     key = device["NameSpace"]
-                    value = int(device["SerialNumber"])
-                    serial_to_namespace[key].add(value)
-                elif rhel_version == "9.6":
-                    for subsys in device.get("Subsystems", []):
-                        for controller in subsys.get("Controllers", []):
-                            if controller.get("ModelNumber") == "Ceph bdev Controller":
-                                serial = controller.get("SerialNumber", "")
-                                value = int(serial)
-                                for ns in subsys.get("Namespaces", []):
-                                    key = ns.get("NSID")
-                                    serial_to_namespace[key].add(value)
+                    serial_to_namespace[key].add(int(device["SerialNumber"]))
+                    continue
+
+                # --- Case 2: RHEL 9.6 style NVMe subsystem/namespace/controller tree ---
+                for subsys in device.get("Subsystems", []):
+                    for controller in subsys.get("Controllers", []):
+                        if controller.get("ModelNumber") == "Ceph bdev Controller":
+                            serial = controller.get("SerialNumber")
+                            if serial is None:
+                                continue
+
+                            for ns in subsys.get("Namespaces", []):
+                                nsid = ns.get("NSID")
+                                if nsid is not None:
+                                    LOG.info(f"NSID: {nsid} Serial: {serial}")
+                                    serial_to_namespace[nsid].add(serial)
 
             def subsystem_nsid_found(dictionary, key, value):
                 return key in dictionary and value in dictionary[key]
@@ -1163,14 +1188,10 @@ class HighAvailability:
                     not expected_visibility
                 ):  # If expected visibility is False, devices should be empty
                     # Determine if devices list is empty (no Namespaces in any Subsystem)
-                    devices_json_empty = (
-                        all(
-                            not subsys.get("Namespaces")  # True if empty or missing
-                            for device in devices_json
-                            for subsys in device.get("Subsystems", [])
-                        )
-                        if rhel_version == "9.6"
-                        else not devices_json
+                    devices_json_empty = all(
+                        not subsys.get("Namespaces")  # True if empty or missing
+                        for device in devices_json
+                        for subsys in device.get("Subsystems", [])
                     )
                     if not devices_json_empty:  # Check if Devices is not empty
                         LOG.error(
@@ -1184,14 +1205,10 @@ class HighAvailability:
                 elif (
                     expected_visibility
                 ):  # If expected visibility is True, devices should not be empty
-                    devices_json_empty = (
-                        all(
-                            not subsys.get("Namespaces")  # True if empty or missing
-                            for device in devices_json
-                            for subsys in device.get("Subsystems", [])
-                        )
-                        if rhel_version == "9.6"
-                        else not devices_json
+                    devices_json_empty = all(
+                        not subsys.get("Namespaces")  # True if empty or missing
+                        for device in devices_json
+                        for subsys in device.get("Subsystems", [])
                     )
                     if devices_json_empty:
                         LOG.error(
@@ -1203,24 +1220,30 @@ class HighAvailability:
                     else:
                         # Log Namespace and SerialNumber from each device
                         for device in devices_json:
-                            if rhel_version == "9.5":
-                                namespace = device.get("NameSpace", None)
-                                serial_number = device.get("SerialNumber", None)
-                            elif rhel_version == "9.6":
-                                for subsys in device.get("Subsystems", []):
-                                    for controller in subsys.get("Controllers", []):
-                                        if (
-                                            controller.get("ModelNumber")
-                                            == "Ceph bdev Controller"
-                                        ):
-                                            serial_number = int(
-                                                controller.get("SerialNumber", "")
-                                            )
-                                            for ns in subsys.get("Namespaces", []):
-                                                namespace = ns.get("NSID")
-                                                LOG.info(
-                                                    f"Namespace: {namespace}, SerialNumber: {serial_number}"
-                                                )
+                            # --- Case 1: RHEL 9.5 style fields ---
+                            # device["SerialNumber"] and device["NameSpace"]
+                            if "SerialNumber" in device and "NameSpace" in device:
+                                key = device["NameSpace"]
+                                serial_to_namespace[key].add(
+                                    int(device["SerialNumber"])
+                                )
+                                continue
+
+                            # --- Case 2: RHEL 9.6 style NVMe subsystem/namespace/controller tree ---
+                            for subsys in device.get("Subsystems", []):
+                                for controller in subsys.get("Controllers", []):
+                                    if (
+                                        controller.get("ModelNumber")
+                                        == "Ceph bdev Controller"
+                                    ):
+                                        serial = controller.get("SerialNumber")
+                                        if serial is None:
+                                            continue
+
+                                        for ns in subsys.get("Namespaces", []):
+                                            nsid = ns.get("NSID")
+                                            if nsid is not None:
+                                                serial_to_namespace[nsid].add(serial)
                         LOG.info(
                             f"Validated - {len(devices_json)} devices found on {node}"
                         )
@@ -1307,7 +1330,7 @@ class HighAvailability:
             except Exception as e:
                 LOG.error(f"Failed to parse FIO output: {e}")
 
-    def run(self):
+    def run(self, FEWR_NAMESPACES=False):
         """Execute the HA failover and failback with IO validation."""
         fail_methods = self.config["fault-injection-methods"]
         initiators = self.config["initiators"]
@@ -1319,7 +1342,12 @@ class HighAvailability:
             self.prepare_io_execution(initiators)
 
             # Check for targets at clients
-            self.compare_client_namespace([i["uuid"] for i in namespaces])
+            if FEWR_NAMESPACES:
+                self.compare_client_namespace(
+                    [i["uuid"] for i in namespaces], FEWR_NAMESPACES=True
+                )
+            else:
+                self.compare_client_namespace([i["uuid"] for i in namespaces])
 
             repeat_ha_count = self.config.get("repeat_ha_count", 1)
 

@@ -8,7 +8,6 @@ from tests.nfs.byok.byok_tools import (
     clean_up_gklm,
     create_nfs_instance_for_byok,
     get_enctag,
-    get_gklm_ca_certificate,
     load_gklm_config,
     nfs_byok_test_setup,
     setup_gklm_infrastructure,
@@ -106,10 +105,7 @@ def run(ceph_cluster, **kw):
             "installer": installer,
             "nfs_name": nfs_name,
         }
-        log.info("Verify Cluster is healthy before test")
-        if cephfs_common_utils.wait_for_healthy_ceph(client, 300):
-            log.error("Cluster health is not OK even after waiting for 300secs")
-            return 1
+
         fs_details = cephfs_common_utils.get_fs_info(client, fs_name)
         if not fs_details:
             cephfs_common_utils.create_fs(client, fs_name)
@@ -122,18 +118,13 @@ def run(ceph_cluster, **kw):
             return 1
         log.info("PASS:BYOK Test for Incorrect KMIP cert")
         return 0
+
     except Exception as e:
         log.error(e)
         log.error(traceback.format_exc())
         return 1
     finally:
         log.info("Clean Up in progess")
-        wait_time_secs = 300
-        if cephfs_common_utils.wait_for_healthy_ceph(client_objs[0], wait_time_secs):
-            log.error(
-                "Cluster health is not OK even after waiting for %s secs",
-                wait_time_secs,
-            )
         if incorrect_enctag_cleanup != 1 or incorrect_cert_cleanup != 1:
             clean_up_gklm(
                 gklm_rest_client=byok_setup_params["gklm_rest_client"],
@@ -298,17 +289,19 @@ def byok_test_incorrect_kmip_cert():
             if nfs_log_parser(clients[0], nfs_node, nfs_name, expect_list):
                 log.error("NFS Debug log doesn't contain %s", expect_list)
                 return 1
+    incorrect_cert_cleanup = 1
+    log.info("Cleanup mountdir,export and nfs cluster")
+    cleanup_custom_nfs_cluster_multi_export_client(
+        clients, nfs_mount, nfs_name, nfs_export, 1
+    )
+
     log.info("Cleanup GKLM Client")
     clean_up_gklm(
         gklm_rest_client=byok_setup_params["gklm_rest_client"],
         gkml_client_name=byok_setup_params["gklm_client_name"],
         gklm_cert_alias=byok_setup_params["gklm_cert_alias"],
     )
-    incorrect_cert_cleanup = 1
-    log.info("Cleanup mountdir,export and nfs cluster")
-    cleanup_custom_nfs_cluster_multi_export_client(
-        clients, nfs_mount, nfs_name, nfs_export, 1
-    )
+
     nfs_cleanup = 1
     return 0
 
@@ -323,18 +316,15 @@ def gklm_setup():
     gklm_ip = byok_setup_params["gklm_ip"]
     gklm_user = byok_setup_params["gklm_user"]
     gklm_password = byok_setup_params["gklm_password"]
-    gklm_node_user = byok_setup_params["gklm_node_user"]
-    gklm_node_password = byok_setup_params["gklm_node_password"]
+
     gklm_hostname = byok_setup_params["gklm_hostname"]
     gklm_client_name = byok_setup_params["gklm_client_name"]
     gklm_cert_alias = byok_setup_params["gklm_cert_alias"]
     nfs_nodes = byok_setup_params["nfs_nodes"]
     nfs_node = nfs_nodes[0]
-    exe_node = setup_gklm_infrastructure(
+    setup_gklm_infrastructure(
         nfs_nodes=nfs_nodes,
         gklm_ip=gklm_ip,
-        gklm_node_username=gklm_node_user,
-        gklm_node_password=gklm_node_password,
         gklm_hostname=gklm_hostname,
     )
     gklm_rest_client = GklmClient(
@@ -368,13 +358,8 @@ def gklm_setup():
     # ------------------- Prerequisites and Certificate Export -------------------
     # Ensure SSH access, hostname resolution, and certificate availability
     log.info("Setting up SSH and CA certificate prerequisites on NFS and GKLM nodes")
-    ca_cert = get_gklm_ca_certificate(
-        gklm_ip=gklm_ip,
-        gklm_node_username=gklm_node_user,
-        gklm_node_password=gklm_node_password,
-        gklm_hostname=gklm_hostname,
-        exe_node=exe_node,
-        gklm_rest_client=gklm_rest_client,
+    ca_cert = gklm_rest_client.certificates.get_system_certificate(
+        cert_name=gklm_hostname
     )
     log.info("CA certificate successfully retrieved \n %s", ca_cert)
     return enctag, rsa_key, cert, ca_cert, gklm_rest_client

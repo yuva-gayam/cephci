@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 
 from cli.exceptions import ConfigError, OperationFailedError, ResourceNotFoundError
 from cli.ops.cephadm_ansible import (
@@ -8,8 +9,11 @@ from cli.ops.cephadm_ansible import (
     exec_cephadm_preflight,
 )
 from cli.utilities.packages import Package, Repos
+from utility.log import Log
 
 from .configs import get_registry_details
+
+log = Log(__name__)
 
 ETC_HOSTS = "/etc/hosts"
 
@@ -146,21 +150,24 @@ def setup_ssh_keys(installer, nodes):
             ),
         )
 
-        # Copy ssh key to root user
+        # Copy ssh key to root user (non-root to root - may fail if password auth disabled)
         installer.exec_command(
             cmd="{} {}".format(
                 SSHPASS.format(node.root_passwd),
                 SSH_COPYID.format(SSH_ID_RSA_PUB, "root", node.hostname),
             ),
+            check_ec=False,
         )
 
-        # Copy ssh key to host root user
+        # Copy ssh key to host root user (root to root - this should always work)
+        time.sleep(2)
         installer.exec_command(
             sudo=True,
             cmd="{} {}".format(
                 SSHPASS.format(node.root_passwd),
                 SSH_COPYID.format(SSH_ID_RSA_PUB, "root", node.hostname),
             ),
+            check_ec=False,
         )
 
 
@@ -343,6 +350,15 @@ def setup_installer_node(
     # Configure cephadm ansible inventory hosts
     configure_cephadm_ansible_inventory(nodes)
 
+    installer.exec_command(
+        sudo=True,
+        cmd=(
+            "mkdir -p /home/cephuser/ansible && "
+            "touch /home/cephuser/ansible/ansible.log && "
+            "chown -R cephuser:cephuser /home/cephuser/ansible"
+        ),
+    )
+
     # Execute cephadm ansible preflight playbook
     exec_cephadm_preflight(installer, build_type, ibm_build, tools_repo)
 
@@ -367,14 +383,19 @@ def get_tools_repo(repo, ibm_build=False):
         repo (str): Ceph tools repo URL
         ibm_build (bool): IBM build tag
     """
+    repo = repo.rstrip("/")
+    log.info(f"get_tools_repo(): repo={repo}, ibm_build={ibm_build}")
+
+    if repo.endswith(".repo"):
+        return repo
+
+    if "repo.qe.ceph.lab" in repo:
+        return f"{repo}/Tools"
+
     if ibm_build:
-        return repo
+        return f"{repo}/Tools"
 
-    elif repo.endswith("repo"):
-        return repo
-
-    else:
-        return f"{repo}/compose/Tools/x86_64/os"
+    return f"{repo}/compose/Tools/x86_64/os"
 
 
 def add_centos_epel_repo(nodes, platform):
