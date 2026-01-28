@@ -10,12 +10,15 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 from ceph.ceph import Ceph
-from ceph.nvmegw_cli import NVMeGWCLI
-from ceph.nvmeof.initiator import Initiator
+from ceph.nvmeof.initiators.linux import Initiator
 from ceph.parallel import parallel
 from ceph.utils import get_node_by_id
 from tests.nvmeof.workflows.ha import HighAvailability
-from tests.nvmeof.workflows.nvme_utils import delete_nvme_service, deploy_nvme_service
+from tests.nvmeof.workflows.nvme_utils import (
+    check_and_set_nvme_cli_image,
+    delete_nvme_service,
+    deploy_nvme_service,
+)
 from tests.rbd.rbd_utils import initial_rbd_config
 from utility.log import Log
 from utility.utils import generate_unique_id
@@ -121,7 +124,7 @@ def configure_subsystems(pool, ha, config):
         for host in config["hosts"]:
             initiator_node = get_node_by_id(ceph_cluster, host)
             initiator = Initiator(initiator_node)
-            host_nqn = initiator.nqn()
+            host_nqn = initiator.initiator_nqn()
             nvmegwcli.host.add(**{"args": {**sub_args, **{"host": host_nqn}}})
 
     # Add Namespaces
@@ -176,6 +179,7 @@ def test_ceph_83608838(ceph_cluster, config):
     LOG.info("deploy nvme service")
     deploy_nvme_service(ceph_cluster, config)
     ha = HighAvailability(ceph_cluster, config["gw_nodes"], **config)
+    ha.initialize_gateways()
 
     # Configure subsystems
     LOG.info("Configure subsystems")
@@ -214,7 +218,7 @@ def test_ceph_83608838(ceph_cluster, config):
             **{"args": {**img_args}, "base_cmd_args": {"format": "json"}}
         )
         # Get the nsids related each load-balancing-group
-        parsed_data = json.loads(namespace_list[1])
+        parsed_data = json.loads(namespace_list[0])
         grouped_nsids = dict()
         for ns in parsed_data["namespaces"]:
             group = ns["load_balancing_group"]
@@ -384,6 +388,19 @@ def test_ceph_83609769(ceph_cluster, config):
     )
 
 
+def thread_pool_executor(num_devices, initiators):
+    if int(num_devices) >= 1:
+        max_workers = (
+            len(initiators) * num_devices if initiators else num_devices
+        )  # 20 devices + 10 buffer per initiator
+        executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+        )
+        return executor
+    else:
+        return None
+
+
 testcases = {
     "CEPH-83608838": test_ceph_83608838,
     "CEPH-83609769": test_ceph_83609769,
@@ -443,7 +460,6 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
     rbd_pool = config["rbd_pool"]
     rbd_obj = initial_rbd_config(**kwargs)["rbd_reppool"]
     initiators = config.get("initiators")
-    io_tasks = []
     # Set max_workers to accommodate all FIO processes per initiator
     num_devices = 0
     for subsystem in config.get("subsystems", []):
@@ -451,19 +467,10 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
         if bdevs:
             num_devices += bdevs[0].get("count", 0)
 
-    if int(num_devices) >= 1:
-        max_workers = (
-            len(initiators) * num_devices if initiators else num_devices
-        )  # 20 devices + 10 buffer per initiator
-        executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-        )
+    executor = thread_pool_executor(num_devices, initiators)
 
     overrides = kwargs.get("test_data", {}).get("custom-config")
-    for key, value in dict(item.split("=") for item in overrides).items():
-        if key == "nvmeof_cli_image":
-            NVMeGWCLI.NVMEOF_CLI_IMAGE = value
-            break
+    check_and_set_nvme_cli_image(ceph_cluster, config=overrides)
 
     try:
         if config.get("test_case"):
@@ -484,7 +491,9 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
                 deploy_nvme_service(ceph_cluster, config)
 
             ha = HighAvailability(ceph_cluster, config["gw_nodes"], **config)
+            ha.initialize_gateways()
             gw_nodes = ha.gateways
+            gw = gw_nodes[0]
 
             # Configure Subsystem
             if config.get("subsystems"):
@@ -508,7 +517,7 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
                             lb_groups = None
                             LOG.info(sub_args)
                             configure_namespaces(
-                                ha.gateways[0],
+                                gw,
                                 subsystem,
                                 lb_groups,
                                 sub_args,
@@ -532,6 +541,7 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
 
                     # Scale down
                     if lb_config.get("scale_down"):
+                        io_tasks_scale_down = []
                         gateway_nodes_to_be_deployed = lb_config["scale_down"]
                         LOG.info(f"Started scaling down {gateway_nodes_to_be_deployed}")
 
@@ -545,25 +555,43 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
                         # Start IO Execution
                         LOG.info("Initiating IO before scale down")
                         for initiator in ha.clients:
-                            io_tasks.append(executor.submit(initiator.start_fio))
+                            io_tasks_scale_down.append(
+                                executor.submit(initiator.start_fio)
+                            )
                         time.sleep(20)  # time sleep for IO to Kick-in
 
                         ha.scale_down(gateway_nodes_to_be_deployed)
 
+                        # Wait for IO to complete and collect FIO outputs
+                        fio_outputs = []
+                        if io_tasks_scale_down:
+                            LOG.info("Waiting for completion of IOs.")
+                            executor.shutdown(wait=True, cancel_futures=True)
+
+                            for task in io_tasks_scale_down:
+                                try:
+                                    fio_outputs.append(task.result())
+                                except Exception as e:
+                                    LOG.error(f"FIO execution failed: {e}")
+
                     # Scale up
                     if lb_config.get("scale_up"):
+                        io_tasks_scale_up = []
                         scaleup_nodes = lb_config["scale_up"]
                         gateway_nodes = config["gw_nodes"]
                         LOG.info(f"Started scaling up {scaleup_nodes}")
 
                         # Prepare FIO execution for existing namespaces
-                        old_namespaces = ha.fetch_namespaces(ha.gateways[0])
+                        old_namespaces = ha.fetch_namespaces(gw)
                         ha.prepare_io_execution(initiators)
 
                         # Start IO Execution into already existing namespaces/nodes
                         LOG.info("Initiating IO before scale up ")
+                        executor = thread_pool_executor(num_devices, initiators)
                         for initiator in ha.clients:
-                            io_tasks.append(executor.submit(initiator.start_fio))
+                            io_tasks_scale_up.append(
+                                executor.submit(initiator.start_fio)
+                            )
                         time.sleep(20)  # time sleep for IO to Kick-in
 
                         # Perform scale-up of new nodes
@@ -604,19 +632,46 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
                                 [i["uuid"] for i in new_namespaces]
                             )
 
-                            # Start IO Execution for new namespaces
-                            for initiator in ha.clients:
-                                io_tasks.append(executor.submit(initiator.start_fio))
-                            time.sleep(20)
-
                             # Validate IO for old namespaces
                             LOG.info("Validating IO for old namespaces post scaleup")
                             ha.validate_scaleup(scaleup_nodes, old_namespaces)
+                            # Wait for IO to complete and collect FIO outputs
+                            fio_outputs = []
+                            if io_tasks_scale_up:
+                                LOG.info("Waiting for completion of IOs.")
+                                executor.shutdown(wait=True, cancel_futures=True)
+
+                                for task in io_tasks_scale_up:
+                                    try:
+                                        fio_outputs.append(task.result())
+                                    except Exception as e:
+                                        LOG.error(f"FIO execution failed: {e}")
+
+                            # Start IO Execution for new namespaces
+                            io_tasks_new_namespaces = []
+                            executor = thread_pool_executor(num_devices, initiators)
+                            for initiator in ha.clients:
+                                io_tasks_new_namespaces.append(
+                                    executor.submit(initiator.start_fio)
+                                )
+                            time.sleep(20)
 
                             # Validate IO for new namespaces
                             LOG.info("Validating IO for new namespaces post scaleup")
                             namespaces = parse_namespaces(config, new_namespaces)
                             ha.validate_scaleup(scaleup_nodes, namespaces)
+
+                            # Wait for IO to complete and collect FIO outputs
+                            fio_outputs = []
+                            if io_tasks_new_namespaces:
+                                LOG.info("Waiting for completion of IOs.")
+                                executor.shutdown(wait=True, cancel_futures=True)
+
+                                for task in io_tasks_new_namespaces:
+                                    try:
+                                        fio_outputs.append(task.result())
+                                    except Exception as e:
+                                        LOG.error(f"FIO execution failed: {e}")
 
                         # Perform scale-up of old GW nodes(replacement)
                         else:
@@ -632,6 +687,3 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
     finally:
         if config.get("cleanup"):
             teardown(ceph_cluster, rbd_obj, config)
-            if io_tasks:
-                LOG.info("Waiting for completion of IOs.")
-                executor.shutdown(wait=True, cancel_futures=True)

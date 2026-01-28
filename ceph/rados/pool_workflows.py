@@ -91,6 +91,7 @@ class PoolFunctions:
                 2. obj_end : end count for object creation
                 3. num_keys_obj: Number of KW pairs to be added to each object
                 4. retain_script: flag to control deletion of omap script
+                5. verify_omap_count: flag to enable/disable OMAP count verification (default: True)
 
         Returns: True -> pass, False -> fail
         """
@@ -142,30 +143,40 @@ class PoolFunctions:
         if not kwargs.get("retain_script", False):
             client_node.exec_command(sudo=True, cmd="rm -rf generate_omap_entries.py")
 
-        # Triggering deep scrub on the pool
-        self.rados_obj.run_deep_scrub(pool=pool_name)
+        # Check if OMAP count verification is enabled (default: True)
+        verify_omap_count = kwargs.get("verify_omap_count", True)
 
-        end_time = datetime.datetime.now() + datetime.timedelta(seconds=1200)
-        while end_time > datetime.datetime.now():
+        if verify_omap_count:
             # Triggering deep scrub on the pool
-            log.debug(
-                "Triggered deep-scrub on the pool, and checking for omap entries present"
-            )
-            time.sleep(40)
-            if check_omap_entries():
-                log.info("OMAP entries are available")
-                break
             self.rados_obj.run_deep_scrub(pool=pool_name)
 
-        pool_stat = self.rados_obj.get_ceph_pg_dump_pools(pool_id=pool_id)
-        omap_keys = pool_stat["stat_sum"]["num_omap_keys"]
-        omap_bytes = pool_stat["stat_sum"]["num_omap_bytes"]
-        log.info(
-            f"Wrote {omap_keys} keys with {omap_bytes} bytes of OMAP data on the pool."
-        )
+            end_time = datetime.datetime.now() + datetime.timedelta(seconds=1200)
+            while end_time > datetime.datetime.now():
+                # Triggering deep scrub on the pool
+                log.debug(
+                    "Triggered deep-scrub on the pool, and checking for omap entries present"
+                )
+                time.sleep(40)
+                if check_omap_entries():
+                    log.info("OMAP entries are available")
+                    break
+                self.rados_obj.run_deep_scrub(pool=pool_name)
+
+            pool_stat = self.rados_obj.get_ceph_pg_dump_pools(pool_id=pool_id)
+            omap_keys = pool_stat["stat_sum"]["num_omap_keys"]
+            omap_bytes = pool_stat["stat_sum"]["num_omap_bytes"]
+            log.info(
+                f"Wrote {omap_keys} keys with {omap_bytes} bytes of OMAP data on the pool."
+            )
+        else:
+            log.info(
+                "OMAP count verification skipped. Expected %s OMAP entries to be created.",
+                expected_omap_keys,
+            )
+
         return True
 
-    def prepare_static_data(self, node):
+    def prepare_static_data(self, node, size="4M"):
         """
         creates a 4MB obj, same obj will be put nobj times
         because in do_rados_get we have to verify checksum
@@ -178,7 +189,7 @@ class PoolFunctions:
             sfd = node.remote_file(file_name=tmp_file, file_mode="w+")
             sfd.write(DSTR * 4)
             sfd.flush()
-            cmd = f"truncate -s 4M {tmp_file}"
+            cmd = f"truncate -s {size} {tmp_file}"
             node.exec_command(cmd=cmd)
         except Exception as e:
             log.error(f"file creation failed with exception: {e}")
@@ -196,6 +207,7 @@ class PoolFunctions:
         nobj: int = 1,
         offset: int = 0,
         timeout: int = 600,
+        size: str = "4M",
     ):
         """
         write static data to one object or nobjs in an app pool
@@ -223,7 +235,7 @@ class PoolFunctions:
         Returns:
             0 -> pass, 1 -> fail
         """
-        infile = self.prepare_static_data(client)
+        infile = self.prepare_static_data(client, size)
         log.debug(f"Input file is {infile}")
 
         for i in range(nobj):

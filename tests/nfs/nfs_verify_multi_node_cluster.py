@@ -65,12 +65,18 @@ def run(ceph_cluster, **kw):
         # Test 2: Perform readir operation from other client (du -sh)
         cmd = f"du -sh {nfs_mount}"
         clients[2].exec_command(cmd=cmd, sudo=True)
+        return 0
 
     except Exception as e:
         log.error(f"Failed to validate multi node deployment operations : {e}")
         return 1
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients,
+            nfs_mount,
+            nfs_name,
+            nfs_export,
+            nfs_nodes=nfs_nodes[:no_cluster_nodes],
+        )
         log.info("Cleaning up successful")
-    return 0

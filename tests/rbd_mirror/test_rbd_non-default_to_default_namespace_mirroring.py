@@ -111,6 +111,32 @@ CEPH-83613951:
 17. Repeat the above test steps on Erasure Coded (EC) pool with non-default to
     default configuration with snapshot schedule in namespace level
 18. Cleanup the images, namespace, pools along with disk cleanup.
+
+CEPH-83613952:
+1. Create a pool  on both clusters
+2. Create namespaces ns1_p in pool1 on cluster2
+3. Enable non-default namespace mirroring on with "init-only" mirror mode on cluster-2
+   # rbd mirror pool enable --pool pool1 init-only
+   # rbd mirror pool enable pool1/ns1_p image --remote-namespace ' '
+   Enable default namespace image mode mirroring on cluster-1
+   # rbd mirror pool enable --pool pool1 image --remote-namespace ns1_p
+4. Set up peering between the two clusters in two-way mode
+5. Verify mirroring is configured successfully using below command on both clusters
+6. Create an image in the empty(default) namespace on cluster1 and enable snapshot-based mirroring
+7. Verify image mirroring status for the default namespace image
+8. Add a snapshot schedule for the mirrored image
+9. Initiate I/O operations on the image using rbd bench or fio or file mount
+10. Wait till snapshot schedule interval set like above 1m
+11. Verify that data is mirrored from the primary to the secondary cluster
+12. Verify data consistency using md5sum checksum from primary and secondary
+13. Disable mirroring on the image in cluster-1
+14. remove pool peer on both clusters and verify the status
+15. Disable mirroring on the pool on both clusters
+16. Re-enable the mirroring on the pool on both clusters and verify the status
+17. Initiate I/O operations on the image using rbd bench or fio or file mount
+18. Verify that data is mirrored from the primary to the secondary cluster
+19. Repeat the above test on EC pool
+20. Cleanup the images, namespace, pools along with disk cleanup.
 """
 
 import ast
@@ -125,6 +151,7 @@ from ceph.rbd.workflows.krbd_io_handler import krbd_io_handler
 from ceph.rbd.workflows.rbd_mirror import enable_image_mirroring, wait_for_status
 from ceph.rbd.workflows.snap_scheduling import (
     add_snapshot_scheduling,
+    remove_snapshot_scheduling,
     verify_namespace_snapshot_schedule,
     verify_snapshot_schedule,
 )
@@ -237,7 +264,7 @@ def test_non_default_to_default_namespace_mirroring(
                 image_spec = []
                 image_spec.append(pri_image_spec)
                 io_config["config"]["image_spec"] = image_spec
-                (io, err) = krbd_io_handler(**io_config)
+                io, err = krbd_io_handler(**io_config)
                 if err:
                     raise Exception(
                         f"Map, mount and run IOs failed for {io_config['config']['image_spec']}"
@@ -334,7 +361,7 @@ def test_non_default_to_default_namespace_mirroring(
             image_spec.append(pri_image_spec)
             io_config["config"]["image_spec"] = image_spec
             # Write data on images created on secondary side
-            (io, err) = krbd_io_handler(**io_config)
+            io, err = krbd_io_handler(**io_config)
             if err:
                 raise Exception(
                     f"Map, mount and run IOs failed for {io_config['config']['image_spec']}"
@@ -415,6 +442,7 @@ def test_default_to_non_default_namespace_mirroring(
                         out, err = add_snapshot_scheduling(
                             rbd_primary, **snap_schedule_config
                         )
+
                         if verify_snapshot_schedule(
                             rbd_primary, pool, image, interval=interval
                         ):
@@ -425,6 +453,7 @@ def test_default_to_non_default_namespace_mirroring(
                                 + image
                                 + " failed"
                             )
+
                 pri_image_spec = f"{pool}/{image}"
                 sec_image_spec = f"{pool}/{remote_namespace}/{image}"
                 # Write data on the primary image
@@ -456,7 +485,7 @@ def test_default_to_non_default_namespace_mirroring(
                 image_spec = []
                 image_spec.append(pri_image_spec)
                 io_config["config"]["image_spec"] = image_spec
-                (io, err) = krbd_io_handler(**io_config)
+                io, err = krbd_io_handler(**io_config)
                 if err:
                     raise Exception(
                         f"Map, mount and run IOs failed for {io_config['config']['image_spec']}"
@@ -501,6 +530,27 @@ def test_default_to_non_default_namespace_mirroring(
                         "Data is consistent with the mirrored image for "
                         + pri_image_spec
                     )
+
+                # Remove schedule from primary
+                out, err = remove_snapshot_scheduling(
+                    rbd_primary,
+                    pool=pool,
+                    image=image,
+                    level=level,
+                    interval=interval,
+                    namespace=namespace,
+                )
+
+                if err:
+                    raise Exception("Failed to remove mirror snapshot schedule")
+
+                disable_args = {"pool": pool, "image": image}
+                if namespace:
+                    disable_args["namespace"] = namespace
+
+                out, err = rbd_primary.mirror.image.disable(**disable_args)
+                if "Mirroring disabled" in out:
+                    log.info(f"Successfully disabled mirroring for {image} on site-A")
 
             # create image in the non-default namespace on secondary
             log.info(
@@ -563,7 +613,7 @@ def test_default_to_non_default_namespace_mirroring(
             image_spec = []
             image_spec.append(pri_image_spec)
             io_config["config"]["image_spec"] = image_spec
-            (io, err) = krbd_io_handler(**io_config)
+            io, err = krbd_io_handler(**io_config)
             if err:
                 raise Exception(
                     f"Map, mount and run IOs failed for {io_config['config']['image_spec']}"
@@ -590,6 +640,97 @@ def test_default_to_non_default_namespace_mirroring(
             }
             if check_data_integrity(**data_integrity_spec):
                 raise Exception("Data integrity check failed for " + pri_image_spec)
+
+            # Remove schedule from secondary
+            out, err = remove_snapshot_scheduling(
+                rbd_secondary,
+                pool=pool,
+                image=image,
+                level=level,
+                interval=interval,
+                namespace=remote_namespace,
+            )
+
+            if err:
+                raise Exception("Failed to remove mirror snapshot schedule")
+
+            disable_args = {"pool": pool, "image": image}
+            if remote_namespace:
+                disable_args["namespace"] = remote_namespace
+
+            out, err = rbd_secondary.mirror.image.disable(**disable_args)
+            if "Mirroring disabled" in out:
+                log.info(f"Successfully disabled mirroring for {image} on site-B")
+
+            # Get peer info on primary cluster
+            out, err = rbd_primary.mirror.pool.info(**{"pool": pool, "format": "json"})
+            if err:
+                raise Exception(f"Failed to get mirror pool info: {err}")
+            try:
+                info = json.loads(out)
+                peer_uuids = [peer["uuid"] for peer in info.get("peers", [])]
+                if not peer_uuids:
+                    raise Exception("No peer UUID found in mirror pool info")
+                peer_uuid = peer_uuids[0]
+            except Exception as e:
+                raise Exception(f"Failed to parse mirror pool info: {e}")
+
+            # Get peer info on secondary cluster
+            out, err = rbd_secondary.mirror.pool.info(
+                **{"pool": pool, "format": "json"}
+            )
+            if err:
+                raise Exception(f"Failed to get mirror pool info: {err}")
+            try:
+                info = json.loads(out)
+                peer_uuids = [peer["uuid"] for peer in info.get("peers", [])]
+                if not peer_uuids:
+                    raise Exception("No peer UUID found in mirror pool info")
+                peer_uuid = peer_uuids[0]
+            except Exception as e:
+                raise Exception(f"Failed to parse mirror pool info: {e}")
+
+            # wait for the mirror to reflect in secondary
+            time.sleep(int(interval[:-1]) * 120)
+
+            # Remove peer from both clusters
+            out, err = rbd_primary.mirror.pool.peer.remove_(
+                **{"pool": pool, "uuid": peer_uuid}
+            )
+            if err:
+                raise Exception(f"Failed to remove pool peer on primary: {err}")
+
+            out, err = rbd_secondary.mirror.pool.peer.remove_(
+                **{"pool": pool, "uuid": peer_uuid}
+            )
+            if err:
+                raise Exception(f"Failed to remove pool peer on secondary: {err}")
+
+            # Disable mirroring on both clusters
+            out, err = rbd_primary.mirror.pool.disable(**{"pool": pool})
+            if err:
+                raise Exception(f"Failed to disable mirroring on primary: {err}")
+
+            out, err = rbd_secondary.mirror.pool.disable(**{"pool": pool})
+            if err:
+                raise Exception(f"Failed to disable mirroring on secondary: {err}")
+
+            # Enable image mode mirroring on both clusters
+            out, err = rbd_primary.mirror.pool.enable(**{"pool": pool, "mode": "image"})
+            if err:
+                raise Exception(
+                    f"Failed to enable image mode mirroring on primary: {err}"
+                )
+
+            out, err = rbd_secondary.mirror.pool.enable(
+                **{"pool": pool, "mode": "image"}
+            )
+            if err:
+                raise Exception(
+                    f"Failed to enable image mode mirroring on secondary: {err}"
+                )
+
+            log.info("Changed mirroring mode to image level on both clusters")
     return 0
 
 
@@ -1083,6 +1224,286 @@ def test_failover_and_image_operations(pri_config, sec_config, pool_types, **kw)
     return 0
 
 
+def test_disable_enable_namespace_mirroring(pri_config, sec_config, pool_types, **kw):
+    log.info("Starting CEPH-83613952 - Disable and Enable Namespace-based Mirroring")
+    rbd_primary = pri_config.get("rbd")
+    rbd_secondary = sec_config.get("rbd")
+    client_primary = pri_config.get("client")
+    client_secondary = sec_config.get("client")
+
+    def construct_imagespec(pool, namespace, image):
+        return f"{pool}/{namespace}/{image}" if namespace else f"{pool}/{image}"
+
+    for pool_type in pool_types:
+        rbd_config = kw.get("config", {}).get(pool_type, {})
+        multi_pool_config = getdict(rbd_config)
+
+        for pool, pool_config in multi_pool_config.items():
+            multi_image_config = getdict(pool_config)
+            namespace = pool_config.get("namespace")
+            remote_namespace = pool_config.get("remote_namespace")
+
+            for image, image_config_val in multi_image_config.items():
+                pri_image_spec = construct_imagespec(pool, namespace, image)
+                sec_image_spec = construct_imagespec(pool, remote_namespace, image)
+
+                enable_image_mirroring(
+                    pri_config,
+                    sec_config,
+                    pool=pool,
+                    image=image,
+                    mirrormode="snapshot",
+                    namespace=namespace,
+                    remote_namespace=remote_namespace,
+                )
+
+                wait_for_status(
+                    rbd=rbd_primary,
+                    cluster_name=pri_config["cluster"].name,
+                    imagespec=pri_image_spec,
+                    state_pattern="up+stopped",
+                )
+                wait_for_status(
+                    rbd=rbd_secondary,
+                    cluster_name=sec_config["cluster"].name,
+                    imagespec=sec_image_spec,
+                    state_pattern="up+replaying",
+                )
+
+                if image_config_val.get(
+                    "snap_schedule_levels"
+                ) and image_config_val.get("snap_schedule_intervals"):
+                    for level, interval in zip(
+                        image_config_val["snap_schedule_levels"],
+                        image_config_val["snap_schedule_intervals"],
+                    ):
+                        out, err = add_snapshot_scheduling(
+                            rbd_primary,
+                            pool=pool,
+                            image=image,
+                            level=level,
+                            interval=interval,
+                            namespace=namespace,
+                        )
+                        if err:
+                            raise Exception(
+                                f"Adding snapshot schedule failed with error {err}"
+                            )
+
+                fio_config = kw.get("config", {}).get("fio", {})
+                io_config = {
+                    "size": fio_config["size"],
+                    "do_not_create_image": True,
+                    "num_jobs": fio_config["ODF_CONFIG"]["num_jobs"],
+                    "iodepth": fio_config["ODF_CONFIG"]["iodepth"],
+                    "rwmixread": fio_config["ODF_CONFIG"]["rwmixread"],
+                    "direct": fio_config["ODF_CONFIG"]["direct"],
+                    "invalidate": fio_config["ODF_CONFIG"]["invalidate"],
+                    "rbd_obj": rbd_primary,
+                    "client": client_primary,
+                    "config": {
+                        "file_size": fio_config["size"],
+                        "file_path": [f"/mnt/mnt_{random_string(len=5)}/file"],
+                        "get_time_taken": True,
+                        "operations": {
+                            "fs": "ext4",
+                            "io": True,
+                            "mount": True,
+                            "map": True,
+                        },
+                        "cmd_timeout": 2400,
+                        "io_type": fio_config["ODF_CONFIG"]["io_type"],
+                        "image_spec": [pri_image_spec],
+                    },
+                }
+                io, err = krbd_io_handler(**io_config)
+                if err:
+                    raise Exception(
+                        f"Map, mount and run IOs failed for {pri_image_spec}"
+                    )
+                log.info(f"Map, mount and IOs successful for {pri_image_spec}")
+
+                log.info("wait for two minutes data to mirror")
+                time.sleep(int(interval[:-1]) * 120)
+
+                # Verify the data on mirrored images is consistent
+                data_integrity_spec = {
+                    "first": {
+                        "image_spec": pri_image_spec,
+                        "rbd": rbd_primary,
+                        "client": client_primary,
+                        "file_path": f"/tmp/{random_string(len=3)}",
+                    },
+                    "second": {
+                        "image_spec": sec_image_spec,
+                        "rbd": rbd_secondary,
+                        "client": client_secondary,
+                        "file_path": f"/tmp/{random_string(len=3)}",
+                    },
+                }
+                if check_data_integrity(**data_integrity_spec):
+                    raise Exception("Data integrity check failed for " + pri_image_spec)
+                log.info(
+                    "Data is consistent with the mirrored image for " + pri_image_spec
+                )
+
+                # Remove pool peer on both clusters
+                out, err = rbd_primary.mirror.pool.info(
+                    **{"pool": pool, "format": "json"}
+                )
+                if err:
+                    raise Exception(f"Failed to get mirror pool info: {err}")
+                try:
+                    info = json.loads(out)
+                    peer_uuids = [peer["uuid"] for peer in info.get("peers", [])]
+                    if not peer_uuids:
+                        raise Exception("No peer UUID found in mirror pool info")
+                    peer_uuid = peer_uuids[0]
+                except Exception as e:
+                    raise Exception(f"Failed to parse mirror pool info: {e}")
+
+                out, err = rbd_primary.mirror.pool.peer.remove_(
+                    **{"pool": pool, "uuid": peer_uuid}
+                )
+                if err:
+                    raise Exception(f"Failed to remove pool peer on primary: {err}")
+
+                out, err = rbd_secondary.mirror.pool.info(
+                    **{"pool": pool, "format": "json"}
+                )
+                if err:
+                    raise Exception(f"Failed to get mirror pool info: {err}")
+                try:
+                    info = json.loads(out)
+                    peer_uuids = [peer["uuid"] for peer in info.get("peers", [])]
+                    if not peer_uuids:
+                        raise Exception("No peer UUID found in mirror pool info")
+                    peer_uuid = peer_uuids[0]
+                except Exception as e:
+                    raise Exception(f"Failed to parse mirror pool info: {e}")
+
+                out, err = rbd_secondary.mirror.pool.peer.remove_(
+                    **{"pool": pool, "uuid": peer_uuid}
+                )
+                if err:
+                    raise Exception(f"Failed to remove pool peer on secondary: {err}")
+
+                # Disable mirroring on the pool on both clusters
+                out, err = rbd_primary.mirror.pool.disable(**{"pool": pool})
+                if err:
+                    raise Exception(f"Failed to disable mirroring on primary: {err}")
+
+                out, err = rbd_secondary.mirror.pool.disable(**{"pool": pool})
+                if err:
+                    raise Exception(f"Failed to disable mirroring on secondary: {err}")
+
+                # Re-enable the mirroring on the pool on both clusters
+                out, err = rbd_primary.mirror.pool.enable(
+                    **{"pool": pool, "mode": "image"}
+                )
+                if err:
+                    raise Exception(
+                        f"Failed to enable image mode mirroring on primary: {err}"
+                    )
+
+                out, err = rbd_secondary.mirror.pool.enable(
+                    **{"pool": pool, "mode": "image"}
+                )
+                if err:
+                    raise Exception(
+                        f"Failed to enable image mode mirroring on secondary: {err}"
+                    )
+
+                image_enable_config = {
+                    "pool": pool,
+                    "image": image,
+                    "mirrormode": "snapshot",
+                    "namespace": namespace,
+                    "remote_namespace": remote_namespace,
+                }
+                # Enable snapshot mode mirroring on images of the namespace
+                enable_image_mirroring(pri_config, sec_config, **image_enable_config)
+
+                # Verify image mirroring status on primary cluster
+                wait_for_status(
+                    rbd=rbd_primary,
+                    cluster_name=pri_config["cluster"].name,
+                    imagespec=pri_image_spec,
+                    state_pattern="up+stopped",
+                )
+                wait_for_status(
+                    rbd=rbd_secondary,
+                    cluster_name=sec_config["cluster"].name,
+                    imagespec=sec_image_spec,
+                    state_pattern="up+replaying",
+                )
+
+                if image_config_val.get(
+                    "snap_schedule_levels"
+                ) and image_config_val.get("snap_schedule_intervals"):
+                    for level, interval in zip(
+                        image_config_val["snap_schedule_levels"],
+                        image_config_val["snap_schedule_intervals"],
+                    ):
+                        out, err = add_snapshot_scheduling(
+                            rbd_primary,
+                            pool=pool,
+                            image=image,
+                            level=level,
+                            interval=interval,
+                            namespace=namespace,
+                        )
+                        if err:
+                            raise Exception(
+                                f"Adding snapshot schedule failed with error {err}"
+                            )
+
+                bench_kw = {
+                    "image-spec": pri_image_spec,
+                    "io-type": "write",
+                    "io-total": "200M",
+                    "io-threads": 16,
+                }
+
+                out, err = rbd_primary.bench(**bench_kw)
+                if err:
+                    raise Exception(
+                        "Failed to write IO to the image %s: %s" % (pri_image_spec, err)
+                    )
+                else:
+                    log.info("Successfully ran IO on image %s" % pri_image_spec)
+
+                log.info("waiting for 2 minutes data to mirror")
+                time.sleep(int(interval[:-1]) * 120)
+
+                # Verify the data on mirrored images is consistent
+                data_integrity_spec = {
+                    "first": {
+                        "image_spec": pri_image_spec,
+                        "rbd": rbd_primary,
+                        "client": client_primary,
+                        "file_path": f"/tmp/{random_string(len=3)}",
+                    },
+                    "second": {
+                        "image_spec": sec_image_spec,
+                        "rbd": rbd_secondary,
+                        "client": client_secondary,
+                        "file_path": f"/tmp/{random_string(len=3)}",
+                    },
+                }
+                if check_data_integrity(**data_integrity_spec):
+                    raise Exception("Data integrity check failed for " + pri_image_spec)
+                log.info(
+                    "Data is consistent with the mirrored image for " + pri_image_spec
+                )
+
+                log.info(
+                    "Test passed successfully for disabling and enabling namespace mirroring"
+                )
+
+    return 0
+
+
 def run(**kw):
     """
     Test to verify default and non-default namespace mirroring test scenarios
@@ -1119,6 +1540,7 @@ def run(**kw):
             "CEPH-83612872": test_default_to_non_default_namespace_mirroring,
             "CEPH-83613949": test_multi_snap_scheduling_namespace_mirroring,
             "CEPH-83613951": test_failover_and_image_operations,
+            "CEPH-83613952": test_disable_enable_namespace_mirroring,
         }
 
         test_func = kw["config"]["test_function"]

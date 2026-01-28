@@ -9,6 +9,7 @@ More operations to be added as needed
 
 """
 
+import ast
 import concurrent.futures as cf
 import datetime
 import json
@@ -17,6 +18,7 @@ import re
 import time
 from collections import namedtuple
 
+from ceph.ceph import CommandFailed, SocketTimeoutException, TimeoutException
 from ceph.ceph_admin import CephAdmin
 from ceph.parallel import parallel
 from ceph.rados import utils as osd_utils
@@ -180,7 +182,7 @@ class RadosOrchestrator:
                 out, err = self.node.shell([cmd], timeout=timeout, print_output=False)
         except Exception as er:
             log.error(f"Exception hit while command execution. {er}")
-            return None
+            raise
         if out.isspace():
             return {}
         status = json.loads(out)
@@ -482,6 +484,9 @@ class RadosOrchestrator:
                 assert new_objs > 0
                 assert new_objs > org_objs
             return True
+        except (SocketTimeoutException, TimeoutException):
+            log.error("rados bench command failed due to timeout")
+            raise
         except Exception as err:
             log.error(f"Error running rados bench write on pool : {pool_name}")
             log.error(err)
@@ -560,8 +565,7 @@ class RadosOrchestrator:
                 2. ec_profile_name -> name of EC profile if pool being created is an EC pool
                 3. min_size -> min replication size for pool to serve data
                 4. size -> min replication size for pool to write data
-                5. erasure_code_use_overwrites -> allows overrides in an erasure coded pool
-                6. allow_ec_overwrites -> This lets RBD and CephFS store their data in an erasure coded pool
+                5. erasure_code_use_overwrites -> This lets RBD and CephFS store their data in an ecpool
                 7. disable_pg_autoscale -> sets auto-scale mode off on the pool
                 8. crush_rule -> custom crush rule for the pool
                 9. pool_quota -> limit the maximum number of objects or the maximum number of bytes stored
@@ -599,11 +603,15 @@ class RadosOrchestrator:
             )
             self.node.shell([enable_app_cmd])
 
+        allow_ec_overwrites = (
+            "true" if kwargs.get("erasure_code_use_overwrites") else "false"
+        )
+
         cmd_map = {
             "min_size": f"ceph osd pool set {pool_name} min_size {kwargs.get('min_size')}",
             "size": f"ceph osd pool set {pool_name} size {kwargs.get('size')}",
             "erasure_code_use_overwrites": f"ceph osd pool set {pool_name} "
-            f"allow_ec_overwrites {kwargs.get('erasure_code_use_overwrites')}",
+            f"allow_ec_overwrites {allow_ec_overwrites}",
             "disable_pg_autoscale": f"ceph osd pool set {pool_name} pg_autoscale_mode off",
             "pool_quota": f"ceph osd pool set-quota {pool_name} {kwargs.get('pool_quota')}",
         }
@@ -1266,11 +1274,26 @@ class RadosOrchestrator:
             return True
 
         cluster_osds = self.get_osd_list(status="UP")
-        for osd_id in cluster_osds:
-            init_frag_scores = {osd_id: self.get_fragmentation_score(osd_id=osd_id)}
 
-        for osd_id, score in init_frag_scores.items():
-            log.debug("Initial fragmentation score on OSD %s: %s", osd_id, score)
+        if not cluster_osds:
+            log.error("No UP OSDs found in cluster")
+            return False
+
+        # Collect initial fragmentation scores in parallel
+        init_frag_scores = {}
+
+        def get_frag_score(osd_id):
+            return osd_id, self.get_fragmentation_score(osd_id=osd_id)
+
+        with cf.ThreadPoolExecutor(max_workers=min(10, len(cluster_osds))) as executor:
+            futures = {
+                executor.submit(get_frag_score, osd_id): osd_id
+                for osd_id in cluster_osds
+            }
+            for future in cf.as_completed(futures):
+                osd_id, score = future.result()
+                init_frag_scores[osd_id] = score
+                log.debug("Initial fragmentation score on OSD %s: %s", osd_id, score)
 
         if pool:
             if not self.get_pool_details(pool=pool):
@@ -1334,27 +1357,36 @@ class RadosOrchestrator:
                         log.error("Object creation failed.")
                         return False
 
-                for osd_id in cluster_osds:
-                    if osd_id in fragmented_osds:
-                        continue
-                    frag_score = self.get_fragmentation_score(osd_id=osd_id)
-                    log.debug(
-                        "OSD %s fragmentation after iteration %d: %.2f",
-                        osd_id,
-                        iteration,
-                        frag_score,
-                    )
-                    if frag_score >= required_fragmentation:
-                        fragmented_osds.add(osd_id)
-                        if len(fragmented_osds) >= pool_size:
-                            log.info(
-                                "Fragmentation target : %s reached for %s OSDs. List of OSDs : %s",
-                                frag_score * 100,
-                                pool_size,
-                                fragmented_osds,
-                            )
-                            time.sleep(120)
-                            return True
+            # Check fragmentation scores in parallel for OSDs not yet fragmented
+            # (moved outside object creation executor context)
+            osds_to_check = [osd for osd in cluster_osds if osd not in fragmented_osds]
+            if osds_to_check:
+                with cf.ThreadPoolExecutor(
+                    max_workers=min(10, len(osds_to_check))
+                ) as frag_executor:
+                    frag_futures = {
+                        frag_executor.submit(get_frag_score, osd_id): osd_id
+                        for osd_id in osds_to_check
+                    }
+                    for future in cf.as_completed(frag_futures):
+                        osd_id, frag_score = future.result()
+                        log.debug(
+                            "OSD %s fragmentation after iteration %d: %.2f",
+                            osd_id,
+                            iteration,
+                            frag_score,
+                        )
+                        if frag_score >= required_fragmentation:
+                            fragmented_osds.add(osd_id)
+                            if len(fragmented_osds) >= pool_size:
+                                log.info(
+                                    "Fragmentation target : %s reached for %s OSDs. List of OSDs : %s",
+                                    frag_score * 100,
+                                    pool_size,
+                                    fragmented_osds,
+                                )
+                                time.sleep(120)
+                                return True
             total_written = obj_end - obj_start
             log.info(
                 "Iteration %d complete. Total objects written in this step: %d",
@@ -1448,6 +1480,88 @@ class RadosOrchestrator:
         cmd = "ceph osd crush rule ls"
         return self.run_ceph_command(cmd=cmd)
 
+    def enable_fast_ec_feature_on_pool(
+        self,
+        **kwargs,
+    ) -> bool:
+        """
+        Enable Fast EC features on a given pool.
+
+        Steps:
+        1. Ensure require_osd_release is at least 'tentacle'.
+        2. Ensure min_compat_client is 'tentacle'.
+        3. Enable EC overwrites on the pool if required.
+        4. Enable Fast EC optimizations on the pool.
+
+        Args: to be passed as kwargs via suite file configs
+            set_osd_release (bool): Whether to update require_osd_release if not set.
+            set_min_client (bool): Whether to update min_compat_client if not set.
+            set_overwrites (bool): Whether to enable allow_ec_overwrites if not set.
+        Note: The above options kept for testing the -ve scenarios with Fast EC enablement,
+            passed to module as additional kwargs if needed.
+        Returns:
+            bool: True if Fast EC features successfully enabled, False otherwise.
+        """
+        pool_name = kwargs.get("pool_name")
+        set_osd_release = kwargs.get("set_osd_release", True)
+        # set_min_client = kwargs.get("set_min_client", True)
+        set_overwrites = kwargs.get("set_overwrites", True)
+
+        # 1. Check Ceph version (must be tentacle/>=9)
+        if int(self.rhbuild.split(".")[0]) < 9:
+            log.error("Ceph version < tentacle, cannot enable fast EC features")
+            return False
+
+        cluster_dump = self.run_ceph_command(cmd="ceph osd dump")
+        osd_release = cluster_dump.get("require_osd_release")
+        # client_release = cluster_dump.get("min_compat_client")
+
+        # 2. Ensure OSD release correct
+        if osd_release != "tentacle":
+            if set_osd_release:
+                self.run_ceph_command(cmd="ceph osd set-require-osd-release tentacle")
+                log.info("Set require_osd_release to tentacle")
+            else:
+                log.warning("OSD release is %s, not tentacle", osd_release)
+
+        # 3. Ensure min compat client correct
+        # Required only for direct reads. This feature is missing from 9.0.
+        # if client_release != "tentacle":
+        #     if set_min_client:
+        #         config_cmd = "ceph osd set-require-min-compat-client tentacle --yes-i-really-mean-it"
+        #         self.client.exec_command(cmd=config_cmd, sudo=True)
+        #         log.info("Set min_compat_client to tentacle")
+        #     else:
+        #         log.warning("min_compat_client is %s, not tentacle", client_release)
+
+        # 4. Ensure EC overwrites
+        ec_overwrites = self.get_pool_property(
+            pool=pool_name, props="allow_ec_overwrites"
+        )["allow_ec_overwrites"]
+        if not ec_overwrites and set_overwrites:
+            self.set_pool_property(
+                pool=pool_name, props="allow_ec_overwrites", value="true"
+            )
+            log.info("Enabled allow_ec_overwrites on pool %s", pool_name)
+        elif not ec_overwrites:
+            log.warning("EC overwrites not enabled on pool %s", pool_name)
+
+        # 5. Enable Fast EC optimization
+        self.set_pool_property(
+            pool=pool_name, props="allow_ec_optimizations", value="true"
+        )
+
+        # 6. Verify
+        fast_ec_enabled = self.get_pool_property(
+            pool=pool_name, props="allow_ec_optimizations"
+        )
+        if not fast_ec_enabled:
+            log.error("Failed to enable Fast EC features on pool %s", pool_name)
+            return False
+
+        log.info("Fast EC features enabled successfully on pool %s", pool_name)
+        return True
+
     def create_erasure_pool(self, **kwargs) -> bool:
         """
         Creates an erasure code profile and then creates a pool with the same
@@ -1462,19 +1576,28 @@ class RadosOrchestrator:
                 4. crush-failure-domain -> crush object to be us to store replica sets (str)
                 5. plugin -> plugin to be set (str)
                     supported plugins:
-                    1. jerasure (default)
+                    1. jerasure (default until Squid)
                     2. lrc -> Upstream Only
                     3. clay -> Upstream Only
-                6. pool_name -> pool name to create and associate with the EC profile being created
-                7. force -> Override an existing profile by the same name.
-                8. crush-osds-per-failure-domain -> number of OSDs per failure domain
-                9. crush-num-failure-domains -> Number of failure domains present on the cluster
-                10. create_rule -> Arg to specify if the CRUSH rule should be created or not
-                11. profile_name -> Name of the profile to be created
-                12. yes_i_mean_it -> Needed to be passed for profile modification along with --force from 8.0
-                13. name: Name of the profile/rule to create if none is provided
-                14. negative_test: pass true if performing -ve tests. min_compact_client won't be updated for pool
+                    4. isa ( default from Tentacle )
+                6. technique -> erasure code technique to be used with the plugin (str)
+                    supported techniques vary by plugin:
+                    jerasure: reed_sol_van, reed_sol_r6_op, cauchy_orig, cauchy_good, liberation, blaum_roth, liber8tion
+                    isa: reed_sol_van, cauchy
+                    clay: reed_sol_van, reed_sol_r6_op, cauchy_orig, cauchy_good, liber8tion
+                7. pool_name -> pool name to create and associate with the EC profile being created
+                8. force -> Override an existing profile by the same name.
+                9. crush-osds-per-failure-domain -> number of OSDs per failure domain
+                10. crush-num-failure-domains -> Number of failure domains present on the cluster
+                11. create_rule -> Arg to specify if the CRUSH rule should be created or not
+                12. profile_name -> Name of the profile to be created
+                13. yes_i_mean_it -> Needed to be passed for profile modification along with --force from 8.0
+                14. name: Name of the profile/rule to create if none is provided
+                15. negative_test -> pass true if performing -ve tests. min_compact_client won't be updated for pool
                 creation when this param is set to true. Required for MSR EC pool tests with min_compact_client
+                16. enable_fast_ec_features -> Pass true if the Fast EC features need to be enabled on the created pool
+                17. stripe_width -> Stripe width to be set on the pool (k * stripe_unit)
+                18. stripe_unit -> Chunk size per data shard (recommended: 16384 for Fast EC pools)
         Returns: True -> pass, False -> fail
         """
         failure_domain = kwargs.get("crush-failure-domain", "osd")
@@ -1487,8 +1610,11 @@ class RadosOrchestrator:
         )
         crush_num_failure_domains = kwargs.get("crush-num-failure-domains", None)
         create_rule = kwargs.get("create_rule", False)
-        plugin = kwargs.get("plugin", "jerasure")
-        pool_name = kwargs.get("pool_name", "name")
+        major_version = int(self.rhbuild.split(".")[0])
+        default_plugin = "jerasure" if major_version < 9 else "isa"
+        plugin = kwargs.get("plugin", default_plugin)
+        technique = kwargs.get("technique")
+        pool_name = kwargs.get("pool_name", "test-ec-pool")
         if not pool_name:
             log.error("No name provided. Exiting")
             return False
@@ -1496,21 +1622,31 @@ class RadosOrchestrator:
         create_ecpool = kwargs.get("create_ecpool", True)
         negative_test = kwargs.get("negative_test", False)
         yes_i_mean_it = kwargs.get("yes_i_mean_it", False)
+        stripe_width = kwargs.get("stripe_width", None)
+        stripe_unit = kwargs.get("stripe_unit", None)
         profile_name = kwargs.get("profile_name", f"ecp_{pool_name}")
         rule_name = f"rule_{pool_name}"
+        enable_fast_ec_features = kwargs.get("enable_fast_ec_features", False)
+        # enable allow_ec_overwrites by default
+        kwargs["erasure_code_use_overwrites"] = kwargs.get(
+            "erasure_code_use_overwrites", True
+        )
 
         # Creating an erasure coded profile with the options provided
         cmd = (
             f"ceph osd erasure-code-profile set {profile_name}"
             f" crush-failure-domain={failure_domain} k={k} m={m} plugin={plugin}"
         )
+        if technique:
+            cmd = cmd + f" technique={technique}"
         if crush_osds_per_failure_domain:
-            if self.rhbuild and self.rhbuild.split(".")[0] >= "8":
+            if major_version >= 8:
                 min_client_version = self.run_ceph_command(cmd="ceph osd dump")[
                     "require_min_compat_client"
                 ]
                 log.debug(
-                    f"require_min_compat_client before starting the tests is {min_client_version}"
+                    "require_min_compat_client before starting the tests is %s",
+                    min_client_version,
                 )
                 if not negative_test:
                     if min_client_version not in ["squid"]:
@@ -1524,9 +1660,9 @@ class RadosOrchestrator:
                             "Set the min_compact client on the cluster to Squid on the cluster"
                         )
                 cmd = (
-                    cmd
-                    + f" crush-osds-per-failure-domain={crush_osds_per_failure_domain} "
-                    f" crush-num-failure-domains={crush_num_failure_domains}"
+                    cmd + " crush-osds-per-failure-domain=%s "
+                    " crush-num-failure-domains=%s"
+                    % (crush_osds_per_failure_domain, crush_num_failure_domains)
                 )
             else:
                 log.info(
@@ -1540,25 +1676,29 @@ class RadosOrchestrator:
             cmd = cmd + f" d={d}"
         if force:
             cmd = cmd + " --force"
+        if stripe_width:
+            cmd = cmd + f" stripe_width={stripe_width}"
+        if stripe_unit:
+            cmd = cmd + f" stripe_unit={stripe_unit}"
         if yes_i_mean_it:
             cmd = cmd + " --yes-i-really-mean-it "
 
-        log.debug(f"Final command to create EC Profile : {cmd}")
+        log.debug("Final command to create EC Profile : %s", cmd)
         try:
             self.run_ceph_command(cmd=cmd)
             time.sleep(5)
             profiles = self.get_ec_profiles()
             if profile_name not in profiles:
                 raise Exception(
-                    f"Profile not found in list error.\n profile name :{profile_name} "
-                    f"\n profiles on cluster : {profiles}"
+                    "Profile not found in list error.\n profile name :%s "
+                    "\n profiles on cluster : %s" % (profile_name, profiles)
                 )
         except Exception as err:
-            log.error(f"Failed to create ec profile : {profile_name}")
+            log.error("Failed to create ec profile : %s", profile_name)
             log.error(err)
             return False
 
-        cmd = f"ceph osd erasure-code-profile get {profile_name}"
+        cmd = "ceph osd erasure-code-profile get %s" % profile_name
         log.info("Profile created : \n %s", self.run_ceph_command(cmd=cmd))
         log.debug("EC profile created. Proceeding to create pool")
 
@@ -1571,7 +1711,9 @@ class RadosOrchestrator:
             rule_list = self.get_crush_rule_names()
             if rule_name not in rule_list:
                 log.error(
-                    f"unable to create rule: {rule_name}. list obtained from cluster: {rule_list}"
+                    "unable to create rule: %s. list obtained from cluster: %s",
+                    rule_name,
+                    rule_list,
                 )
                 return False
             if create_ecpool:
@@ -1580,7 +1722,7 @@ class RadosOrchestrator:
                     crush_rule=rule_name,
                     **kwargs,
                 ):
-                    log.error(f"Failed to create Pool {pool_name}")
+                    log.error("Failed to create Pool %s", pool_name)
                     return False
         else:
             if create_ecpool:
@@ -1588,26 +1730,41 @@ class RadosOrchestrator:
                     ec_profile_name=profile_name,
                     **kwargs,
                 ):
-                    log.error(f"Failed to create Pool {pool_name}")
+                    log.error("Failed to create Pool %s", pool_name)
                     return False
+
+        # Checking if enable Fast EC features flag passed
+        if enable_fast_ec_features:
+            try:
+                if not self.enable_fast_ec_feature_on_pool(**kwargs):
+                    log.error("Could not enable fast EC features on the provided pool")
+                    return False
+                log.info("Enabled Fast EC feature on the EC pool created")
+            except Exception as err:
+                log.error(
+                    "Exception hit while enabling Fast EC features on the pool created: %s",
+                    err,
+                )
+                return False
+
         try:
             log.info(f"Created the ec profile : {profile_name} and pool : {pool_name}")
             cmd = f"ceph osd crush rule dump {pool_name}"
             log.debug(
-                f"Printing the crush rule used : \n{self.run_ceph_command(cmd=cmd)}\n"
+                "Printing the crush rule used : \n%s\n", self.run_ceph_command(cmd=cmd)
             )
         except Exception as err:
-            log.error(f"Exception hit while listing the EC Crush rule used: {err}")
+            log.error("Exception hit while listing the EC Crush rule used: %s", err)
         return True
 
-    def change_osd_state(self, action: str, target: int, timeout: int = 180) -> bool:
+    def change_osd_state(self, action: str, target: int, timeout: int = 300) -> bool:
         """
         Changes the state of the OSD daemons wrt the action provided
         Args:
             action: operation to be performed on the service, i.e.
             start, stop, restart, disable, enable
             target: ID osd the target OSD
-            timeout: timeout in seconds, (default = 60s)
+            timeout: timeout in seconds, (default = 300s)
         Returns: Pass -> True, Fail -> False
         """
         cluster_fsid = self.run_ceph_command(cmd="ceph fsid")["fsid"]
@@ -1622,9 +1779,10 @@ class RadosOrchestrator:
             daemon_type="osd", daemon_id=target
         )
 
-        if ((osd_status == 0 or status_desc == "stopped") and action == "stop") or (
-            (osd_status == 1 or status_desc == "running") and action == "start"
-        ):
+        if (
+            (osd_status == 0 or status_desc == "stopped" or status_desc == "error")
+            and action == "stop"
+        ) or ((osd_status == 1 or status_desc == "running") and action == "start"):
             log.info(f"OSD {target} already in desired state: {action}")
             return True
 
@@ -1673,25 +1831,71 @@ class RadosOrchestrator:
             log.error(log_error_msg)
             return False
 
+        # Wait for OSD to reach desired state with retry logic
+        retry_count = 0
+        retry_interval = 20  # seconds between retries
+        desired_state_reached = False
+
+        log.info(
+            f"Waiting for OSD.{target} to reach desired state for action: {action}"
+        )
+        log.info(
+            f"Will retry every {retry_interval} seconds with timeout of {timeout} seconds"
+        )
+
         while datetime.datetime.now() <= timeout_time:
+            retry_count += 1
             osd_status, status_desc = self.get_daemon_status(
                 daemon_type="osd", daemon_id=target
             )
-            log.info(f"osd_status: {osd_status}, status_desc: {status_desc}")
+            log.info(
+                f"Retry {retry_count} - "
+                f"OSD.{target} status: {osd_status}, description: {status_desc}"
+            )
+
+            # Check if OSD reached desired state based on action
             if (osd_status == 0 or status_desc == "stopped") and action == "stop":
+                log.info(f"OSD.{target} successfully reached stopped state")
+                desired_state_reached = True
                 break
             elif (osd_status == 1 or status_desc == "running") and (
                 action == "start" or action == "restart"
             ):
+                log.info(f"OSD.{target} successfully reached running state")
+                desired_state_reached = True
                 break
-            time.sleep(20)
 
-        if action == "stop" and osd_status != 0:
-            log.error(f"Failed to stop the OSD.{target} service on {host.hostname}")
-            pass_status = False
-        if (action == "start" or action == "restart") and osd_status != 1:
-            log.error(f"Failed to start the OSD.{target} service on {host.hostname}")
-            pass_status = False
+            # Check if we've exceeded timeout
+            if datetime.datetime.now() > timeout_time:
+                log.warning(
+                    f"Timeout exceeded while waiting for OSD.{target} to reach desired state"
+                )
+                break
+
+            log.debug(
+                f"OSD.{target} not in desired state yet, waiting {retry_interval} seconds before retry"
+            )
+            time.sleep(retry_interval)
+
+        # Verify final state and set pass_status
+        if not desired_state_reached:
+            if action == "stop" and osd_status != 0:
+                log.error(
+                    f"Failed to stop the OSD.{target} service on {host.hostname} "
+                    f"after {retry_count} retries over {timeout} seconds"
+                )
+                pass_status = False
+            if (action == "start" or action == "restart") and osd_status != 1:
+                log.error(
+                    f"Failed to start the OSD.{target} service on {host.hostname} "
+                    f"after {retry_count} retries over {timeout} seconds"
+                )
+                pass_status = False
+        else:
+            log.info(
+                f"OSD.{target} reached desired state after {retry_count} retry attempts "
+                f"in {(datetime.datetime.now() - start_time).total_seconds():.2f} seconds"
+            )
         if not pass_status:
             log.error(
                 f"Collecting the journalctl logs for OSD.{target} service on {host.hostname} for the failure"
@@ -2417,6 +2621,7 @@ class RadosOrchestrator:
             log.info(
                 f"The MAX_AVAIL on the pool {pool} is as expected: {pool_max_avail}"
             )
+            _ = self.run_ceph_command(cmd="ceph df detail", print_output=True)
         return check_pass
 
     def get_osd_stat(self):
@@ -2494,12 +2699,15 @@ class RadosOrchestrator:
 
         return pgid_list
 
-    def run_pool_sanity_check(self):
+    def run_pool_sanity_check(self, ignore_list=[]):
         """
         Runs sanity on the pools after triggering scrub and deep-scrub on pools, waiting 600 Secs
 
         This method is used to assess the health of Pools after any operation, where in a scrub and deep scrub is
         triggered, and the method scans the cluster for few health warnings, if generated
+
+        Args:
+            ignore_list : List of warnings that are to be ignored
 
         Returns: True-> Pass,  false -> Fail
         """
@@ -2512,7 +2720,7 @@ class RadosOrchestrator:
         while end_time > datetime.datetime.now():
             status_report = self.run_ceph_command(cmd="ceph report", client_exec=True)
             ceph_health_status = status_report["health"]
-            health_warns = (
+            health_warns = [
                 "PG_AVAILABILITY",
                 "PG_DEGRADED",
                 "PG_RECOVERY_FULL",
@@ -2524,8 +2732,8 @@ class RadosOrchestrator:
                 "OBJECT_MISPLACED",
                 "OBJECT_UNFOUND",
                 "RECENT_CRASH",
-            )
-
+            ]
+            health_warns = list(set(health_warns) - set(ignore_list))
             flag = (
                 False
                 if any(
@@ -2798,31 +3006,76 @@ EOF"""
             log.error(err)
             return False
 
-    def check_inactive_pgs_on_pool(self, pool_name: str = None) -> bool:
+    def check_inactive_pgs_on_pool(
+        self, pool_name: str = None, max_workers: int = 10
+    ) -> bool:
         """
         Method to check if the provided pool has any PGs in inactive state.
-        If no pool name is provided, then checks on the entire cluster
+        If no pool name is provided, then checks on the entire cluster.
+
+        Uses parallel execution to speed up PG state checks when pool_name is provided.
 
         Args:
             pool_name: Name of the pool, on which inactive PGs should be checked
+            max_workers: Number of parallel threads for PG state checks (default: 10)
 
-        Returns: True-> Pass,  false -> Fail
+        Returns: True-> Pass (no inactive PGs),  False -> Fail (inactive PGs found)
         """
         if pool_name:
             log.debug("Checking for inactive PGs on pool : %s", pool_name)
             pool_pgids = self.get_pgid(pool_name=pool_name)
-            for pgid in pool_pgids:
-                # Checking the PG state. There Should not be inactive state
+
+            if not pool_pgids:
+                log.warning("No PGs found for pool: %s", pool_name)
+                return True
+
+            log.debug(
+                "Checking %d PGs in parallel with %d workers",
+                len(pool_pgids),
+                max_workers,
+            )
+
+            def check_single_pg(pgid):
+                """Check if a single PG is in inactive/unknown state."""
                 pg_state = self.get_pg_state(pg_id=pgid)
                 if pg_state:
                     if any("unknown" in key for key in pg_state.split("+")):
-                        log.error("PG: %s in inactive state)", pgid)
-                        return False
+                        return pgid, True, pg_state  # pgid, is_inactive, state
+                    return pgid, False, pg_state
                 else:
                     log.error("PG : %s not present on cluster", pgid)
-                    continue
+                    return pgid, None, None  # PG not found
+
+            inactive_pgs = []
+            with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_pgid = {
+                    executor.submit(check_single_pg, pgid): pgid for pgid in pool_pgids
+                }
+
+                for future in cf.as_completed(future_to_pgid):
+                    pgid = future_to_pgid[future]
+                    try:
+                        result_pgid, is_inactive, pg_state = future.result()
+                        if is_inactive:
+                            log.error(
+                                "PG: %s in inactive state (%s)", result_pgid, pg_state
+                            )
+                            inactive_pgs.append(result_pgid)
+                    except Exception as exc:
+                        log.error("PG %s check generated exception: %s", pgid, exc)
+
+            if inactive_pgs:
+                log.error(
+                    "Found %d inactive PGs on pool %s: %s",
+                    len(inactive_pgs),
+                    pool_name,
+                    inactive_pgs[:10],  # Log first 10 to avoid huge logs
+                )
+                return False
+
             log.info(
-                "Completed checking for inactive PGs on Pool : %s. No inactive PGs found",
+                "Completed checking %d PGs on Pool %s. No inactive PGs found",
+                len(pool_pgids),
                 pool_name,
             )
             return True
@@ -2836,8 +3089,8 @@ EOF"""
                     if any("unknown" in key for key in entry["state"].split("+")):
                         log.error("PG in unknown state found: %s", entry["state"])
                         return False
-                    log.info(" PG States: %s ", status_report["num_pg_by_state"])
-                    return True
+                log.info(" PG States: %s ", status_report["num_pg_by_state"])
+                return True
             except Exception as e:
                 log.error("Error occurred while fetching status report: %s", e)
                 return False
@@ -2885,27 +3138,43 @@ EOF"""
         log.info(f"The OSD {osd_list} heap profile is in {action} state")
         return 0, osd_list
 
-    def get_heap_dump(self, osd_list):
+    def get_heap_dump(self, osd_list, max_workers: int = 10) -> dict:
         """
-        Returns the heap dump of the all OSDs in the osd_list
+        Returns the heap dump of the all OSDs in the osd_list.
+        Uses parallel execution for faster collection from multiple OSDs.
+
         Usage: ceph tell osd.<osd.ID> heap dump
         Example:
              get_heap_dump(osd_list)
              where osd_list is the list of OSD ids like[1,2,4]
         Args:
             osd_list: The list with the osd IDs
+            max_workers: Number of parallel threads (default: 10)
         Return :
             A dictionary output with the key as OSD id and values are the
-            heap dump of the OSD.
+            heap dump of the OSD. Returns empty dict if osd_list is empty.
         """
         if not osd_list:
-            log.error("OSD list is empty")
-            return 1
-        heap_dump = {}
-        for osd_id in osd_list:
+            log.warning("OSD list is empty, returning empty heap dump")
+            return {}
+
+        def get_single_heap_dump(osd_id):
             cmd = f"ceph tell osd.{osd_id} heap dump"
             out, err = self.node.shell([cmd])
-            heap_dump[osd_id] = out.strip()
+            return osd_id, out.strip()
+
+        heap_dump = {}
+        with cf.ThreadPoolExecutor(
+            max_workers=min(max_workers, len(osd_list))
+        ) as executor:
+            futures = {
+                executor.submit(get_single_heap_dump, osd_id): osd_id
+                for osd_id in osd_list
+            }
+            for future in cf.as_completed(futures):
+                osd_id, dump = future.result()
+                heap_dump[osd_id] = dump
+
         return heap_dump
 
     def list_orch_services(self, service_type=None, export=None) -> list:
@@ -3127,7 +3396,7 @@ EOF"""
         log.error(f"Pool ID {pool_id} not found in 'ceph pg dump pools' output")
         raise KeyError(f"Pool ID {pool_id} not found in 'ceph pg dump pools' output")
 
-    def restart_daemon_services(self, daemon: str, timeout: int = 300):
+    def restart_daemon_services(self, daemon: str, timeout: int = 600):
         """Module to restart all Orchestrator services belonging to the input
         daemon.
         Args:
@@ -3140,21 +3409,25 @@ EOF"""
             within timeout
         """
         daemon_map = dict()
-        success = False
         daemon_services = self.list_orch_services(service_type=daemon)
         # capture current start time for each daemon part of the services
         for service in daemon_services:
             daemon_status_ls = self.run_ceph_command(
                 cmd=f"ceph orch ps --service_name {service} --refresh"
             )
-            # TODO: current system time to be used when
-            # daemon is stopped/unknown since 'started' key will
-            # not exist in ceph orch ps --service_name {service} output
             for entry in daemon_status_ls:
-                start_time, _ = self.client.exec_command(
-                    cmd=f"date -d {entry.get('started')} +'%Y%m%d%H%M%S'"
-                )
-                daemon_map[entry["daemon_name"]] = start_time
+                daemon_name = entry.get("daemon_name")
+                if not daemon_name:
+                    continue
+                started = entry.get("started")
+                if started:
+                    start_time, _ = self.client.exec_command(
+                        cmd=f"date -d {started} +'%Y%m%d%H%M%S'"
+                    )
+                else:
+                    # Daemon is stopped/unknown - use current time as baseline
+                    start_time, _ = self.client.exec_command(cmd="date +'%Y%m%d%H%M%S'")
+                daemon_map[daemon_name] = start_time.strip()
 
         # restart each service for the input daemon
         for service in daemon_services:
@@ -3167,29 +3440,36 @@ EOF"""
                 daemon_status_ls = self.run_ceph_command(
                     cmd=f"ceph orch ps --service_name {service} --refresh"
                 )
+                success_count = 0
                 for entry in daemon_status_ls:
+                    daemon_name = entry.get("daemon_name")
+                    if not daemon_name:
+                        continue
                     try:
+                        started = entry.get("started")
+                        if not started:
+                            raise ValueError("Daemon not started yet")
                         restart_time, _ = self.client.exec_command(
-                            cmd=f"date -d {entry['started']} +'%Y%m%d%H%M%S'"
+                            cmd=f"date -d {started} +'%Y%m%d%H%M%S'"
                         )
-                        assert restart_time > daemon_map[entry["daemon_name"]]
-                        assert entry["status_desc"] != "stopped"
-                        log.info(f"{entry['daemon_name']} has started")
-                        success = True
+                        assert restart_time.strip() > daemon_map[daemon_name]
+                        assert entry.get("status_desc") != "stopped"
+                        log.info(f"{daemon_name} has started")
+                        success_count += 1
                     except Exception:
-                        log.info(
-                            f"{daemon} daemon {entry['daemon_name']} is yet to restart. "
-                            f"Sleeping for 120 secs"
-                        )
-                        self.client.exec_command(
-                            cmd=f"ceph orch daemon restart {entry['daemon_name']}",
-                            sudo=True,
-                        )
-                        time.sleep(120)
-                        success = False
-                        break
-                if success:
+                        log.info(f"{daemon} daemon {daemon_name} is yet to restart.")
+                        # Retry individual daemon restart if service restart didn't work
+                        try:
+                            self.client.exec_command(
+                                cmd=f"ceph orch daemon restart {daemon_name}",
+                                sudo=True,
+                            )
+                        except CommandFailed as e:
+                            log.warning(e)
+                if success_count == len(daemon_status_ls):
                     break
+                log.info("Sleeping for 30 secs")
+                time.sleep(30)
             else:
                 log.error(
                     f"All the daemons part of the service {service} did not restart within "
@@ -3252,53 +3532,88 @@ EOF"""
                 obj_list.append(omap_obj["name"])
         return obj_list
 
-    def get_object_key_list(self, osd_id, pg_id, object_name):
+    def get_object_stat(self, pool_name: str, obj_name: str) -> dict:
         """
-        Method returns the key list of an object
+        Get object statistics using rados stat command.
+
+        Executes 'rados -p <pool> stat <object>' and parses the output to extract
+        object name, size, and modification time.
+
+        Output format examples:
+        - "ec_pool/test_obj mtime 2024-01-15T10:30:45.123456+0000, size 8192"
+
         Args:
-            osd: osd id number
-            pg_id: pg id number
-            object_name: object name
+            pool_name: Name of the pool containing the object
+            obj_name: Name of the object to stat
 
-        Returns: List of keys mapped to that object
+        Returns:
+            Dictionary containing:
+            - name (str): Object name
+            - size (int): Object size in bytes
+            - pool (str): Pool name
+            - mtime (str): Modification time string (if available)
+            - raw_output (str): Raw stat output for debugging
 
+            Returns None if stat command fails or object doesn't exist.
+
+        Examples::
+            stat = rados_obj.get_object_stat(pool_name="mypool", obj_name="myobj")
+            if stat:
+                print(f"Object size: {stat['size']} bytes")
         """
-        cmd_base = f"cephadm shell --name osd.{osd_id} --"
-        acting_osd_node = self.fetch_host_node(daemon_type="osd", daemon_id=osd_id)
-        cmd_get_obj_key = (
-            f"{cmd_base} ceph-objectstore-tool --data-path /var/lib/ceph/osd/ceph-"
-            f"{osd_id} --pgid {pg_id} {object_name}  list-omap"
-        )
-        out_put = acting_osd_node.exec_command(sudo=True, cmd=cmd_get_obj_key)
-        key_list = list(filter(None, out_put[0].split("\n")))
-        return key_list
-
-    def rm_object_key(self, osd_id, pg_id, object_name, object_key):
-        """
-        Method removes the object key
-        Args:
-            osd_id: osd id number
-            pg_id: pg id number
-            object_name: object name
-            object_key: object key to remove that mapped to the object
-
-        Returns: True -> Key deleted False -> Key not deleted
-        """
-        cmd_base = f"cephadm shell --name osd.{osd_id} --"
-        acting_osd_node = self.fetch_host_node(daemon_type="osd", daemon_id=osd_id)
-        cmd_rm_obj_key = (
-            f"{cmd_base} ceph-objectstore-tool --data-path /var/lib/ceph/osd/ceph-"
-            f"{osd_id} --pgid {pg_id} {object_name}  rm-omap {object_key}"
-        )
         try:
-            acting_osd_node.exec_command(sudo=True, cmd=cmd_rm_obj_key)
-        except Exception:
-            log.error(
-                f"{object_key} object key is not removed for the {object_name} object"
+            cmd = f"rados -p {pool_name} stat {obj_name}"
+            stat_output, _ = self.client.exec_command(cmd=cmd, sudo=True)
+            stat_output = stat_output.strip()
+
+            if not stat_output:
+                log.warning(
+                    f"Empty stat output for object {obj_name} in pool {pool_name}"
+                )
+                return None
+
+            result = {
+                "name": obj_name,
+                "pool": pool_name,
+                "size": None,
+                "mtime": None,
+                "raw_output": stat_output,
+            }
+
+            # Parse size using regex
+            # Matches: "size 8192" or "size 0" at end of string or before whitespace
+            size_match = re.search(r"size\s+(\d+)", stat_output)
+            if size_match:
+                result["size"] = int(size_match.group(1))
+            else:
+                log.warning(f"Could not parse size from stat output: {stat_output}")
+
+            # Parse mtime using regex
+            # Matches: "mtime 2024-01-15T10:30:45.123456+0000" or similar timestamp formats
+            mtime_match = re.search(
+                r"mtime\s+(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}[.\d+\-\w]*)",
+                stat_output,
             )
-            return False
-        log.info(f"{object_key} object key is removed for the {object_name} object")
-        return True
+            if mtime_match:
+                result["mtime"] = mtime_match.group(1)
+
+            # Parse object name from output (format: "pool/obj_name mtime...")
+            # This handles cases where object name might differ from input
+            name_match = re.search(rf"^{re.escape(pool_name)}/([^\s]+)", stat_output)
+            if name_match:
+                result["name"] = name_match.group(1)
+
+            log.debug(
+                f"Object stat: pool={result['pool']}, name={result['name']}, "
+                f"size={result['size']}, mtime={result['mtime']}"
+            )
+            return result
+
+        except Exception as e:
+            log.error(
+                f"Failed to get stat for object {obj_name} in pool {pool_name}: {e}"
+            )
+            return None
 
     def get_inconsistent_pg_list(self, pool_name):
         """
@@ -3362,92 +3677,142 @@ EOF"""
             log.error("Failed to clean pg inconsistent in the cluster")
             return False
 
-    def create_inconsistent_object(self, pool_name, object_name, num_keys: int = 3):
+    def create_inconsistent_object(self, objectstore_obj, pool_name, no_of_objects):
         """
-        The method converts the object into inconsistent object
+        Method creates the inconsistent object list.
         The logic implemented in the code is-
-        1. Get the primary osd and pg_id
-        2. Stopping the OSD
-        3. Get the key list of the object
-        4. Remove few keys that is mapped to the object
-        5. Start the OSD and perform deep-scrub on that pg id
-        6. Check the status
-        Args:
-            pool_name: pool name
-            object_name: object name in the pool
-            num_keys: number of keys to be deleted for inconsistent object to be generated
-        Returns: After converting the object in to inconsistent,method returns the pg id
-        """
-        osd_map_output = self.get_osd_map(pool=pool_name, obj=object_name)
-        primary_osd = osd_map_output["acting_primary"]
-        log.info(f"The object stored in the primary osd number-{primary_osd}")
-        pg_id = osd_map_output["pgid"]
-        log.info(f"The object {object_name} is created in the pg-{pg_id}")
+        1. Create an object and set the object key and value.
+        2. Get the primary osd and pg_id
+        3. Stop the OSD
+        4. Remove keys that is mapped to the object
+        5. Start the OSD and perform deep-scrub.
+        6. Check the inconsistent object count
 
-        # stopping the OSD
-        if not self.change_osd_state(action="stop", target=primary_osd):
-            log.error(f"Unable to stop the OSD : {primary_osd}")
-            raise Exception("Execution error")
-        log.debug(f"Stopped OSD : {primary_osd} to create inconsistent object")
-        time.sleep(5)
-        # Getting the key list
-        key_list = self.get_object_key_list(primary_osd, pg_id, object_name)
-        log.debug(f"Key list before deletion : {key_list}")
-        rm_key_count = 0
-        deleted_keys = []
-        for obj_key in key_list:
-            log.info(f" Deleting the key :{obj_key} in the {object_name} object")
-            self.rm_object_key(primary_osd, pg_id, object_name, obj_key)
+        Args:
+            objectstore_obj - Object store object
+            pool_name - Pool name
+            no_of_objects - Number of objects
+        Return: The object name is used as the key, and the corresponding pg_id is stored as the value,
+                indicating which object has become inconsistent.
+                None -> if any error
+        """
+        object_list = []
+        osd_object_map = {}
+        object_pgid_map = {}
+        org_file_create = "echo 'The actual message' > /tmp/original"
+        self.client.exec_command(cmd=org_file_create, sudo=True)
+        try:
+            for count in range(no_of_objects):
+                obj_name = f"OBJ_{count}"
+                object_list.append(obj_name)
+                # Creating object
+                msg_object = f"Creating the {obj_name} object in the pool {pool_name}"
+                log.info(msg_object)
+                cmd_put_obj = f"rados --pool {pool_name} put {obj_name} /tmp/original"
+                self.client.exec_command(cmd=cmd_put_obj, sudo=True)
+                msg_omap_val = f"Setting the key-{obj_name} key and  val-{obj_name} value to the  {obj_name} object"
+                log.info(msg_omap_val)
+                cmd_set_omapval = f"rados --pool {pool_name} setomapval {obj_name} key-{obj_name} val-{obj_name}"
+                self.client.exec_command(cmd=cmd_set_omapval, sudo=True)
             time.sleep(5)
-            new_key_list = self.get_object_key_list(primary_osd, pg_id, object_name)
-            if obj_key in new_key_list:
-                log.error(
-                    f"The key:{obj_key} from object:{object_name} could not be deleted. Fail"
-                )
-                raise Exception("Object key not deleted error")
-            rm_key_count += 1
-            deleted_keys.append(obj_key)
-            log.debug(
-                f"Successfully Deleted the {obj_key} from object: {object_name}"
-                f"Total keys deleted on the object : {rm_key_count}"
-                f"Keys removed : {deleted_keys}"
+            for object_name in object_list:
+                osd_map_details = self.get_osd_map(pool=pool_name, obj=object_name)
+                primary_osd = osd_map_details["acting_primary"]
+                pg_id = osd_map_details["pgid"]
+                osd_object_map.setdefault(primary_osd, []).append(object_name)
+                object_pgid_map[object_name] = pg_id
+            msg_osd_object = f"The object and osd mappings are- {osd_object_map}"
+            log.info(msg_osd_object)
+            msg_object_pgid = f"The object and pgid mappings are -{object_pgid_map}"
+            log.info(msg_object_pgid)
+
+            for osd_id, objects_list in osd_object_map.items():
+                for obj_name in objects_list:
+
+                    obj_str = objectstore_obj.list_objects(
+                        osd_id=osd_id, obj_name=obj_name
+                    )
+
+                    obj_pg_id = ast.literal_eval(obj_str)[0]
+                    json_data = json.dumps(ast.literal_eval(obj_str)[1])
+
+                    objectstore_obj.remove_omap(
+                        osd_id=osd_id,
+                        pgid=obj_pg_id,
+                        obj=json_data,
+                        key=f"key-{obj_name}",
+                    )
+                    msg_obj_remove_omap = f"The {obj_name} object omap is removed"
+                    log.info(msg_obj_remove_omap)
+
+                if not self.change_osd_state(action="start", target=int(osd_id)):
+                    msg_osd_start = f"Could not start OSD.{osd_id}"
+                    log.error(msg_osd_start)
+                    raise Exception("OSD not started")
+            log.info("Wait for PGs of pool %s to become active+clean" % pool_name)
+            self.wait_for_clean_pg_sets(
+                timeout=120, sleep_interval=15, test_pool=pool_name
             )
-            if rm_key_count == num_keys:
-                break
-        log.debug(
-            f"Done with deleting KW pairs on the OSD : {primary_osd} for Obj : object_name"
-        )
-        key_list = self.get_object_key_list(primary_osd, pg_id, object_name)
-        log.debug(f"Key list After deletion : {key_list}")
-        if not self.change_osd_state(action="start", target=primary_osd):
-            log.error(f"Unable to start the OSD : {primary_osd}")
-            raise Exception("OSD could not be started error")
-        log.debug(
-            f"Started the OSD: {primary_osd} and performing deep scrubs on the PG"
-        )
-        log.info(f"Performing the deep-scrub on the pg-{pg_id}")
-        if not self.start_check_deep_scrub_complete(pg_id=pg_id):
-            log.debug(f"deep-scrubbing could not be completed on PG : {pg_id}")
-            raise Exception("PG not deep-scrubbed error")
-        log.debug(f"Completed deep-scrubbing the pg : {pg_id}")
-        # sleeping for 10 seconds
-        time.sleep(10)
-        assert self.check_inconsistent_health(inconsistent_present=True)
-        log.info(f"The inconsistent object is created in the pg: {pg_id}")
-        return pg_id
+            log.info("Starting user initiated deep-scrub")
+            self.run_deep_scrub(pool=pool_name)
+            log.info("The user initiated deep scrub has been triggered")
+            assert self.check_inconsistent_health(inconsistent_present=True)
+
+            inconsistent_obj_count = 0
+            unique_pg_ids = set(object_pgid_map.values())
+            for pg_id in unique_pg_ids:
+                inconsistent_details = self.get_inconsistent_object_details(pg_id)
+                obj_count = len(inconsistent_details["inconsistents"])
+                msg_count = f"The inconsistent count in the {pg_id} is - {obj_count}"
+                log.info(msg_count)
+                inconsistent_obj_count += obj_count
+            msg_total_count = (
+                f"The total inconsistent object count is - {inconsistent_obj_count}"
+            )
+            log.info(msg_total_count)
+
+            if inconsistent_obj_count != no_of_objects:
+                msg_error = (
+                    f"The requested number of inconsistent objects are not created. The requested is  "
+                    f"is - {no_of_objects} and generated count is {inconsistent_obj_count} "
+                )
+                log.error(msg_error)
+                return None
+            return object_pgid_map
+        except Exception as error:
+            log.error(f"Hit Exception while creating inconsistent object : {error}.")
+            return None
 
     def start_check_scrub_complete(
-        self, pg_id, user_initiated: bool = True, wait_time: int = 900
+        self, pg_id, pg_dump=None, user_initiated: bool = True, wait_time: int = 900
     ):
         """
+
         Initiates scrubbing on the PG provided and waits until the scrubbing is complete.
+        Args:
+            pg_id: pg id
+            pg_dump: pg dump if none gets the input online
+            user_initiated : if True starts user initiated scrub
+            wait_time : The wait time for the scrub by default 900 seconds
+        Returns: True -> Successful execution of scrub
+                 False -> Failure of scrub
 
         """
+        if pg_dump is None:
+            init_pool_pg_dump = self.get_ceph_pg_dump(pg_id=pg_id)
+        else:
+            init_pool_pg_dump = pg_dump
 
-        init_pool_pg_dump = self.get_ceph_pg_dump(pg_id=pg_id)
         log.info("Dumping scrub stats before starting scrub")
-        log.info(f"last_scrub : {init_pool_pg_dump['last_scrub']}")
-        log.info(f"last_scrub_stamp: {init_pool_pg_dump['last_scrub_stamp']}")
+        log.info("=" * 70)
+        log.info("state : %s" % init_pool_pg_dump["state"])
+        log.info("last_scrub : %s " % init_pool_pg_dump["last_scrub"])
+        log.info("last_scrub_stamp: %s " % init_pool_pg_dump["last_scrub_stamp"])
+        log.info("last_scrub_duration: %s" % init_pool_pg_dump["last_scrub_duration"])
+        log.info("objects_scrubbed : %s" % init_pool_pg_dump["objects_scrubbed"])
+        log.info("scrub_schedule : %s" % init_pool_pg_dump["scrub_schedule"])
+        log.info("scrub_duration : %s" % init_pool_pg_dump["scrub_duration"])
+        log.info("=" * 70)
 
         # Parse the timestamp string into a datetime object
         init_scrub_stamp = datetime.datetime.strptime(
@@ -3466,6 +3831,15 @@ EOF"""
             seconds=wait_time
         ):
             pool_pg_dump = self.get_ceph_pg_dump(pg_id=pg_id)
+            log.debug("=" * 70)
+            log.debug("state : %s" % pool_pg_dump["state"])
+            log.debug("last_scrub : %s " % pool_pg_dump["last_scrub"])
+            log.debug("last_scrub_stamp: %s " % pool_pg_dump["last_scrub_stamp"])
+            log.debug("last_scrub_duration: %s" % pool_pg_dump["last_scrub_duration"])
+            log.debug("objects_scrubbed : %s" % pool_pg_dump["objects_scrubbed"])
+            log.debug("scrub_schedule : %s" % pool_pg_dump["scrub_schedule"])
+            log.debug("scrub_duration : %s" % pool_pg_dump["scrub_duration"])
+            log.debug("=" * 70)
             current_scrub_stamp = datetime.datetime.strptime(
                 pool_pg_dump["last_scrub_stamp"], "%Y-%m-%dT%H:%M:%S.%f%z"
             )
@@ -3496,17 +3870,36 @@ EOF"""
             raise Exception("Objects not scrubbed error")
 
     def start_check_deep_scrub_complete(
-        self, pg_id, user_initiated: bool = True, wait_time: int = 900
+        self, pg_id, pg_dump=None, user_initiated: bool = True, wait_time: int = 900
     ):
         """
-        Initiates deep-scrubbing on the PG provided and waits until the deep-scrubbing is complete.
+         Initiates scrubbing on the PG provided and waits until the scrubbing is complete.
+        Args:
+            pg_id: pg id
+            pg_dump: pg dump if none gets the input online
+            user_initiated : if True starts user initiated scrub
+            wait_time : The wait time for the scrub by default 900 seconds
+        Returns: True -> Successful execution of scrub
+                 False -> Failure of scrub
 
         """
+        if pg_dump is None:
+            init_pool_pg_dump = self.get_ceph_pg_dump(pg_id=pg_id)
+        else:
+            init_pool_pg_dump = pg_dump
 
-        init_pool_pg_dump = self.get_ceph_pg_dump(pg_id=pg_id)
         log.info("Dumping deep-scrub stats before starting deep-scrub")
-        log.info(f"last_deep_scrub : {init_pool_pg_dump['last_deep_scrub']}")
-        log.info(f"last_deep_scrub_stamp: {init_pool_pg_dump['last_deep_scrub_stamp']}")
+        log.info("=" * 70)
+        log.info("state : %s" % init_pool_pg_dump["state"])
+        log.info("last_deep_scrub : %s " % init_pool_pg_dump["last_deep_scrub"])
+        log.info(
+            "last_deep_scrub_stamp: %s " % init_pool_pg_dump["last_deep_scrub_stamp"]
+        )
+        log.info("last_scrub_duration: %s" % init_pool_pg_dump["last_scrub_duration"])
+        log.info("objects_scrubbed : %s" % init_pool_pg_dump["objects_scrubbed"])
+        log.info("scrub_schedule : %s" % init_pool_pg_dump["scrub_schedule"])
+        log.info("scrub_duration : %s" % init_pool_pg_dump["scrub_duration"])
+        log.info("=" * 70)
 
         # Parse the timestamp string into a datetime object
         init_scrub_stamp = datetime.datetime.strptime(
@@ -3526,12 +3919,24 @@ EOF"""
             seconds=wait_time
         ):
             pool_pg_dump = self.get_ceph_pg_dump(pg_id=pg_id)
+            log.debug("=" * 70)
+            log.debug("state : %s" % pool_pg_dump["state"])
+            log.debug("last_deep_scrub : %s " % pool_pg_dump["last_deep_scrub"])
+            log.debug(
+                "last_deep_scrub_stamp: %s " % pool_pg_dump["last_deep_scrub_stamp"]
+            )
+            log.debug("last_scrub_duration: %s" % pool_pg_dump["last_scrub_duration"])
+            log.debug("objects_scrubbed : %s" % pool_pg_dump["objects_scrubbed"])
+            log.debug("scrub_schedule : %s" % pool_pg_dump["scrub_schedule"])
+            log.debug("scrub_duration : %s" % pool_pg_dump["scrub_duration"])
+            log.debug("=" * 70)
             # Parse the timestamp string into a datetime object
             current_scrub_stamp = datetime.datetime.strptime(
                 pool_pg_dump["last_deep_scrub_stamp"], "%Y-%m-%dT%H:%M:%S.%f%z"
             )
             if current_scrub_stamp > init_scrub_stamp:
                 log.info(f"Scrubbing complete on the PG: {pg_id}")
+
                 log.debug(f"Final last_deep_scrub: {pool_pg_dump['last_deep_scrub']}")
                 log.debug(
                     f"Final last_deep_scrub_stamp: {pool_pg_dump['last_deep_scrub_stamp']}"
@@ -4313,7 +4718,7 @@ EOF"""
 
         if mnt_name in out:
             log.info("Verification successful. Device is listed in mount points.")
-            return f"{mnt_path}{mnt_name}"
+            return mnt_path, mnt_name
         else:
             log.error("Verification failed. Device is not listed in mount points.")
             return None
@@ -4477,7 +4882,21 @@ EOF"""
                 cmd=f"{base_cmd} {daemon_type}.{daemon_id}", client_exec=True
             )
 
-        out = self.run_ceph_command(cmd=f"{base_cmd} {daemon_id}", client_exec=True)
+        for _ in range(3):
+            try:
+                out = self.run_ceph_command(
+                    cmd=f"{base_cmd} {daemon_id}", client_exec=True
+                )
+                break
+            except Exception as e:
+                debug_msg = f"Passed daemon type : {daemon_type}, Daemon ID : {daemon_id}, Error : {e}"
+                log.debug(debug_msg)
+                log.warning("ceph metadata command failed. retrying after 30 seconds.")
+                time.sleep(30)
+        else:
+            log.debug("Metadata command execution failed for 3 consecutive tries")
+            return None
+
         if out is None:
             log.error(
                 f"Metadata info for the input daemon: {daemon_type} {daemon_id} not found"
@@ -4854,14 +5273,28 @@ EOF"""
         )["summary"]["total_kb"]
         return total_size_osd
 
-    def check_crash_status(self):
+    def check_crash_status(self, check_logs=True, start_time=None, end_time=None):
         """
-        Module to check crashes on the cluster
+        Module to check crashes on the cluster using multiple methods:
+        1. Standard crash detection via 'ceph crash ls' command
+        2. Optional daemon log scanning for crash patterns
+        Note: Format: 'YYYY-MM-DDTHH:MM:SS.mmm+0000'
+            Use osd_utils.get_cluster_timestamp(node) to get correct format
+
+        Args:
+            check_logs: If True, also scan daemon logs for crash patterns
+                       (requires both start_time and end_time to be provided)
+            start_time: Start time for log analysis
+            end_time: End time for log analysis
+
         Returns:
-            True -> crash detected
+            True -> crash detected (in either crash ls or log scan)
             False -> No crashes observed
         """
-        # logging any existing crashes on the cluster
+        crash_detected = False
+
+        # Method 1: Check crashes via 'ceph crash ls' command
+        log.info("Checking for crashes using 'ceph crash ls' command")
         crash_list = self.do_crash_ls()
         if crash_list:
             log.error("!!!ERROR: Crash exists in the cluster \n\n:" f"{crash_list}")
@@ -4876,8 +5309,23 @@ EOF"""
             log.info("Archiving all the existing crashes on the cluster")
             out, _ = self.node.shell(["ceph crash archive-all"])
             log.info(out)
-            return True
-        return False
+            crash_detected = True
+        else:
+            log.info("No crashes found via 'ceph crash ls'")
+
+        # Method 2: Scan daemon logs for crash patterns (if requested and timestamps provided)
+        if check_logs and start_time and end_time:
+            try:
+                crash_report = self.scan_daemon_logs_for_crashes(
+                    start_time=start_time, end_time=end_time
+                )
+                if crash_report.get("crashes_found", False):
+                    crash_detected = True
+            except Exception as e:
+                log.error(
+                    f"Error occurred while scanning daemon logs for crashes: {e}",
+                )
+        return crash_detected
 
     def list_obj_snaps(self, pool_name: str, obj_name: str):
         """
@@ -5254,9 +5702,17 @@ EOF"""
         for service in ceph_orch_ls:
             current_service_type = service["service_type"]
             current_service_size = service["status"]["size"]
+            current_service_running = service["status"]["running"]
+            current_service_count = int(current_service_size) + int(
+                current_service_running
+            )
             current_service_name = service["service_name"]
-            if (service_type is None and current_service_size == 0) or (
-                current_service_type == service_type and current_service_size == 0
+            log_debug_msg = (
+                f"\nservice name -> {current_service_name}" f"\nservice -> {service}"
+            )
+            log.debug(log_debug_msg)
+            if (service_type is None and current_service_count == 0) or (
+                current_service_type == service_type and current_service_count == 0
             ):
                 if self.remove_orch_service(service_name=current_service_name):
                     removed_services.append(current_service_name)
@@ -5304,28 +5760,33 @@ EOF"""
         cmd = f"ceph orch rm {service_name}"
         if force:
             cmd += " --force"
-        out, _ = self.client.exec_command(cmd=cmd)
 
-        if "Removed service" not in out:
-            log_err_msg = (
-                f"ceph orch rm {service_name} command execution did"
-                f" not yield expected message. \n"
-                f"Expected message: Removed service {service_name}\n"
-                f"Current message: {out}"
-            )
-            log.error(log_err_msg)
-        time.sleep(5)
-        if service_name in self.run_ceph_command("ceph orch ls", client_exec=True):
+        end_time = datetime.datetime.now() + datetime.timedelta(seconds=180)
+        while end_time > datetime.datetime.now():
+            out, _ = self.client.exec_command(cmd=cmd)
+
+            if "Removed service" not in out:
+                log_err_msg = (
+                    f"ceph orch rm {service_name} command execution did"
+                    f" not yield expected message. \n"
+                    f"Expected message: Removed service {service_name}\n"
+                    f"Current message: {out}"
+                )
+                log.error(log_err_msg)
+            time.sleep(5)
+            if service_name not in self.list_orch_services():
+                log_info_msg = f"Removed service {service_name} successfully"
+                log.info(log_info_msg)
+                return True
             log_err_msg = (
                 f"Service {service_name} removal failed."
                 f" Service is listed in `ceph orch ls` output"
             )
             log.error(log_err_msg)
+            log.info("Retrying after 15 secs")
+            time.sleep(15)
+        else:
             return False
-
-        log_info_msg = f"Removed service {service_name} successfully"
-        log.info(log_info_msg)
-        return True
 
     def lookup_log_message(
         self, init_time, end_time, daemon_type, daemon_id, search_string
@@ -5367,3 +5828,1619 @@ EOF"""
             msg_logline = f"The log line {search_string} not found on - {daemon_type} : {daemon_id} log"
             log.info(msg_logline)
             return False
+
+    def get_service_spec_daemons(self, service_name: str):
+        """
+        Returns the ids of daemon part of service spec. Command `ceph orch ps --service-name <service-name>` is used
+        for the opreation.
+        Args:
+            service_name: Example: osd.osds, osd.default
+        Returns:
+            List: list of daemons part of the service spec
+        Usage:
+            get_service_spec_daemons(service_name="osd.default") returns [3,1,2]
+             get_service_spec_daemons(service_name="mon") returns ["depressa007", "depressa008"]
+        """
+        # $ceph orch ps --service-name osd.osd_spec -fjson-pretty
+        # [
+        #    {
+        #     "container_id": "f60959d13eff",
+        #     "container_image_digests": [
+        #         "quay.ceph.io/ceph-ci/ceph@sha256:8a4b10563247b88eab253c58da7d993c491c34a340f18ddd3f82f84653edb1b3"
+        #     ],
+        #     "container_image_id": "407e8c6551488dab2e9677a2762780c5df16d2a88cd82e27cecbf6095cc0e1ea",
+        #     "container_image_name": "quay.ceph.io/ceph-ci/ceph@sha256:8a4b10563247b88eab253c58da7d993c491c34a340f1",
+        #     "cpu_percentage": "1.40%",
+        #     "created": "2025-06-18T12:25:50.970306Z",
+        #     "daemon_id": "17",
+        #     "daemon_name": "osd.17",
+        #     "daemon_type": "osd",
+        #     "events": [
+        #         "2025-08-06T09:41:08.123978Z daemon:osd.17 [INFO] \"Reconfigured osd.17 on host 'depressa006'\""
+        #     ],
+        #     "hostname": "depressa006",
+        #     "is_active": false,
+        #     "last_refresh": "2025-08-07T03:07:05.198294Z",
+        #     "memory_request": 2635148574,
+        #     "memory_usage": 1653562408,
+        #     "pending_daemon_config": false,
+        #     "ports": [],
+        #     "service_name": "osd.osd_spec",
+        #     "started": "2025-08-05T13:21:41.788237Z",
+        #     "status": 1,
+        #     "status_desc": "running",
+        #     "systemd_unit": "ceph-b141fe32-4bee-11f0-8f36-ac1f6b5628fe@osd.17",
+        #     "version": "20.0.0-2453-ga40ac658"
+        # },
+        # .....<redacted>.....
+        ceph_orch_ps = self.run_ceph_command(
+            cmd=f"ceph orch ps --service_name {service_name}"
+        )
+        log_debug_msg = f"Daemons -> {ceph_orch_ps}"
+        log.debug(log_debug_msg)
+        return [daemon["daemon_id"] for daemon in ceph_orch_ps]
+
+    def remove_log_file_content(
+        self,
+        nodes_list,
+        daemon_type=None,
+    ):
+        """
+        The method is used to remove the log file contents in the cluster
+        Args:
+            nodes_list: Cluster nodes list that remove the file content
+            daemon_type: The daemon type like mon,mgr,osd
+        Returns: True -> Successful execution of command
+                 False -> Failure of command
+
+        """
+        cluster_fsid = self.run_ceph_command(cmd="ceph fsid")["fsid"]
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+        if daemon_type is None:
+            cmd_truncate = rf"""
+            cd /var/log/ceph/{cluster_fsid}/ && \
+            find . -type f ! -name '*.gz' -exec sh -c 'gzip -c "$1" > "$1.{timestamp}.gz"' _ {{}} \; && \
+            find . -type f ! -name '*.gz' -exec truncate -s 0 {{}} \;
+            """
+        else:
+            # Compress only matching daemon_type files, then truncate
+            cmd_truncate = rf"""
+            cd /var/log/ceph/{cluster_fsid}/ && \
+            find . -type f -name '*{daemon_type}*' ! -name '*.gz' -exec sh -c 'gzip -c "$1" > "$1.{timestamp}.gz"' \
+            _ {{}} \; && find . -type f -name '*{daemon_type}*' ! -name '*.gz' -exec truncate -s 0 {{}} \;
+            """
+        for node in nodes_list:
+            msg_log = (
+                f"The log files are compressed and stored at-/var/log/ceph/{cluster_fsid}/ directory."
+                f"Removing the file content from the node -{node.hostname}"
+            )
+            log.info(msg_log)
+            try:
+                out, err = node.exec_command(sudo=True, cmd=cmd_truncate)
+            except Exception:
+                log.error("Error while removing contents of file")
+                return False
+        return True
+
+    def get_balancer_status(self):
+        """
+        The method is used to send the balancer status
+        Args:
+            None
+        Return:
+            True -> If balancer status is active
+            False -> If balancer status in inactive
+        """
+
+        cmd_balancer_status = "ceph balancer status"
+        cmd_outPut = self.run_ceph_command(cmd_balancer_status)
+        return cmd_outPut["active"]
+
+    def get_scrub_stamps(self, pool_name):
+        """
+        Method is used to collect the scrub and deep-scrub stamps
+        Args:
+            pool_name: pool name
+        Return:
+            pg_scrub_details: A dictionary with the PG_ID as key, last_scrub_stamp and  last_deep_scrub_stamp values
+        """
+
+        pg_scrub_details = {}
+        cmd_pg_by_pool = f"ceph pg ls-by-pool {pool_name}"
+        pgid_details = self.run_ceph_command(cmd=cmd_pg_by_pool)
+        if not pgid_details["pg_stats"]:
+            return None
+        for pg in pgid_details["pg_stats"]:
+            pg_id = pg["pgid"]
+            last_scrub_stamp = pg["last_scrub_stamp"]
+            last_deep_scrub_stamp = pg["last_deep_scrub_stamp"]
+
+            pg_scrub_details[pg_id] = {
+                "last_scrub_stamp": last_scrub_stamp,
+                "last_deep_scrub_stamp": last_deep_scrub_stamp,
+            }
+        return pg_scrub_details
+
+    def scan_daemon_logs_for_crashes(
+        self,
+        start_time: str,
+        end_time: str,
+        daemon_types: list = None,
+        context_lines: int = 15,
+        use_journalctl_fallback: bool = True,
+        use_journalctl_only: bool = False,
+        scan_both_sources: bool = False,
+    ) -> dict:
+        """
+        Scan daemon logs (mon, mgr, osd) for crash-related patterns within
+        a given time frame.
+
+        This method is useful because crashes are not always reported in
+        'ceph status' or 'ceph crash ls'. By scanning the actual daemon logs,
+        we can detect crashes that may have occurred but weren't captured by
+        the crash module.
+
+        Log files scanned (in /var/log/ceph/{fsid}/):
+        - OSD: ceph-osd.{osd_id}.log              (e.g., ceph-osd.10.log)
+        - MON: ceph-mon.{hostname}.log            (e.g., ceph-mon.node1-installer.log)
+        - MGR: ceph-mgr.{hostname}.{suffix}.log   (e.g., ceph-mgr.node1-installer.kuwnur.log)
+
+        Also scans rotated/compressed log files (.gz) to catch crashes that
+        occurred before log rotation (e.g., ceph-osd.10.log-20251211.gz).
+
+        Common crash indicators searched:
+        - Signal-based crashes: SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL
+        - Assertion failures: assert, ceph_assert, ceph_abort
+        - Fatal errors: fatal, abort, terminate, core dumped
+        - Stack traces: backtrace, stack trace
+        - Exception handling: exception, std::terminate
+
+        Args:
+            start_time: Start time for log analysis
+                        Format: 'YYYY-MM-DDTHH:MM:SS.mmm+0000'
+                        Use osd_utils.get_cluster_timestamp(node) to get correct format
+            end_time: End time for log analysis
+                      Format: 'YYYY-MM-DDTHH:MM:SS.mmm+0000'
+                      Use osd_utils.get_cluster_timestamp(node) to get correct format
+            daemon_types: List of daemon types to scan. Default: ['mon', 'mgr', 'osd']
+            context_lines: Number of lines to capture around each crash occurrence
+            use_journalctl_fallback: If True, falls back to journalctl when log files
+                                    are missing or empty. Default: True
+            use_journalctl_only: If True, skip log file scanning and use only journalctl.
+                                Default: False. Overrides use_journalctl_fallback when True.
+            scan_both_sources: If True, scan both log files AND journalctl,
+                              merging unique crashes from both sources. Default: False.
+
+        Returns:
+            Dictionary containing:
+            {
+                "crashes_found": bool,
+                "total_crash_events": int,
+                "daemons_scanned": int,
+                "scan_duration_seconds": float,
+                "daemon_crashes": {
+                    "mon": {
+                        "<daemon_id>": {
+                            "host": str,
+                            "crash_count": int,
+                            "crash_events": [
+                                {
+                                    "keyword": str,
+                                    "line_number": str,
+                                    "line": str,
+                                    "context": [str, ...]
+                                }
+                            ]
+                        }
+                    },
+                    "mgr": {...},
+                    "osd": {...}
+                },
+                "summary": str  # Human-readable summary
+            }
+
+        Note: All daemons registered with the orchestrator are scanned,
+        regardless of their running state (running, stopped, error, etc.).
+
+        Example usage:
+            # Get timestamps using get_cluster_timestamp()
+            from ceph.rados import utils as osd_utils
+            start_time = osd_utils.get_cluster_timestamp(rados_obj.node)
+            # ... run tests ...
+            end_time = osd_utils.get_cluster_timestamp(rados_obj.node)
+
+            crash_report = rados_obj.scan_daemon_logs_for_crashes(
+                start_time=start_time,
+                end_time=end_time
+            )
+            if crash_report["crashes_found"]:
+                log.error("Crashes detected in daemon logs!")
+                log.error(crash_report["summary"])
+        """
+        if daemon_types is None:
+            daemon_types = ["mon", "mgr", "osd"]
+
+        # Common crash-related keywords/patterns to search for
+        # These patterns indicate daemon crashes, assertions, and fatal errors
+        # Patterns are designed to be specific to avoid false positives
+        crash_patterns = [
+            # Signal-based crashes (highly specific)
+            r"SIGSEGV",
+            r"SIGABRT",
+            r"SIGBUS",
+            r"SIGFPE",
+            r"SIGILL",
+            r"[Ss]egmentation [Ff]ault",
+            r"segfault at",
+            # Assertion failures (Ceph-specific)
+            r"ceph_assert",
+            r"ceph_abort",
+            r"ceph_abort_msg",
+            r"FAILED ceph_assert",
+            r"__ceph_assert_fail",
+            r"Assertion.*failed",
+            # Fatal/abort/terminate (more specific patterns)
+            r"FATAL:",
+            r"std::terminate",
+            r"terminate called",
+            r"\(core dumped\)",
+            # Stack traces (indicates crash dump)
+            r"[Bb]acktrace:",
+            r"ceph_stacktrace",
+            r"Dumping core",
+            # Exception indicators (more specific)
+            r"uncaught exception",
+            r"unhandled exception",
+            r"std::exception",
+            # Common crash log prefixes (very specific)
+            r"\*\*\* Caught signal",
+            r"\*\*\* Aborted at",
+            r"--- crashed:",
+            r"--- SIGABRT",
+            r"--- SIGSEGV",
+        ]
+
+        # Compile all patterns into a single regex for efficiency
+        combined_pattern = "|".join(crash_patterns)
+
+        # Initialize result with daemon_crashes keys for all requested daemon types
+        result = {
+            "crashes_found": False,
+            "total_crash_events": 0,
+            "daemon_crashes": {dt: {} for dt in daemon_types},
+            "summary": "",
+            "scan_duration_seconds": 0,
+            "daemons_scanned": 0,
+        }
+
+        # Validate timestamp format (basic check)
+        # Expected format: 'YYYY-MM-DDTHH:MM:SS' or 'YYYY-MM-DDTHH:MM:SS.mmm+0000'
+        def _validate_timestamp(ts: str, name: str) -> bool:
+            """Validate timestamp has expected format."""
+            if not ts or not isinstance(ts, str):
+                log.error(f"{name} is invalid: {ts}")
+                return False
+            # Must contain date portion at minimum (YYYY-MM-DD)
+            if len(ts) < 10 or ts[4] != "-" or ts[7] != "-":
+                log.error(f"{name} has invalid format (expected YYYY-MM-DD...): {ts}")
+                return False
+            return True
+
+        if not _validate_timestamp(start_time, "start_time"):
+            result["summary"] = "Invalid start_time format"
+            return result
+        if not _validate_timestamp(end_time, "end_time"):
+            result["summary"] = "Invalid end_time format"
+            return result
+
+        try:
+            fsid = self.run_ceph_command(cmd="ceph fsid")["fsid"]
+        except Exception as e:
+            log.error(f"Failed to get cluster fsid: {e}")
+            return result
+
+        # Extract date portion for initial filtering
+        # Handle both formats: 'YYYY-MM-DDTHH:MM:SS' and 'YYYY-MM-DD HH:MM:SS'
+        start_date = start_time.split("T")[0].split(" ")[0]
+        end_date = end_time.split("T")[0].split(" ")[0]
+
+        # Build date pattern for grep (handles same-day or midnight-crossing spans)
+        # For typical 4-5 hour test runs: either 1 date or 2 dates (if crossing midnight)
+        # Format: "2024-12-10" or "2024-12-10|2024-12-11"
+        if start_date == end_date:
+            date_pattern = start_date
+        else:
+            date_pattern = f"{start_date}|{end_date}"
+
+        log.info(
+            f"Scanning daemon logs for crashes between {start_time} and {end_time}"
+        )
+        log.debug(f"Daemon types to scan: {daemon_types}")
+        log.debug(f"Date pattern for grep: {date_pattern}")
+
+        # Collect all daemons to scan using 'ceph orch ps'
+        # Log file naming patterns in /var/log/ceph/{fsid}/:
+        #   OSD: ceph-osd.{osd_id}.log           (e.g., ceph-osd.10.log)
+        #   MON: ceph-mon.{daemon_id}.log        (e.g., ceph-mon.node1-installer.log)
+        #   MGR: ceph-mgr.{daemon_id}.log        (e.g., ceph-mgr.node1-installer.kuwnur.log)
+        # Note: daemon_id from 'ceph orch ps' matches the log filename component
+        daemons_to_scan = []
+
+        for daemon_type in daemon_types:
+            try:
+                # Use 'ceph orch ps' for all daemon types (mon, mgr, osd)
+                # This captures all daemons regardless of their running state
+                cmd = f"ceph orch ps --daemon_type {daemon_type}"
+                daemons = self.run_ceph_command(cmd=cmd)
+
+                # Handle None or empty result
+                if not daemons:
+                    log.debug(f"No {daemon_type} daemons returned from 'ceph orch ps'")
+                    continue
+
+                daemon_count = 0
+                for daemon in daemons:
+                    daemon_id = daemon.get("daemon_id")
+                    daemon_host = daemon.get("hostname")
+                    daemon_status = daemon.get("status_desc", "unknown")
+
+                    if daemon_id and daemon_host:
+                        # Build log path based on daemon type
+                        log_path = (
+                            f"/var/log/ceph/{fsid}/ceph-{daemon_type}.{daemon_id}.log"
+                        )
+                        daemons_to_scan.append(
+                            {
+                                "type": daemon_type,
+                                "id": daemon_id,
+                                "host": daemon_host,
+                                "log_path": log_path,
+                                "status": daemon_status,
+                            }
+                        )
+                        daemon_count += 1
+
+                log.debug(
+                    f"Found {daemon_count} {daemon_type} daemon(s) from 'ceph orch ps'"
+                )
+
+            except Exception as e:
+                log.warning(f"Failed to enumerate {daemon_type} daemons: {e}")
+                continue
+
+        log.info(f"Found {len(daemons_to_scan)} daemons to scan")
+
+        # Early return if no daemons to scan
+        if not daemons_to_scan:
+            log.warning("No daemons found to scan. Check daemon_types parameter.")
+            result["summary"] = "No daemons found to scan"
+            return result
+
+        # Pre-cache host objects to avoid repeated lookups for same host
+        host_cache = {}
+        unique_hosts = set(d["host"] for d in daemons_to_scan)
+        for hostname in unique_hosts:
+            host_obj = self.get_host_object(hostname=hostname)
+            if host_obj:
+                host_cache[hostname] = host_obj
+            else:
+                log.warning(f"Could not get host object for {hostname}")
+        log.debug(f"Cached {len(host_cache)} unique host objects")
+
+        # Filter out daemons whose hosts couldn't be resolved (optimization)
+        scannable_daemons = [d for d in daemons_to_scan if d["host"] in host_cache]
+        if len(scannable_daemons) < len(daemons_to_scan):
+            skipped = len(daemons_to_scan) - len(scannable_daemons)
+            log.warning(f"Skipping {skipped} daemon(s) due to unreachable hosts")
+        daemons_to_scan = scannable_daemons
+
+        # Re-check if any daemons left to scan
+        if not daemons_to_scan:
+            log.warning("No scannable daemons remaining after host validation.")
+            result["summary"] = "No scannable daemons (host connectivity issues)"
+            return result
+
+        # Generate unique suffix for temp files to avoid conflicts
+        scan_id = int(time.time() * 1000) % 100000
+
+        # Pre-compute rotated log file date patterns (YYYYMMDD format)
+        # Rotated files are named like: ceph-osd.10.log-20251211.gz
+        gz_date_start = start_date.replace("-", "")
+        gz_date_end = end_date.replace("-", "")
+
+        # Pre-compute journalctl timestamp format (YYYY-MM-DD HH:MM:SS)
+        journal_start = start_time.replace("T", " ").split(".")[0].split("+")[0]
+        journal_end = end_time.replace("T", " ").split(".")[0].split("+")[0]
+
+        # Pre-compiled regex to detect journalctl log line with timestamp
+        # Matches: "Dec 19 04:21:10" or "2025-12-19T04:21:10"
+        journal_timestamp_pattern = re.compile(
+            r"^(?:[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}|"
+            r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2})"
+        )
+
+        # Pre-compiled regex for time extraction (HH:MM from HH:MM:SS) - used in merge
+        time_extract_pattern = re.compile(r"(\d{2}:\d{2}):\d{2}")
+
+        # Helper function to scan via journalctl when log files are missing
+        def _scan_daemon_via_journalctl(daemon_info: dict) -> dict:
+            """
+            Scan daemon logs via journalctl (fallback or when use_journalctl_only=True).
+
+            Args:
+                daemon_info: Dict with type, id, host
+
+            Returns:
+                Dict with daemon_type, daemon_id, host, crash_events
+            """
+            d_type = daemon_info["type"]
+            d_id = daemon_info["id"]
+            d_host = daemon_info["host"]
+
+            scan_result = {
+                "daemon_type": d_type,
+                "daemon_id": d_id,
+                "host": d_host,
+                "crash_events": [],
+            }
+
+            host_obj = host_cache.get(d_host)
+            if not host_obj:
+                return scan_result
+
+            # Build systemd service name
+            # MON uses hostname, others use daemon_id
+            if d_type == "mon":
+                service_name = f"ceph-{fsid}@{d_type}.{d_host}.service"
+            else:
+                service_name = f"ceph-{fsid}@{d_type}.{d_id}.service"
+
+            max_events = 50
+
+            try:
+                # Build grep pattern from crash_patterns
+                grep_pattern = "|".join(crash_patterns)
+                # Escape single quotes for shell
+                grep_pattern_escaped = grep_pattern.replace("'", "'\\''")
+
+                # OPTIMIZED: Single SSH command - journalctl piped to grep with context
+                # Uses grep -B/-A for context, avoiding temp file for simple cases
+                # Use 3x context for stack traces (same as log file scanning)
+                stack_context = context_lines * 3
+                journalctl_cmd = f"""
+                journalctl -u '{service_name}' \\
+                  --since "{journal_start}" \\
+                  --until "{journal_end}" \\
+                  --no-pager 2>/dev/null | \\
+                grep -E '{grep_pattern_escaped}' -B {stack_context} -A {stack_context} 2>/dev/null | \\
+                head -n 1000 || true
+                """
+
+                crash_output, _ = host_obj.exec_command(
+                    cmd=journalctl_cmd, sudo=True, check_ec=False
+                )
+
+                if not crash_output or not crash_output.strip():
+                    log.debug(
+                        f"No crash patterns found in journalctl for {d_type}.{d_id}"
+                    )
+                    return scan_result
+
+                # Parse grep output with context (groups separated by --)
+                # First, split into context blocks, then find crash lines in each block
+                raw_lines = crash_output.strip().split("\n")
+                crash_events = []
+                seen_timestamps = (
+                    set()
+                )  # Dedupe by timestamp (same second = same crash)
+
+                # Split output into blocks (separated by --)
+                # Each block contains a crash line with before/after context
+                blocks = []
+                current_block = []
+                for line in raw_lines:
+                    if line.strip() == "--":
+                        if current_block:
+                            blocks.append(current_block)
+                        current_block = []
+                    else:
+                        current_block.append(line)
+                if current_block:
+                    blocks.append(current_block)
+
+                # Process each block to find crash lines
+                for block in blocks:
+                    # Find crash lines in this block (only lines with timestamps)
+                    for line in block:
+                        # Skip lines that don't start with a timestamp
+                        if not journal_timestamp_pattern.match(line):
+                            continue
+
+                        # Check if this line matches a crash pattern
+                        matched_keyword = None
+                        for pattern in crash_patterns:
+                            if re.search(pattern, line, re.IGNORECASE):
+                                matched_keyword = (
+                                    pattern.replace("\\", "")
+                                    .replace("[", "")
+                                    .replace("]", "")
+                                    .replace("(", "")
+                                    .replace(")", "")
+                                )
+                                break
+
+                        if matched_keyword:
+                            # Extract timestamp for deduplication
+                            ts_match = journal_timestamp_pattern.match(line)
+                            timestamp_key = ts_match.group(0) if ts_match else line[:20]
+
+                            # Skip if we've seen a crash at this exact timestamp
+                            if timestamp_key in seen_timestamps:
+                                continue
+                            seen_timestamps.add(timestamp_key)
+
+                            crash_events.append(
+                                {
+                                    "keyword": matched_keyword,
+                                    "line_number": 0,
+                                    "line": line,
+                                    "context": list(
+                                        block
+                                    ),  # Full block (before + after)
+                                    "source": "journalctl",
+                                }
+                            )
+
+                            if len(crash_events) >= max_events:
+                                break
+
+                    if len(crash_events) >= max_events:
+                        break
+
+                scan_result["crash_events"] = crash_events
+                if crash_events:
+                    log.info(
+                        f"Found {len(crash_events)} crash event(s) via journalctl "
+                        f"for {d_type}.{d_id}"
+                    )
+
+            except Exception as e:
+                log.warning(f"Failed to scan journalctl for {d_type}.{d_id}: {e}")
+
+            return scan_result
+
+        # Helper function to scan a single daemon's logs (for parallel execution)
+        def _scan_single_daemon(daemon_info: dict) -> dict:
+            """
+            Scan a single daemon's log file for crash patterns.
+            Optimized to minimize SSH roundtrips by combining commands.
+
+            Args:
+                daemon_info: Dict with type, id, host, log_path
+
+            Returns:
+                Dict with daemon_type, daemon_id, host, crash_events
+            """
+            # If journalctl-only mode is enabled, skip file scanning entirely
+            if use_journalctl_only:
+                return _scan_daemon_via_journalctl(daemon_info)
+
+            d_type = daemon_info["type"]
+            d_id = daemon_info["id"]
+            d_host = daemon_info["host"]
+            d_log_path = daemon_info["log_path"]
+
+            scan_result = {
+                "daemon_type": d_type,
+                "daemon_id": d_id,
+                "host": d_host,
+                "crash_events": [],
+            }
+
+            # When scan_both_sources is True, scan both log files and journalctl
+            # and merge unique crashes from both sources
+            _journal_result_cache = None  # Store for later merge
+            if scan_both_sources:
+                log.debug(f"Scanning both sources for {d_type}.{d_id}")
+                # Scan journalctl first and cache result
+                _journal_result_cache = _scan_daemon_via_journalctl(daemon_info)
+                journal_crashes = len(_journal_result_cache.get("crash_events", []))
+                if journal_crashes > 0:
+                    log.debug(
+                        f"Journalctl found {journal_crashes} crash(es) for {d_type}.{d_id}"
+                    )
+
+            # Use cached host object
+            host_obj = host_cache.get(d_host)
+
+            # Unique temp file name to avoid conflicts in parallel execution
+            temp_log = f"/tmp/crash_scan_{d_type}_{d_id}_{scan_id}.log"
+
+            # Maximum crash events to collect per daemon (prevents slowdown)
+            max_events_per_daemon = 50
+
+            try:
+                # OPTIMIZATION: Combine file check + time filter + crash grep into single command
+                # Also checks rotated log files (.gz) in case logs were rotated during test
+                # Rotated file pattern: {log_path}-YYYYMMDD.gz (e.g., ceph-osd.10.log-20251211.gz)
+                #
+                # Strategy:
+                # 1. Scan current log file if it exists
+                # 2. Check for rotated .gz files only for dates in time range
+                # 3. Use zcat to decompress and grep rotated files
+                # 4. Combine results into temp_log for crash pattern matching
+
+                # Build list of rotated files to check (only dates in our range)
+                # Uses gz_date_start/gz_date_end computed in outer scope
+                gz_files_to_check = f"{d_log_path}-{gz_date_start}.gz"
+                if gz_date_start != gz_date_end:
+                    gz_files_to_check += f" {d_log_path}-{gz_date_end}.gz"
+
+                combined_cmd = f"""
+                rm -f {temp_log} 2>/dev/null
+                touch {temp_log}
+                LOG_FOUND=0
+
+                # Scan current log file
+                if [ -f {d_log_path} ]; then
+                    LOG_FOUND=1
+                    grep -E '{date_pattern}' {d_log_path} 2>/dev/null | \\
+                    awk -v start='{start_time}' -v end='{end_time}' '$1 >= start && $1 <= end' >> {temp_log} 2>/dev/null
+                fi
+
+                # Scan rotated log files (.gz) only for dates in our time range
+                for gz_file in {gz_files_to_check}; do
+                    if [ -f "$gz_file" ]; then
+                        LOG_FOUND=1
+                        zcat "$gz_file" 2>/dev/null | grep -E '{date_pattern}' 2>/dev/null | \\
+                        awk -v start='{start_time}' -v end='{end_time}' \\
+                        '$1 >= start && $1 <= end' >> {temp_log} 2>/dev/null
+                    fi
+                done
+
+                # Check if we found any log files at all
+                if [ "$LOG_FOUND" -eq 0 ]; then
+                    echo "LOGFILE_MISSING"
+                elif [ ! -s {temp_log} ]; then
+                    echo "LOGFILE_EMPTY"
+                else
+                    grep -n -E '{combined_pattern}' {temp_log} 2>/dev/null | head -n {max_events_per_daemon} || true
+                fi
+                """
+                crash_matches, _ = host_obj.exec_command(
+                    cmd=combined_cmd, sudo=True, check_ec=False
+                )
+
+                # Check if log file is missing or empty - fallback to journalctl if enabled
+                crash_matches_str = str(crash_matches) if crash_matches else ""
+                if (
+                    "LOGFILE_MISSING" in crash_matches_str
+                    or "LOGFILE_EMPTY" in crash_matches_str
+                ):
+                    reason = (
+                        "not found"
+                        if "LOGFILE_MISSING" in crash_matches_str
+                        else "empty"
+                    )
+                    log.debug(f"Log file {reason} for {d_type}.{d_id}: {d_log_path}")
+                    if use_journalctl_fallback:
+                        log.info(
+                            f"Falling back to journalctl for {d_type}.{d_id} "
+                            f"(log file {reason})"
+                        )
+                        # Reuse cached result if scan_both_sources already called journalctl
+                        if _journal_result_cache is not None:
+                            return _journal_result_cache
+                        return _scan_daemon_via_journalctl(daemon_info)
+                    return scan_result
+
+                if not crash_matches or not crash_matches.strip():
+                    # No crashes in log file, but continue to merge logic
+                    # if scan_both_sources is enabled (journalctl may have crashes)
+                    if scan_both_sources and _journal_result_cache is not None:
+                        # Return journalctl results directly (file had no crashes)
+                        return _journal_result_cache
+                    return scan_result
+
+                # Process crash matches
+                matched_lines = crash_matches.strip().split("\n")
+
+                # Collect all crash events first (for batch context collection)
+                crash_data = []
+                seen_lines = set()  # Deduplication
+
+                for match in matched_lines:
+                    if not match.strip():
+                        continue
+                    parts = match.split(":", 1)
+                    if len(parts) < 2:
+                        continue
+
+                    line_num_str = parts[0].strip()
+                    line_content = parts[1].strip()
+
+                    # Validate line number is numeric (grep -n output format)
+                    if not line_num_str.isdigit():
+                        continue
+
+                    # Deduplicate: skip if we've seen similar content
+                    # (same crash often produces multiple similar log lines)
+                    content_key = line_content[:100]  # First 100 chars
+                    if content_key in seen_lines:
+                        continue
+                    seen_lines.add(content_key)
+
+                    line_num = int(line_num_str)
+
+                    # Identify which keyword matched
+                    matched_keyword = "unknown"
+                    for pattern in crash_patterns:
+                        if re.search(pattern, line_content, re.IGNORECASE):
+                            # Clean up regex escape chars for readable display
+                            # e.g., r"\*\*\* Caught signal" -> "*** Caught signal"
+                            matched_keyword = (
+                                pattern.replace("\\", "")
+                                .replace("[", "")
+                                .replace("]", "")
+                                .replace("(", "")
+                                .replace(")", "")
+                            )
+                            break
+
+                    crash_data.append(
+                        {
+                            "keyword": matched_keyword,
+                            "line_number": line_num,
+                            "line": line_content,
+                        }
+                    )
+
+                # Collect context from ORIGINAL log file (not temp filtered log)
+                # This is important because crash stack traces don't have timestamps
+                # and would be filtered out from temp_log
+                if crash_data and context_lines > 0:
+                    # For each crash, find its line in the original log and get context
+                    for cd in crash_data:
+                        try:
+                            crash_line = cd["line"]
+                            # Escape special characters for grep
+                            escaped_line = crash_line.replace("'", "'\\''").replace(
+                                "\\", "\\\\"
+                            )
+
+                            # Find line number in ORIGINAL log file and get context
+                            # Use grep -n to find line, then sed to get surrounding lines
+                            # Increase context for stack traces (use 3x normal context)
+                            stack_context = context_lines * 3
+
+                            context_cmd = f"""
+                            ORIG_LINE=$(grep -n -F '{escaped_line}' {d_log_path} \
+                                2>/dev/null | head -1 | cut -d: -f1)
+                            if [ -n "$ORIG_LINE" ]; then
+                                START=$((ORIG_LINE - {stack_context}))
+                                END=$((ORIG_LINE + {stack_context}))
+                                [ $START -lt 1 ] && START=1
+                                sed -n "${{START}},${{END}}p" {d_log_path} 2>/dev/null
+                            fi
+                            """
+                            context_output, _ = host_obj.exec_command(
+                                cmd=context_cmd, sudo=True, check_ec=False
+                            )
+
+                            if context_output and context_output.strip():
+                                cd["context"] = context_output.strip().split("\n")
+                            else:
+                                # Fallback to temp log context
+                                ln = cd["line_number"]
+                                start_ln = max(1, ln - context_lines)
+                                end_ln = ln + context_lines
+                                fallback_cmd = (
+                                    f"sed -n '{start_ln},{end_ln}p' {temp_log}"
+                                )
+                                fallback_out, _ = host_obj.exec_command(
+                                    cmd=fallback_cmd, sudo=True, check_ec=False
+                                )
+                                if fallback_out:
+                                    cd["context"] = fallback_out.strip().split("\n")
+                                else:
+                                    cd["context"] = []
+                        except Exception:
+                            cd["context"] = []
+                else:
+                    for cd in crash_data:
+                        cd["context"] = []
+
+                # Add events to result
+                for cd in crash_data:
+                    scan_result["crash_events"].append(
+                        {
+                            "keyword": cd["keyword"],
+                            "line_number": str(cd["line_number"]),
+                            "line": cd["line"],
+                            "context": cd["context"],
+                            "source": "log_file",  # Indicate source
+                        }
+                    )
+
+            except Exception as e:
+                log.warning(f"Failed to scan logs for {d_type}.{d_id}: {e}")
+            finally:
+                # Always cleanup temp file
+                try:
+                    host_obj.exec_command(
+                        cmd=f"rm -f {temp_log}", sudo=True, check_ec=False
+                    )
+                except Exception:
+                    pass  # Ignore cleanup errors
+
+            # Merge journalctl results if scan_both_sources is enabled
+            if scan_both_sources and _journal_result_cache is not None:
+                file_crashes = len(scan_result.get("crash_events", []))
+                if file_crashes > 0:
+                    log.debug(
+                        f"Log file found {file_crashes} crash(es) for {d_type}.{d_id}"
+                    )
+                # Merge results - add journalctl crashes not found in file results
+                # Use keyword + time-based deduplication (same minute = same crash)
+                existing_keys = set()
+                for ce in scan_result["crash_events"]:
+                    # Extract time (HH:MM) from line for matching
+                    time_match = time_extract_pattern.search(ce["line"])
+                    time_key = time_match.group(1) if time_match else ""
+                    existing_keys.add(f"{ce['keyword']}_{time_key}")
+                added = 0
+                for jce in _journal_result_cache.get("crash_events", []):
+                    time_match = time_extract_pattern.search(jce["line"])
+                    time_key = time_match.group(1) if time_match else ""
+                    merge_key = f"{jce['keyword']}_{time_key}"
+                    if merge_key not in existing_keys:
+                        jce["keyword"] = f"[JOURNALCTL] {jce['keyword']}"
+                        scan_result["crash_events"].append(jce)
+                        existing_keys.add(merge_key)
+                        added += 1
+                if added > 0:
+                    log.info(
+                        f"Added {added} unique crash(es) from journalctl "
+                        f"for {d_type}.{d_id}"
+                    )
+
+            return scan_result
+
+        # Scan daemon logs in parallel using ThreadPoolExecutor
+        # Using max 10 workers to avoid overwhelming the cluster
+        max_workers = min(10, len(daemons_to_scan)) if daemons_to_scan else 1
+        scan_start_time = time.time()
+        log.info(
+            f"Scanning {len(daemons_to_scan)} daemon logs in parallel "
+            f"(max_workers={max_workers})"
+        )
+
+        with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all scanning tasks
+            future_to_daemon = {
+                executor.submit(_scan_single_daemon, daemon_info): daemon_info
+                for daemon_info in daemons_to_scan
+            }
+
+            # Collect results as they complete
+            for future in cf.as_completed(future_to_daemon):
+                daemon_info = future_to_daemon[future]
+                try:
+                    scan_result = future.result()
+                    if scan_result and scan_result["crash_events"]:
+                        d_type = scan_result["daemon_type"]
+                        d_id = scan_result["daemon_id"]
+                        d_host = scan_result["host"]
+                        crash_events = scan_result["crash_events"]
+
+                        result["crashes_found"] = True
+                        result["total_crash_events"] += len(crash_events)
+                        result["daemon_crashes"][d_type][d_id] = {
+                            "host": d_host,
+                            "crash_count": len(crash_events),
+                            "crash_events": crash_events,
+                        }
+
+                        log.warning(
+                            f"Found {len(crash_events)} crash event(s) in "
+                            f"{d_type}.{d_id} logs on {d_host}"
+                        )
+                except Exception as exc:
+                    d_type = daemon_info["type"]
+                    d_id = daemon_info["id"]
+                    log.warning(f"Daemon {d_type}.{d_id} scan raised exception: {exc}")
+
+        # Calculate scan duration and record stats
+        scan_duration = time.time() - scan_start_time
+        result["scan_duration_seconds"] = round(scan_duration, 2)
+        result["daemons_scanned"] = len(daemons_to_scan)
+        log.info(
+            f"Completed scanning {len(daemons_to_scan)} daemon logs in "
+            f"{scan_duration:.2f} seconds"
+        )
+
+        # Generate summary
+        if result["crashes_found"]:
+            summary_parts = [
+                f"CRASH DETECTED: Found {result['total_crash_events']} crash event(s) "
+                f"in daemon logs between {start_time} and {end_time}"
+            ]
+
+            for daemon_type, daemons in result["daemon_crashes"].items():
+                if daemons:
+                    daemon_summary = []
+                    for daemon_id, info in daemons.items():
+                        daemon_summary.append(
+                            f"{daemon_type}.{daemon_id} ({info['crash_count']} events)"
+                        )
+                    summary_parts.append(
+                        f"  {daemon_type.upper()}: {', '.join(daemon_summary)}"
+                    )
+
+            result["summary"] = "\n".join(summary_parts)
+            log.error(result["summary"])
+
+            # Print detailed crash information in a formatted way
+            self._print_crash_details(result, start_time, end_time)
+        else:
+            result["summary"] = (
+                f"No crashes detected in daemon logs between "
+                f"{start_time} and {end_time}"
+            )
+            log.info(result["summary"])
+
+        return result
+
+    def _print_crash_details(
+        self, crash_result: dict, start_time: str, end_time: str
+    ) -> None:
+        """
+        Print crash details in a nicely formatted way for easy reading.
+
+        The crash stack trace is printed as a single block so it appears
+        exactly as it would in the original log file (without logger prefix
+        on each line).
+
+        Args:
+            crash_result: The result dictionary from scan_daemon_logs_for_crashes()
+            start_time: Scan start time
+            end_time: Scan end time
+        """
+        separator = "=" * 80
+        sub_separator = "-" * 80
+
+        # Build the entire crash report as a single string for clean output
+        report_lines = []
+        report_lines.append("")
+        report_lines.append(separator)
+        report_lines.append("DAEMON CRASH REPORT")
+        report_lines.append(separator)
+        report_lines.append(f"Time Range     : {start_time} to {end_time}")
+        report_lines.append(f"Total Events   : {crash_result['total_crash_events']}")
+        report_lines.append(
+            f"Daemons Scanned: {crash_result.get('daemons_scanned', 'N/A')}"
+        )
+        report_lines.append(
+            f"Scan Duration  : {crash_result.get('scan_duration_seconds', 'N/A')}s"
+        )
+        report_lines.append(separator)
+
+        for daemon_type, daemons in crash_result["daemon_crashes"].items():
+            if not daemons:
+                continue
+
+            report_lines.append("")
+            report_lines.append(f"{daemon_type.upper()} CRASHES:")
+            report_lines.append(sub_separator)
+
+            for daemon_id, info in daemons.items():
+                report_lines.append("")
+                report_lines.append(f"  Daemon: {daemon_type}.{daemon_id}")
+                report_lines.append(f"  Host  : {info['host']}")
+                report_lines.append(f"  Events: {info['crash_count']}")
+
+                for idx, event in enumerate(info["crash_events"], 1):
+                    report_lines.append("")
+                    report_lines.append(f"  --- Event {idx} ---")
+                    report_lines.append(
+                        f"  Trigger  : {event.get('keyword', 'unknown')}"
+                    )
+                    report_lines.append(
+                        f"  Line#    : {event.get('line_number', 'N/A')}"
+                    )
+                    report_lines.append(f"  Crash Log: {event.get('line', 'N/A')}")
+
+                    # Print context lines if available
+                    context = event.get("context", [])
+                    if context:
+                        report_lines.append("")
+                        report_lines.append(
+                            f"  CRASH STACK TRACE ({len(context)} lines):"
+                        )
+                        report_lines.append(sub_separator)
+                        # Add context lines directly (no truncation for stack traces)
+                        for ctx_line in context:
+                            report_lines.append(ctx_line)
+                        report_lines.append(sub_separator)
+
+        report_lines.append("")
+        report_lines.append(separator)
+        report_lines.append("END OF CRASH REPORT")
+        report_lines.append(separator)
+
+        # Print as a single multi-line log message for clean output
+        log.error("\n".join(report_lines))
+
+    def wait_for_clean_pg_sets(
+        self,
+        timeout: int = 10000,
+        sleep_interval: int = 120,
+        test_pool: str = None,
+        recovery_thread: bool = True,
+    ) -> bool:
+        """
+        # duplicate of
+        Waiting for up to 2.5 hours for the PG's to enter active + Clean state.
+        If pool name is provided, just checks the PGs of that pool for active + clean
+        Automation for bug : [1] & [2]
+        Args:
+            timeout: timeout in seconds or "unlimited"
+            sleep_interval: sleep timeout in seconds (default: 120)
+            test_pool: name of the test pool, whose PG states need to be monitored.
+            recovery_thread: flag to control if recovery threads are to be modified
+        Returns:  True -> pass, False -> fail
+        """
+        if recovery_thread:
+            log.debug(
+                "Updating recovery thread and osd_op_queue to assist faster recovery"
+            )
+            self.change_recovery_threads(config={}, action="set")
+
+        end_time = None
+        if timeout == "unlimited":
+            condition = lambda: True
+        elif isinstance(timeout, int):
+            end_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=timeout)
+            condition = lambda: datetime.datetime.utcnow() < end_time
+
+        while condition():
+            health_warnings = (
+                "remapped",
+                "backfilling",
+                "degraded",
+                "incomplete",
+                "peering",
+                "recovering",
+                "recovery_wait",
+                "undersized",
+                "backfilling_wait",
+            )
+            all_pg_active_clean = True
+            if test_pool:
+                log.debug(f"Checking for active + clean PGs on pool: {test_pool}")
+                pool_pg_ids = self.get_pgid(pool_name=test_pool)
+                for pg_id in pool_pg_ids:
+                    try:
+                        pg_state = self.get_pg_state(pg_id=pg_id)
+                    except Exception as err:
+                        log.error(f"PGID : {pg_id} was not found, err: {err}")
+                        continue
+                    if any(key in health_warnings for key in pg_state.split("+")):
+                        all_pg_active_clean = False
+                        log.debug(
+                            f"PG: {pg_id} in states: {pg_state}"
+                            f"Waiting for active + clean. "
+                        )
+                        break
+                    log.info(
+                        f" PG: {pg_id} in state: {pg_state}."
+                        f" Checking status on next PG in the pool"
+                    )
+            else:
+                try:
+                    status_report = self.run_ceph_command(
+                        cmd="ceph report", client_exec=True
+                    )
+                    for entry in status_report["num_pg_by_state"]:
+                        if any(
+                            key in health_warnings for key in entry["state"].split("+")
+                        ):
+                            all_pg_active_clean = False
+                            log.debug(f"PG state: {entry['state']}")
+                        log.info(
+                            f"Waiting for active + clean. Active alerts: {status_report['health']['checks'].keys()},"
+                            f" PG States: {status_report['num_pg_by_state']}."
+                            f" Checking status again in {sleep_interval} seconds"
+                        )
+                        log.info(
+                            f"\nceph status : {self.run_ceph_command(cmd='ceph -s', client_exec=True)}\n"
+                        )
+                except Exception as e:
+                    log.error(f"Error occurred while fetching status report: {e}")
+
+            if all_pg_active_clean:
+                if recovery_thread:
+                    log.debug("Removing recovery thread settings")
+                    self.change_recovery_threads(config={}, action="rm")
+                log.info("The recovery and back-filling of the OSDs/Pool is completed")
+                return True
+            time.sleep(sleep_interval)
+
+        if recovery_thread:
+            log.debug("Removing recovery thread settings")
+            self.change_recovery_threads(config={}, action="rm")
+        log.error(
+            "The cluster/Pool did not reach active + Clean state within the specified timeout"
+        )
+        return False
+
+    def create_cephfs_pools(
+        self,
+        client_node,
+        fs_name: str,
+        pool_type: str,
+        enable_fast_ec_config_params: bool = False,
+    ) -> None:
+        """
+        Create CephFS filesystem with EC/replicated data pool and replicated metadata pool
+
+        Args:
+            client_node: Client node to execute commands
+            fs_name: Filesystem name
+            pool_type: Pool type identifier
+            enable_fast_ec_config_params: Whether to enable fast EC config params
+        Returns:
+            None (raises exception on failure)
+        """
+        log.info(f"Creating {pool_type} pools for CephFS: {fs_name}")
+        data_pool = f"cephfs_{pool_type}_{fs_name}_data"
+        metadata_pool = f"cephfs_{pool_type}_{fs_name}_metadata"
+
+        if pool_type.lower() == "replicated":
+            log.debug(f"creating replicated data pool : {data_pool}")
+            # Create data pool (replicated)
+            assert self.create_pool(
+                pool_name=data_pool,
+                app_name="cephfs",
+                bulk=True,
+                pg_num_max=128,
+            ), f"Failed to create data pool {data_pool}"
+            log.debug(f"Created data pool: {data_pool}")
+
+        else:
+            log.debug(f"Creating EC data pool: {data_pool}")
+            ec_config = {
+                "pool_name": data_pool,
+                "profile_name": f"ec_profile_{fs_name}",
+                "k": 2,
+                "m": 2,
+                "app_name": "cephfs",
+                "erasure_code_use_overwrites": "true",
+                "enable_fast_ec_features": enable_fast_ec_config_params,
+                "bulk": True,
+                "pg_num_max": 128,
+                "stripe_unit": 16384,
+            }
+            assert self.create_erasure_pool(
+                **ec_config
+            ), f"Failed to create EC pool {data_pool}"
+            log.debug(f"Created EC data pool: {data_pool}")
+
+        # Create metadata pool (replicated)
+        log.info(f"Creating metadata pool: {metadata_pool}")
+        assert self.create_pool(pool_name=metadata_pool, app_name="cephfs")
+        log.debug(f"Created metadata pool: {metadata_pool}")
+
+        # Create CephFS with data pool and replicated metadata pool
+        log.debug(f"Creating CephFS: {fs_name} with {pool_type} data pool")
+        client_node.exec_command(
+            sudo=True,
+            cmd=f"ceph fs new {fs_name} {metadata_pool} {data_pool} --force",
+        )
+        log.info(f"Created CephFS filesystem: {fs_name} with {pool_type} data pool")
+
+    def create_cephfs_filesystem_mount(
+        self,
+        client_node,
+        fs_name: str = "cephfs-thrash",
+        pool_type: str = "erasure",
+        enable_fast_ec_config_params: bool = False,
+    ) -> tuple:
+        """
+        Create CephFS filesystem, mount it, and return mount path.
+
+        Args:
+            client_node: Client node to execute commands
+            fs_name: Filesystem name (default: "cephfs-thrash")
+            pool_type: Pool type - "erasure" or "replicated"
+            enable_fast_ec_config_params: Whether to enable fast EC config params
+        Returns:
+            Tuple of (fs_name, mount_path, list of created pool configs)
+        """
+        mount_path = f"/mnt/{fs_name}"
+
+        log.info(f"Creating CephFS with {pool_type} data pool: {fs_name}")
+
+        self.create_cephfs_pools(
+            client_node,
+            fs_name,
+            pool_type=pool_type,
+            enable_fast_ec_config_params=enable_fast_ec_config_params,
+        )
+
+        log.info(f"Mounting CephFS at {mount_path}")
+        client_node.exec_command(
+            cmd=f"mkdir -p {mount_path}", sudo=True, check_ec=False
+        )
+        client_node.exec_command(
+            cmd=f"mount -t ceph admin@.{fs_name}=/ {mount_path}", sudo=True
+        )
+        log.info(f"Mounted CephFS at {mount_path}")
+
+        # Return created pool names
+        created_pools = [
+            {
+                "pool_name": f"cephfs_{pool_type}_{fs_name}_data",
+                "pool_type": pool_type,
+                "client": "cephfs",
+            },
+            {
+                "pool_name": f"cephfs_{pool_type}_{fs_name}_metadata",
+                "pool_type": "replicated",
+                "client": "cephfs",
+            },
+        ]
+
+        return fs_name, mount_path, created_pools
+
+    def create_nfs_clusters_and_exports(
+        self,
+        client_node,
+        num_clusters: int = 3,
+        exports_per_cluster: int = 4,
+        placement: int = 1,
+        nfs_fs_name: str = "nfs-cephfs",
+        pool_type: str = "erasure",
+        enable_fast_ec_config_params: bool = False,
+    ) -> dict:
+        """
+        Create NFS clusters with a dedicated CephFS filesystem and exports.
+
+        Args:
+            client_node: Client node to execute commands
+            num_clusters: Number of NFS clusters to create (default: 3)
+            exports_per_cluster: Number of exports per cluster (default: 4)
+            placement: Placement count for NFS daemons (default: 1)
+            nfs_fs_name: CephFS filesystem name for NFS (default: "nfs-cephfs")
+            pool_type: Pool type for CephFS - "erasure" or "replicated"
+            enable_fast_ec_config_params: Whether to enable fast EC config params
+
+        Returns:
+            Dict with nfs_config containing clusters, exports, fs_name, and pool info
+        """
+        log.info(
+            f"Creating NFS setup: {num_clusters} clusters, "
+            f"{exports_per_cluster} exports each"
+        )
+
+        # Step 1: Create CephFS filesystem for NFS
+        log.info(f"Creating CephFS filesystem for NFS: {nfs_fs_name}")
+        self.create_cephfs_pools(
+            client_node=client_node,
+            fs_name=nfs_fs_name,
+            pool_type=pool_type,
+            enable_fast_ec_config_params=enable_fast_ec_config_params,
+        )
+
+        # Get OSD hosts for NFS placement
+        available_hosts = self.get_osd_hosts()
+        log.info(f"Available OSD hosts for NFS placement: {available_hosts}")
+
+        # Step 2: Create NFS clusters with unique ports starting from 2049
+        clusters = []
+        base_port = 2049
+        for i in range(num_clusters):
+            cluster_id = f"nfs-cluster-{i + 1}"
+            port = base_port + i
+
+            # Distribute clusters across hosts (round-robin)
+            host_idx = i % len(available_hosts)
+            selected_host = available_hosts[host_idx]
+            placement_str = f'"{placement} {selected_host}"'
+
+            log.info(
+                f"Creating NFS cluster: {cluster_id} on port {port}, host {selected_host}"
+            )
+
+            cmd = f"ceph nfs cluster create {cluster_id} {placement_str} --port={port}"
+            self.client.exec_command(cmd=cmd, sudo=True)
+            clusters.append(
+                {"cluster_id": cluster_id, "port": port, "host": selected_host}
+            )
+            time.sleep(5)  # Allow cluster to initialize
+
+        log.info(f"Created {len(clusters)} NFS clusters")
+
+        # Wait for NFS clusters to be ready
+        time.sleep(30)
+
+        # Step 3: Create exports for each cluster
+        exports = []
+        for cluster in clusters:
+            cluster_id = cluster["cluster_id"]
+            for j in range(exports_per_cluster):
+                pseudo_path = f"/export/{cluster_id}/path{j + 1}"
+
+                log.info(f"Creating NFS export: {pseudo_path} on cluster {cluster_id}")
+                cmd = (
+                    f"ceph nfs export create cephfs {cluster_id} {pseudo_path} "
+                    f"{nfs_fs_name} --path=/"
+                )
+                try:
+                    self.client.exec_command(cmd=cmd, sudo=True)
+                    exports.append(
+                        {
+                            "cluster_id": cluster_id,
+                            "pseudo_path": pseudo_path,
+                            "fs_name": nfs_fs_name,
+                        }
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to create export {pseudo_path}: {e}")
+
+        log.info(f"Created {len(exports)} NFS exports across {len(clusters)} clusters")
+
+        # Build pool info for tracking
+        created_pools = [
+            {
+                "pool_name": f"cephfs_{pool_type}_{nfs_fs_name}_data",
+                "pool_type": pool_type,
+                "client": "nfs",
+            },
+            {
+                "pool_name": f"cephfs_{pool_type}_{nfs_fs_name}_metadata",
+                "pool_type": "replicated",
+                "client": "nfs",
+            },
+        ]
+
+        return {
+            "fs_name": nfs_fs_name,
+            "clusters": clusters,
+            "exports": exports,
+            "pools": created_pools,
+        }
+
+    def cleanup_nfs_clusters(self, nfs_config: dict) -> None:
+        """
+        Cleanup NFS clusters, exports, and associated filesystem.
+
+        Args:
+            nfs_config: Dict returned by create_nfs_clusters_and_exports
+        """
+        if not nfs_config:
+            return
+
+        log.info("Cleaning up NFS clusters and exports...")
+
+        # Step 1: Delete all exports
+        for export in nfs_config.get("exports", []):
+            cluster_id = export["cluster_id"]
+            pseudo_path = export["pseudo_path"]
+            try:
+                cmd = f"ceph nfs export rm {cluster_id} {pseudo_path}"
+                self.client.exec_command(cmd=cmd, sudo=True, check_ec=False)
+                log.debug(f"Deleted NFS export: {pseudo_path}")
+            except Exception as e:
+                log.warning(f"Failed to delete export {pseudo_path}: {e}")
+
+        # Step 2: Delete NFS clusters
+        for cluster in nfs_config.get("clusters", []):
+            cluster_id = cluster["cluster_id"]
+            try:
+                cmd = f"ceph nfs cluster rm {cluster_id}"
+                self.client.exec_command(cmd=cmd, sudo=True, check_ec=False)
+                log.debug(f"Deleted NFS cluster: {cluster_id}")
+            except Exception as e:
+                log.warning(f"Failed to delete cluster {cluster_id}: {e}")
+
+        # Step 3: Delete filesystem
+        # Note: Pools are deleted separately via created_pools tracking in the caller
+        fs_name = nfs_config.get("fs_name")
+        if fs_name:
+            try:
+                self.client.exec_command(
+                    cmd=f"ceph fs fail {fs_name}", sudo=True, check_ec=False
+                )
+                time.sleep(5)
+                self.client.exec_command(
+                    cmd=f"ceph fs rm {fs_name} --yes-i-really-mean-it",
+                    sudo=True,
+                    check_ec=False,
+                )
+                log.debug(f"Deleted filesystem: {fs_name}")
+            except Exception as e:
+                log.warning(f"Failed to delete filesystem {fs_name}: {e}")
+
+        log.info("NFS cleanup completed")
+
+    def create_ec_rbd_pools(
+        self,
+        rbd_ec_data_pool: str = "rbd-ec-thrash-data",
+        rbd_metadata_pool: str = "rbd-thrash-metadata",
+        image_name: str = "thrash-test-image",
+        image_size: str = "10G",
+        crush_failure_domain: str = "host",
+        enable_fast_ec_config_params: bool = False,
+    ) -> tuple:
+        """
+        Create EC RBD pools, image, and mount it.
+
+        Args:
+            rbd_ec_data_pool: EC data pool name (default: "rbd-ec-thrash-data")
+            rbd_metadata_pool: Metadata pool name (default: "rbd-thrash-metadata")
+            image_name: RBD image name (default: "thrash-test-image")
+            image_size: Image size (default: "10G")
+            crush_failure_domain: CRUSH failure domain for EC pool (default: "host")
+            enable_fast_ec_config_params: Whether to enable fast EC config params
+
+        Returns:
+            Tuple of (mount_path, device_path, list of created pool configs)
+        """
+        log.info("Creating RBD pools (EC data + replicated metadata)")
+
+        # Create EC data pool for RBD
+        ec_config = {
+            "pool_name": rbd_ec_data_pool,
+            "profile_name": "rbd-ec-profile",
+            "k": 2,
+            "m": 2,
+            "app_name": "rbd",
+            "crush-failure-domain": crush_failure_domain,
+            "enable_fast_ec_features": enable_fast_ec_config_params,
+            "stripe_unit": 16384,
+        }
+
+        if not self.create_erasure_pool(**ec_config):
+            raise Exception(f"Failed to create RBD EC data pool {rbd_ec_data_pool}")
+        log.info(f"Created RBD EC data pool: {rbd_ec_data_pool}")
+
+        # Create replicated metadata pool for RBD
+        if not self.create_pool(pool_name=rbd_metadata_pool, app_name="rbd"):
+            raise Exception(f"Failed to create RBD metadata pool {rbd_metadata_pool}")
+        log.info(f"Created RBD metadata pool: {rbd_metadata_pool}")
+
+        # Create RBD image with EC data pool
+        log.info(f"Creating RBD image: {image_name}")
+        cmd = f"rbd create --size {image_size} --data-pool {rbd_ec_data_pool} {rbd_metadata_pool}/{image_name}"
+        self.client.exec_command(cmd=cmd, sudo=True)
+        log.info(f"Created RBD image: {rbd_metadata_pool}/{image_name}")
+
+        # Mount the image
+        log.info("Mounting RBD image...")
+        mount_result = self.mount_image_on_client(
+            pool_name=rbd_metadata_pool,
+            img_name=image_name,
+            client_obj=self.client,
+            mount_path="/mnt/rbd-thrash/",
+        )
+
+        if not mount_result:
+            raise Exception("Failed to mount RBD image")
+
+        mount_path, device_path = mount_result
+        log.info(f"Mounted RBD image at {mount_path} (device: {device_path})")
+
+        created_pools = [
+            {
+                "pool_name": rbd_ec_data_pool,
+                "pool_type": "erasure",
+                "profile_name": "rbd-ec-profile",
+                "client": "rbd",
+            },
+            {
+                "pool_name": rbd_metadata_pool,
+                "pool_type": "replicated",
+                "client": "rbd",
+            },
+        ]
+
+        return mount_path, device_path, created_pools
+
+    def rotate_logs(self, hosts) -> bool:
+        """
+        Rotates logs on OSD nodes by forcing logrotate
+        Args:
+            hosts : Host objects
+        Returns: True -> pass, False -> fail
+        """
+        log.info("Forcing log rotation on OSD nodes...")
+        try:
+            fsid_result = self.run_ceph_command(cmd="ceph fsid")
+            fsid = (
+                fsid_result.get("fsid")
+                if isinstance(fsid_result, dict)
+                else fsid_result
+            )
+            if not fsid:
+                log.warning("Failed to get cluster FSID for log rotation")
+                return False
+
+            logrotate_cmd = f"logrotate -f /etc/logrotate.d/ceph-{fsid}"
+            for host in hosts:
+                try:
+                    host.exec_command(
+                        cmd=logrotate_cmd,
+                        sudo=True,
+                        check_ec=False,
+                        long_running=True,
+                    )
+                    time.sleep(10)
+                    log.debug(f"Log rotation completed on {host.hostname}")
+                except Exception:
+                    pass
+            log.info(f"Log rotation triggered on {len(hosts)} OSD host(s)")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to rotate logs: {e}")
+            return False
+
+    def create_replicated_rbd_pools(
+        self,
+        rbd_pool: str = "rbd-replicated",
+        image_name: str = "rbd-image",
+        image_size: str = "10G",
+        mount_path: str = "/mnt/rbd/",
+    ) -> tuple:
+        """
+        Create RBD replicated pools, image, and mount it.
+
+        Args:
+            rbd_pool: Replicated data pool name (default: "rbd-replicated")
+            image_name: RBD image name (default: "rbd-image")
+            image_size: Image size (default: "10G")
+            mount_path: Mount path on client (default: "/mnt/rbd/")
+
+        Returns:
+            Tuple of (mount_path, device_path, list of created pool configs)
+        """
+        log.info("Creating RBD pools (replicated data)")
+        log.debug(f"creating replicated data pool : {rbd_pool}")
+        # Create data pool (replicated)
+        assert self.create_pool(
+            pool_name=rbd_pool,
+            app_name="rbd",
+        ), f"Failed to create data pool {rbd_pool}"
+        log.debug(f"Created data pool: {rbd_pool}")
+
+        # Create RBD image with replicated data pool
+        log.info(f"Creating RBD image: {image_name}")
+        cmd = f"rbd create {rbd_pool}/{image_name} --size {image_size}"
+        self.client.exec_command(cmd=cmd, sudo=True)
+        log.info(f"Created RBD image: {rbd_pool}/{image_name}")
+
+        # Mount the image
+        log.info("Mounting RBD image...")
+        mount_result = self.mount_image_on_client(
+            pool_name=rbd_pool,
+            img_name=image_name,
+            client_obj=self.client,
+            mount_path=mount_path,
+        )
+
+        if not mount_result:
+            raise Exception("Failed to mount RBD image")
+
+        mount_path, device_path = mount_result
+        log.info(f"Mounted RBD image at {mount_path} (device: {device_path})")
+
+        created_pools = [
+            {
+                "pool_name": rbd_pool,
+                "pool_type": "replicated",
+                "client": "rbd",
+            },
+        ]
+
+        return mount_path, device_path, created_pools

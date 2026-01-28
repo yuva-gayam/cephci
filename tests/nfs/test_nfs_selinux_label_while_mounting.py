@@ -92,6 +92,7 @@ def run(ceph_cluster, **kw):
                 raise OperationFailedError(
                     "Selinux label is not the same as the NFS mount point"
                 )
+        return 0
 
     except Exception as e:
         log.error(
@@ -103,6 +104,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

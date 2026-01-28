@@ -19,7 +19,7 @@ tests:
               service: cephadm
               args:
                 rhcs-version: 8.1
-                release: rc
+                release: released
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
@@ -82,7 +82,7 @@ tests:
                       - node7
                   spec:
                     ssl: true
-                    rgw_frontend_ssl_certificate: create-cert
+                    generate_cert: true
       desc: bootstrap and deployment services with label placements.
       polarion-id: CEPH-83573777
       destroy-cluster: false
@@ -107,14 +107,40 @@ tests:
   - test:
       abort-on-fail: true
       config:
-        install:
-          - agent
-        run-on-rgw: true
-      desc: Setup and configure vault agent
-      destroy-cluster: false
-      module: install_vault.py
-      name: configure vault agent
-      polarion-id: CEPH-83575226
+        commands:
+          - "ceph config set client.rgw.rgw.ssl rgw_verify_ssl False"
+          - "ceph_version=$(ceph version | cut -d ' ' -f 3 | cut -d '-' -f 1); if [ \"$ceph_version\" = \"19.2.0\" ]; then ceph orch cert-store get cert cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; else ceph orch certmgr cert get cephadm_root_ca_cert > /home/cephuser/cephadm-root-ca.crt; fi"
+          - "sudo yum install -y sshpass"
+          - "sleep 20"
+          - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:node7}:/etc/pki/ca-trust/source/anchors/"
+          - "sshpass -p 'passwd' scp /home/cephuser/cephadm-root-ca.crt root@{node_ip:node8}:/etc/pki/ca-trust/source/anchors/"
+      name: copy-crt to rgw and client node
+      desc: Copying crt to rgw and client node
+      polarion-id: CEPH-83575227
+      module: exec.py
+
+  - test:
+      abort-on-fail: true
+      config:
+        role: rgw
+        sudo: True
+        commands:
+          - "update-ca-trust"
+      desc: update-ca-trust on rgw node
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: update-ca-trust on rgw node
+  - test:
+      abort-on-fail: true
+      config:
+        role: client
+        sudo: True
+        commands:
+          - "update-ca-trust"
+      desc: update-ca-trust on client node
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: update-ca-trust on client node
 
   - test:
       name: Manual Resharding tests pre upgrade
@@ -151,15 +177,6 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_Mbuckets_with_Nobjects_compression_zstd.yaml
-
-  - test:
-      config:
-        script-name: test_sse_s3_kms_with_vault.py
-        config-file-name: test_sse_s3_per_bucket_encryption_normal_object_upload.yaml
-      desc: test sse-s3 per bucket encryption pre upgrade
-      module: sanity_rgw.py
-      name: sse-s3 per bucket encryption test pre upgrade
-      polarion-id: CEPH-83574615 # CEPH-83574617, CEPH-83575151
 
   - test:
       name: Test NFS cluster and export create
@@ -220,15 +237,6 @@ tests:
         config-file-name: ../../s3cmd/configs/test_get_s3cmd.yaml
 
   - test:
-      config:
-        script-name: test_sse_s3_kms_with_vault.py
-        config-file-name: test_sse_s3_per_bucket_encryption_multipart_object_upload.yaml
-      module: sanity_rgw.py
-      desc: test sse-s3 per bucket encryption with multipart post upgrade
-      name: test sse-s3 per bucket encryption with multipart post upgrade
-      polarion-id: CEPH-83575155
-
-  - test:
       name: compresstion_with_zstd_type post upgarde
       desc: test compresstion with zstd type post upgarde
       polarion-id: CEPH-11350
@@ -245,3 +253,33 @@ tests:
       config:
         script-name: ../nfs_ganesha/nfs_cluster.py
         config-file-name: ../../nfs_ganesha/config/nfs_cluster_delete.yaml
+
+  - test:
+      abort-on-fail: true
+      config:
+        install:
+          - agent
+        run-on-rgw: true
+      desc: Setup and configure vault agent
+      destroy-cluster: false
+      module: install_vault.py
+      name: configure vault agent
+      polarion-id: CEPH-83575226
+
+  - test:
+      config:
+        script-name: test_sse_s3_kms_with_vault.py
+        config-file-name: test_sse_s3_per_bucket_encryption_normal_object_upload.yaml
+      desc: test sse-s3 per bucket encryption post upgrade
+      module: sanity_rgw.py
+      name: sse-s3 per bucket encryption test post upgrade
+      polarion-id: CEPH-83574615 # CEPH-83574617, CEPH-83575151
+
+  - test:
+      config:
+        script-name: test_sse_s3_kms_with_vault.py
+        config-file-name: test_sse_s3_per_bucket_encryption_multipart_object_upload.yaml
+      module: sanity_rgw.py
+      desc: test sse-s3 per bucket encryption with multipart post upgrade
+      name: test sse-s3 per bucket encryption with multipart post upgrade
+      polarion-id: CEPH-83575155

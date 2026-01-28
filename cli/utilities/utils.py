@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import shlex
 import string
 import tempfile
 from datetime import datetime
@@ -632,6 +633,11 @@ def check_coredump_generated(node, coredump_path, created_after):
     if file_name == "":
         return False
 
+    # Sometimes coredump filenames have scpecial characters
+    # eg: core.ganesha\x2enfsd.0.6e2930c3611b4d0e8354cafca94c3b0f.86780.1766206231000000.zst
+    # So, properly escape the filename for shell execution to handle special characters like \x2e
+    file_name = shlex.quote(file_name.strip())
+
     # Get the file creation time
     cmd = f"stat -c '%w' {coredump_path}/{file_name}"
     created_time, _ = node.exec_command(cmd=cmd, sudo=True)
@@ -667,6 +673,11 @@ def create_files(client, mount_point, file_count, windows_client=False):
                 )
             else:
                 cmd = f"dd if=/dev/urandom of={mount_point}/file{i} bs=1 count=1"
+                # create a file with touch command instead of dd command to avoid the error "No space left on device"
+                client.exec_command(
+                    sudo=True,
+                    cmd=f"touch {mount_point}/file{i}",
+                )
                 client.exec_command(
                     sudo=True,
                     cmd=cmd,

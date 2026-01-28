@@ -19,8 +19,9 @@ tests:
           verbose: true
         args:
           mon-ip: node1
-          rhcs-version: 8.0
+          rhcs-version: 8.1
           release: rc
+          platform: rhel-9
           ssh-user: cephuser
           apply-spec:
             - service_type: host
@@ -100,36 +101,36 @@ tests:
                     label: osd
                   spec:
                     data_devices:
-                      all: "true"                         # boolean as string
+                      all: "true" # boolean as string
           - config:
               command: shell
               args: # display OSD tree
                 - "ceph osd tree"
 
   - test:
-        name: MDS Service deployment with spec
-        desc: Add MDS services using spec file
-        module: test_cephadm.py
-        polarion-id: CEPH-83574728
-        config:
-          steps:
-            - config:
-                command: shell
-                args: # arguments to ceph orch
-                  - ceph
-                  - fs
-                  - volume
-                  - create
-                  - cephfs
-            - config:
-                command: apply_spec
-                service: orch
-                validate-spec-services: true
-                specs:
-                  - service_type: mds
-                    service_id: cephfs
-                    placement:
-                      label: mds
+      name: MDS Service deployment with spec
+      desc: Add MDS services using spec file
+      module: test_cephadm.py
+      polarion-id: CEPH-83574728
+      config:
+        steps:
+          - config:
+              command: shell
+              args: # arguments to ceph orch
+                - ceph
+                - fs
+                - volume
+                - create
+                - cephfs
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: mds
+                  service_id: cephfs
+                  placement:
+                    label: mds
 
   - test:
       name: RGW Service deployment
@@ -154,12 +155,12 @@ tests:
       polarion-id:
       config:
         command: add
-        id: client.1                      # client Id (<type>.<Id>)
+        id: client.1 # client Id (<type>.<Id>)
         node: node10
         install_packages:
           - ceph-common
           - ceph-base
-        copy_admin_keyring: true          # Copy admin keyring to node
+        copy_admin_keyring: true # Copy admin keyring to node
         caps: # authorize client capabilities
           mon: "allow *"
           osd: "allow *"
@@ -190,33 +191,21 @@ tests:
             - osd_linkspeed
       desc: Enable Cluster Configuration checks
 
-# RHOS-d run duration: 1 min
-# env: VM + BM
+  # RHOS-d run duration: 1 min
+  # env: VM + BM
   - test:
       name: config source changes log
       module: test_mon_config_history.py
       polarion-id: CEPH-83573479
       desc: Config sources - Verify config source changes in the log
 
-# RHOS-d run duration: 1 min
-# env: VM + BM
+  # RHOS-d run duration: 1 min
+  # env: VM + BM
   - test:
       name: config source changes reset
       module: test_mon_config_reset.py
       polarion-id: CEPH-83573478
       desc: Config sources - Verify config source changes and reset config
-
-# RHOS-d run duration: 8 mins
-  - test:
-      name: autoscaler flags
-      module: test_pg_autoscale_flag.py
-      polarion-id: CEPH-83574794
-      config:
-        pool_configs_path: "conf/tentacle/rados/test-confs/pool-configurations.yaml"
-        create_ec_pool: true
-        create_re_pool: true
-      desc: verify autoscaler flags functionality
-      comments: "Active bug 2361441"
 
   - test:
       name: Enable Stretch mode on pools
@@ -253,6 +242,18 @@ tests:
             - test-pool-12
       desc: Enable 3 AZ stretch mode on new pools of the cluster post upgrade
 
+  # RHOS-d run duration: 8 mins
+  - test:
+      name: autoscaler flags
+      module: test_pg_autoscale_flag.py
+      polarion-id: CEPH-83574794
+      config:
+        pool_configs_path: "conf/tentacle/rados/test-confs/pool-configurations.yaml"
+        create_ec_pool: true
+        create_re_pool: true
+      desc: verify autoscaler flags functionality
+  #      comments: "Active bug 2361441"
+
   - test:
       name: Site-down Scenarios
       module: test_stretch_n_az_site_down_scenarios.py
@@ -287,6 +288,16 @@ tests:
       desc: negative scenarios with stretch pool enable command
 
   - test:
+      name: Netsplit detection and warning
+      module: test_netsplit_detection_and_warning.py
+      polarion-id: CEPH-83620060
+      config:
+        stretch_bucket: datacenter
+        tiebreaker_mon_site_name: tiebreaker
+        delete_pool: true
+      desc: Netsplit detection and warning in stretch mode
+
+  - test:
       name: Netsplit Scenarios data-data sites
       module: test_stretch_n-az_netsplit_scenarios.py
       polarion-id: CEPH-83609870
@@ -298,4 +309,28 @@ tests:
         delete_pool: true
         rule_name: 3az_rule
       desc: Test stretch Cluster netsplit scenario between data site and tiebreaker site
-      comments: Bugzilla for feature 2318936, 2316900
+
+  - test:
+      name: Mon and Mgr Serviceability Scenarios
+      module: test_stretch_n_az_mon_serviceability_scenarios.py
+      polarion-id: CEPH-83609798
+      config:
+        stretch_bucket: datacenter
+        scenarios_to_run:
+          - scenario-1
+          - scenario-2
+          - scenario-3
+          - scenario-4
+          - scenario-5
+          - scenario-6
+          - scenario-7
+      desc: Test mon and mgr serviceability scenarios in 3 AZ stretch cluster
+
+  - test:
+      name: N az stretch revert holistic test
+      module: test_n_az_revert_stretch_holistic_test.py
+      polarion-id: CEPH-83620034
+      config:
+        rule_name: 3az_rule
+        stretch_bucket: datacenter
+      desc: N az stretch revert holistic test

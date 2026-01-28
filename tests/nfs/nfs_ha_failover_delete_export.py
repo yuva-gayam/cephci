@@ -2,7 +2,7 @@ import json
 from threading import Thread
 from time import sleep
 
-from nfs_operations import perform_failover
+from nfs_operations import nfs_log_parser, perform_failover
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
@@ -95,7 +95,7 @@ def run(ceph_cluster, **kw):
         if out != "[]":
             raise OperationFailedError("All export not deleted")
             return 1
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
         log.info("Cleaning up")
@@ -116,9 +116,9 @@ def run(ceph_cluster, **kw):
         cmd = "ceph fs subvolumegroup rm cephfs ganeshagroup --force"
         clients[0].exec_command(sudo=True, cmd=cmd)
         return 1
-
     finally:
         log.info("Cleaning up")
+        nfs_log_parser(client=clients[0], nfs_node=nfs_nodes, nfs_name=servers)
         Ceph(clients[0]).nfs.cluster.delete(nfs_name)
         # Delete the subvolume
         for i in range(len(clients)):
@@ -135,4 +135,3 @@ def run(ceph_cluster, **kw):
         # Delete the subvolume group
         cmd = "ceph fs subvolumegroup rm cephfs ganeshagroup --force"
         clients[0].exec_command(sudo=True, cmd=cmd)
-    return 0

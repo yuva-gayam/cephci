@@ -61,8 +61,10 @@ def test_setup(fs_util, ceph_cluster, client):
     nfs_server = nfs_servers[0].node.hostname
     nfs_name = "cephfs-nfs"
 
-    client.exec_command(
-        sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+    fs_util.create_nfs(
+        client,
+        nfs_cluster_name=nfs_name,
+        nfs_server_name=nfs_server,
     )
     if wait_for_process(client=client, process_name=nfs_name, ispresent=True):
         log.info("ceph nfs cluster created successfully")
@@ -247,7 +249,7 @@ def run(ceph_cluster, **kw):
     """
     try:
         fs_util_v1 = FsUtilsV1(ceph_cluster)
-        mds_nodes = ceph_cluster.get_ceph_objects("mds")
+        mds_nodes = ceph_cluster.get_ceph_objects()
         clients = ceph_cluster.get_ceph_objects("client")
         config = kw.get("config")
         osp_cred = config.get("osp_cred")

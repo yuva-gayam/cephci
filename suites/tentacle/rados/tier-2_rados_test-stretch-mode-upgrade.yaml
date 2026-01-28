@@ -25,6 +25,7 @@ tests:
         args:
           rhcs-version: 7.1
           release: rc
+          platform: rhel-9
           mon-ip: node1
           orphan-initial-daemons: true
           registry-url: registry.redhat.io
@@ -208,8 +209,8 @@ tests:
       abort-on-fail: true
 
   - test:
-      name: Upgrade cluster to 8.0 ceph version
-      desc: Upgrade cluster to 8.0 version
+      name: Upgrade cluster to latest 8.1 ceph version
+      desc: Upgrade cluster to latest 8.1 version
       module: test_upgrade_warn.py
       polarion-id: CEPH-83574934
       config:
@@ -218,8 +219,9 @@ tests:
         base_cmd_args:
           verbose: true
         args:
-          rhcs-version: 8.0
+          rhcs-version: 8.1
           release: rc
+          platform: rhel-9
       abort-on-fail: false
 
   # "cephfs basic operations" and "nfs-ganesha_with_cephfs"
@@ -252,7 +254,7 @@ tests:
       desc: Verify forced recovery and healthy on a stretch configured cluster
 
   - test:
-      name: Upgrade ceph cluster to 9.0
+      name: Upgrade ceph cluster to 9.x
       desc: Upgrade cluster to latest version and check health warn
       module: test_upgrade_warn.py
       polarion-id: CEPH-83574934

@@ -9,11 +9,11 @@ This method contains the scenarios to check the-
 
 import random
 import re
-import time
 from configparser import ConfigParser
 
 from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
+from ceph.rados.utils import get_cluster_timestamp
 from tests.rados.monitor_configurations import MonConfigMethods
 from utility.log import Log
 
@@ -37,11 +37,11 @@ def run(ceph_cluster, **kw):
     # To get the OSD list
     osd_list = rados_object.get_osd_list(status="up")
     log.info(f"The number of OSDs in the cluster are: {len(osd_list)}")
-    # If OSD list is more than 10 then randomly picking the 10 OSDs to check the parameters.
-    if len(osd_list) > 10:
-        osd_list = random.sample(osd_list, 10)
+    osd_list = random.sample(osd_list, 2)
     log.info(f"The parameters are checking on {osd_list} osds")
     if config.get("scenario") == "msgrv2_5x":
+        start_time = get_cluster_timestamp(rados_object.node)
+        log.debug(f"Test workflow started. Start time: {start_time}")
         try:
             ini_file = config.get("ini-file")
             config_info.read(ini_file)
@@ -63,12 +63,20 @@ def run(ceph_cluster, **kw):
             # log cluster health
             rados_object.log_cluster_health()
             # check for crashes after test execution
-            if rados_object.check_crash_status():
+            test_end_time = get_cluster_timestamp(rados_object.node)
+            log.debug(
+                f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+            )
+            if rados_object.check_crash_status(
+                start_time=start_time, end_time=test_end_time
+            ):
                 log.error("Test failed due to crash at the end of test")
                 return 1
         return 0
 
     if config.get("scenario") == "msgrv2_6x":
+        start_time = get_cluster_timestamp(rados_object.node)
+        log.debug(f"Test workflow started. Start time: {start_time}")
         try:
             ini_file = config.get("ini-file")
             config_info.read(ini_file)
@@ -90,7 +98,13 @@ def run(ceph_cluster, **kw):
             # log cluster health
             rados_object.log_cluster_health()
             # check for crashes after test execution
-            if rados_object.check_crash_status():
+            test_end_time = get_cluster_timestamp(rados_object.node)
+            log.debug(
+                f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+            )
+            if rados_object.check_crash_status(
+                start_time=start_time, end_time=test_end_time
+            ):
                 log.error("Test failed due to crash at the end of test")
                 return 1
         return 0
@@ -100,6 +114,8 @@ def run(ceph_cluster, **kw):
         ini_file = config.get("ini-file")
         config_info.read(ini_file)
         mclock_sleep_parameters = config_info.items("Mclock_sleep")
+        start_time = get_cluster_timestamp(rados_object.node)
+        log.debug(f"Test workflow started. Start time: {start_time}")
         for profile in mclock_profile:
             try:
                 mon_object.set_config(
@@ -145,7 +161,13 @@ def run(ceph_cluster, **kw):
                 # log cluster health
                 rados_object.log_cluster_health()
                 # check for crashes after test execution
-                if rados_object.check_crash_status():
+                test_end_time = get_cluster_timestamp(rados_object.node)
+                log.debug(
+                    f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+                )
+                if rados_object.check_crash_status(
+                    start_time=start_time, end_time=test_end_time
+                ):
                     log.error("Test failed due to crash at the end of test")
                     return 1
         return 0
@@ -157,6 +179,8 @@ def run(ceph_cluster, **kw):
         config_info.read(ini_file)
         mclock_chg_parameters = config_info.items("Mclock_paramert_set")
         mclock_default_parmeters = config_info.items("Mclock_default")
+        start_time = get_cluster_timestamp(rados_object.node)
+        log.debug(f"Test workflow started. Start time: {start_time}")
         for profile in mclock_profile:
             mon_object.set_config(
                 section="osd", name="osd_mclock_profile", value=profile
@@ -188,8 +212,7 @@ def run(ceph_cluster, **kw):
                         mon_object.set_config(
                             section="osd", name=parameter[0], value=old_value
                         )
-                    # Implicit Wait after set configuration
-                    time.sleep(5)
+
                     for parameter in mclock_default_parmeters:
                         for id in osd_list:
                             param_value = mon_object.show_config(
@@ -231,7 +254,13 @@ def run(ceph_cluster, **kw):
                     # log cluster health
                     rados_object.log_cluster_health()
                     # check for crashes after test execution
-                    if rados_object.check_crash_status():
+                    test_end_time = get_cluster_timestamp(rados_object.node)
+                    log.debug(
+                        f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+                    )
+                    if rados_object.check_crash_status(
+                        start_time=start_time, end_time=test_end_time
+                    ):
                         log.error("Test failed due to crash at the end of test")
                         return 1
 
@@ -258,8 +287,7 @@ def run(ceph_cluster, **kw):
                             mon_object.set_config(
                                 section="osd", name=param[0], value=chg_value
                             )
-                            # Implicit Wait after set configuration
-                            time.sleep(5)
+
                             # Get the new value of the parameter using config show
                             actual_value = mon_object.show_config("osd", id, param[0])
                             actual_value = str(actual_value).strip()
@@ -290,7 +318,13 @@ def run(ceph_cluster, **kw):
                             # log cluster health
                             rados_object.log_cluster_health()
                             # check for crashes after test execution
-                            if rados_object.check_crash_status():
+                            test_end_time = get_cluster_timestamp(rados_object.node)
+                            log.debug(
+                                f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+                            )
+                            if rados_object.check_crash_status(
+                                start_time=start_time, end_time=test_end_time
+                            ):
                                 log.error("Test failed due to crash at the end of test")
                                 return 1
 

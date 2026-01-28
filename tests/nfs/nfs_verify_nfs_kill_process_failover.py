@@ -94,11 +94,12 @@ def run(ceph_cluster, **kw):
                 "The failover process failed and vip is not assigned to the available nodes"
             )
         log.info("VIP assigned to other nfs node successfully")
+        return 0
+
     except Exception as e:
         log.error(
             f"Failed to validate nfs process kill and failover on a ha cluster: {e}"
         )
         return 1
     finally:
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)

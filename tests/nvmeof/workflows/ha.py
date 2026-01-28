@@ -12,12 +12,15 @@ from ceph.ceph_admin.daemon import Daemon
 from ceph.ceph_admin.host import Host
 from ceph.ceph_admin.orch import Orch
 from ceph.parallel import parallel
-from ceph.utils import get_node_by_id, get_openstack_driver
+from ceph.utils import find_vm_node_by_hostname, get_node_by_id, get_openstack_driver
 from ceph.waiter import WaitUntil
 from tests.io.io_utils import get_max_clat_from_fio_output
 from tests.nvmeof.workflows.initiator import NVMeInitiator, validate_initiator
-from tests.nvmeof.workflows.nvme_gateway import NVMeGateway
-from tests.nvmeof.workflows.nvme_utils import deploy_nvme_service
+from tests.nvmeof.workflows.nvme_gateway import create_gateway
+from tests.nvmeof.workflows.nvme_utils import (
+    deploy_nvme_service,
+    nvme_gw_cli_version_adapter,
+)
 from utility.log import Log
 from utility.retry import retry
 from utility.utils import log_json_dump
@@ -40,6 +43,7 @@ class HighAvailability:
         """
         self.cluster = ceph_cluster
         self.config = config
+        self.gw_list = gateways
         self.gateways = []
         self.mtls = config.get("mtls")
         self.gateway_group = config.get("gw_group", "")
@@ -49,18 +53,30 @@ class HighAvailability:
         self.nvme_pool = config["rbd_pool"]
         self.clients = []
         self.initiators = {}
-
-        for gateway in gateways:
-            gw_node = get_node_by_id(self.cluster, gateway)
-            self.gateways.append(NVMeGateway(gw_node, self.mtls))
-
-        self.ana_ids = [i.ana_group_id for i in self.gateways]
+        self.ana_ids = []
         self.fail_ops = {
             "systemctl": self.system_control,
             "daemon": self.ceph_daemon,
             "power_on_off": self.power_on_off,
             "maintanence_mode": self.maintanence_mode,
         }
+
+    def initialize_gateways(self):
+        """Initialize Gateways."""
+        version = nvme_gw_cli_version_adapter(self.cluster)
+
+        for gateway in self.gw_list:
+            gw_node = get_node_by_id(self.cluster, gateway)
+            self.gateways.append(
+                create_gateway(
+                    version,
+                    gw_node,
+                    mtls=self.mtls,
+                    shell=getattr(self.orch, "shell"),
+                    gw_group=self.gateway_group,
+                )
+            )
+        self.ana_ids = [i.ana_group_id for i in self.gateways]
 
     def check_gateway(self, node_id):
         """Check node is NVMeoF Gateway node.
@@ -80,35 +96,42 @@ class HighAvailability:
 
         if key not in self.initiators:
             node = get_node_by_id(self.cluster, node_id)
-            self.initiators[key] = NVMeInitiator(node, self.gateways[0], nqn)
+            self.initiators[key] = NVMeInitiator(node, nqn)
 
         return self.initiators[key]
 
     def create_dhchap_key(self, config, update_host_key=False):
-        """Generate DHCHAP key for each initiator and store it."""
+        """Generate DHCHAP key for subsystem (once) and unique keys for each initiator host."""
         subnqn = config["subnqn"]
-        group = config["gw_group"]
-        nqn = f"{subnqn}.{group}"
 
         for host_config in config["hosts"]:
             node_id = host_config["node"]
-            initiator = self.get_or_create_initiator(node_id, nqn)
+            initiator = self.get_or_create_initiator(node_id, subnqn)
 
-            # Generate key for subsystem NQN
-            key, _ = initiator.gen_dhchap_key(n=config["subnqn"])
-            LOG.info(f"{key.strip()} is generated for {nqn} and {node_id}")
+            # Case 1: Subsystem key (generate once and reuse for all hosts)
+            if not update_host_key:
+                if "subsys_key" not in config or config.get(
+                    "update_dhchap_key", False
+                ):  # only generate once
+                    key, _ = initiator.gen_dhchap_key(n=subnqn)
+                    config["subsys_key"] = key.strip()
+                    LOG.info(
+                        f"Generated subsystem key {config['subsys_key']} for {subnqn}"
+                    )
+                initiator.subsys_key = config["subsys_key"]
+                config["dhchap-key"] = config["subsys_key"]  # backward compatibility
 
-            initiator.nqn = config["subnqn"]
+            # Case 2: Host key (unique per initiator)
+            else:
+                key, _ = initiator.gen_dhchap_key(n=initiator.initiator_nqn())
+                host_config["dhchap-key"] = key.strip()
+                initiator.host_key = key.strip()
+                LOG.info(
+                    f"Generated host key {host_config['dhchap-key']} for host {node_id}"
+                )
+
+            initiator.nqn = subnqn
             initiator.auth_mode = config.get("auth_mode")
-            if initiator.auth_mode == "bidirectional" and not update_host_key:
-                initiator.subsys_key = key.strip()
-                initiator.host_key = key.strip()
-            if initiator.auth_mode == "unidirectional":
-                initiator.host_key = key.strip()
-            if update_host_key:
-                initiator.host_key = key.strip()
-            config["dhchap-key"] = key.strip()
-
             self.clients.append(initiator)
 
     def catogorize(self, gws):
@@ -462,43 +485,62 @@ class HighAvailability:
         Returns:
             Boolean
         """
-        osp_cred = self.config.get("osp_cred")
-        driver = get_openstack_driver(osp_cred)
-        ops = {
-            "start": driver.ex_start_node,
-            "stop": driver.ex_stop_node,
-            "is-active": self.is_node_active,
-        }
-        nodename = gateway.node.hostname.lower().replace("-", "_")
-        driver_node = next(
-            (
-                node
-                for node in driver.list_nodes()
-                if node.name.lower().replace("-", "_") == nodename
-            ),
-            None,
-        )
-
-        op = ops[action]
-        op(driver_node)
-
-        if wait_for_active_state is None:
-            return
-
-        is_active = ops["is-active"]
-        for w in WaitUntil(timeout=300):
-            _active = is_active(driver, driver_node)
-            if _active == wait_for_active_state:
-                LOG.info(f"[ {nodename} ] {action} is successfull.")
-                return True
-            LOG.warning(
-                f"[ {nodename} ] {action} is still not successfull. check again"
+        # check if cloud_type is openstack then power on/off the node
+        if self.config.get("cloud-type") == "openstack":
+            LOG.info(
+                f"Powering on/off {gateway.node.hostname} node in "
+                f"environment {self.config.get('cloud-type')} in {action} mode"
+            )
+            osp_cred = self.config.get("osp_cred")
+            driver = get_openstack_driver(osp_cred)
+            ops = {
+                "start": driver.ex_start_node,
+                "stop": driver.ex_stop_node,
+                "is-active": self.is_node_active,
+            }
+            nodename = gateway.node.hostname.lower().replace("-", "_")
+            driver_node = next(
+                (
+                    node
+                    for node in driver.list_nodes()
+                    if node.name.lower().replace("-", "_") == nodename
+                ),
+                None,
             )
 
-        if w.expired:
-            LOG.error(f"[ {nodename} ] {action} failed even after 300s timeout..")
+            op = ops[action]
+            op(driver_node)
 
-        return False
+            if wait_for_active_state is None:
+                return
+
+            is_active = ops["is-active"]
+            for w in WaitUntil(timeout=300):
+                _active = is_active(driver, driver_node)
+                if _active == wait_for_active_state:
+                    LOG.info(f"[ {nodename} ] {action} is successfull.")
+                    return True
+                LOG.warning(
+                    f"[ {nodename} ] {action} is still not successfull. check again"
+                )
+
+            if w.expired:
+                LOG.error(f"[ {nodename} ] {action} failed even after 300s timeout..")
+
+            return False
+        elif self.config.get("cloud-type") == "ibmc":
+            LOG.info(
+                f"Powering on/off {gateway.node.hostname} node in "
+                f"environment {self.config.get('cloud-type')} in {action} mode"
+            )
+            vm_node = find_vm_node_by_hostname(self.cluster, gateway.node.hostname)
+            if action == "start":
+                vm_node.power_on()
+                return True
+            elif action == "stop":
+                vm_node.shutdown(wait=True)
+                return True
+            return False
 
     def scale_down(self, gateway_nodes_to_be_scaleddown):
         """Scaling down of the NVMeoF Gateways.
@@ -540,7 +582,15 @@ class HighAvailability:
         self.gateways = []
         for gateway in self.config["gw_nodes"]:
             gw_node = get_node_by_id(self.cluster, gateway)
-            self.gateways.append(NVMeGateway(gw_node, self.mtls))
+            self.gateways.append(
+                create_gateway(
+                    nvme_gw_cli_version_adapter(self.cluster),
+                    gw_node,
+                    mtls=self.mtls,
+                    shell=getattr(self.orch, "shell"),
+                    gw_group=self.gateway_group,
+                )
+            )
 
         start_counter, start_time = get_current_timestamp()
         for gateway in to_be_scaledown_gws:
@@ -608,7 +658,15 @@ class HighAvailability:
 
         for gateway_node in scaleup_nodes:
             gw = get_node_by_id(self.cluster, gateway_node)
-            new_gws.append(NVMeGateway(gw, self.mtls))
+            new_gws.append(
+                create_gateway(
+                    nvme_gw_cli_version_adapter(self.cluster),
+                    gw,
+                    mtls=self.mtls,
+                    shell=getattr(self.orch, "shell"),
+                    gw_group=self.gateway_group,
+                )
+            )
 
         start_counter, start_time = get_current_timestamp()
         for gateway in new_gws:
@@ -686,7 +744,15 @@ class HighAvailability:
         self.gateways = []
         for gateway in gwnodes_to_be_deployed:
             gw_node = get_node_by_id(self.cluster, gateway)
-            self.gateways.append(NVMeGateway(gw_node, self.mtls))
+            self.gateways.append(
+                create_gateway(
+                    nvme_gw_cli_version_adapter(self.cluster),
+                    gw_node,
+                    mtls=self.mtls,
+                    shell=getattr(self.orch, "shell"),
+                    gw_group=self.gateway_group,
+                )
+            )
 
         # Validate ana_grp_ids post scale up
         for scaleup_node in scaleup_nodes:
@@ -740,7 +806,7 @@ class HighAvailability:
 
         return namespaces
 
-    def failover(self, gateway, fail_tool, namespaces):
+    def failover(self, gateway, fail_tool):
         """HA Failover on the NVMeoF Gateways.
 
         Initiate Failover
@@ -753,26 +819,8 @@ class HighAvailability:
         - Check for 5 Consecutive times for the increments in write/read to validate IO continuation.
         """
         hostname = gateway.hostname
-        initiators = self.config["initiators"]
-        io_tasks = []
-        if len(namespaces) >= 1:
-            max_workers = (
-                len(initiators) * len(namespaces) if initiators else len(namespaces)
-            )  # 20 devices + 10 buffer per initiator
-            executor = ThreadPoolExecutor(
-                max_workers=max_workers,
-            )
-        else:
-            executor = ThreadPoolExecutor()
 
         try:
-            # Start IO Execution
-            for initiator in self.clients:
-                io_tasks.append(executor.submit(initiator.start_fio, "1G"))
-            time.sleep(20)  # time sleep for IO to Kick-in
-
-            self.validate_io(namespaces)
-
             # Initiate Failover
             fail_op = self.fail_ops[fail_tool]
             LOG.info(
@@ -796,7 +844,6 @@ class HighAvailability:
                     # Find optimized path
                     # Condition to fail if multiple Active path exists for a gateway.
                     if active and 1 <= len(active) < 2:
-                        end_counter, end_time = get_current_timestamp()
                         LOG.info(
                             f"{list(active[0])} is new and only Active GW for failed {hostname}"
                         )
@@ -812,7 +859,6 @@ class HighAvailability:
                 raise TimeoutError(
                     f"[ {hostname} ] Failover of NVMeofGW service failed after 60s timeout.."
                 )
-            self.validate_io(namespaces)
 
             return {
                 "failed-gw": gateway,
@@ -821,29 +867,7 @@ class HighAvailability:
         except BaseException as err:  # noqa
             raise Exception(err)
 
-        finally:
-            # Wait for IO to complete and collect FIO outputs
-            if io_tasks:
-                LOG.info("Waiting for completion of IOs.")
-                executor.shutdown(wait=True, cancel_futures=True)
-                fio_outputs = []
-
-                for task in io_tasks:
-                    try:
-                        fio_outputs.append(task.result())
-                    except Exception as e:
-                        LOG.error(f"FIO execution failed: {e}")
-
-            # Extract failover time
-            for idx, output in enumerate(fio_outputs):
-                try:
-                    max_clat_in_ms = get_max_clat_from_fio_output(output[0][0])
-                    max_clat_in_sec = max_clat_in_ms / 1000
-                    LOG.info(f"Failover time for {max_clat_in_sec} ms")
-                except Exception as e:
-                    LOG.error(f"Failed to parse FIO output: {e}")
-
-    def failback(self, gateway, fail_tool, namespaces):
+    def failback(self, gateway, fail_tool):
         """Failback the Gateways.
 
         Args:
@@ -851,17 +875,6 @@ class HighAvailability:
             fail_tool: tool to fail the GW service
         """
         hostname = gateway.hostname
-        initiators = self.config["initiators"]
-        io_tasks = []
-        if len(namespaces) >= 1:
-            max_workers = (
-                len(initiators) * len(namespaces) if initiators else len(namespaces)
-            )  # 20 devices + 10 buffer per initiator
-            executor = ThreadPoolExecutor(
-                max_workers=max_workers,
-            )
-        else:
-            executor = ThreadPoolExecutor()
 
         # Initiate Fail-back
         fail_op = self.fail_ops[fail_tool]
@@ -869,13 +882,6 @@ class HighAvailability:
             f"[ {hostname} ]: Failback / Restore Gateway using {fail_tool} command"
         )
         try:
-            # Start IO Execution
-            for initiator in self.clients:
-                io_tasks.append(executor.submit(initiator.start_fio, "2G"))
-            time.sleep(20)  # time sleep for IO to Kick-in
-
-            self.validate_io(namespaces)
-
             res = fail_op(gateway=gateway, action="start", wait_for_active_state=True)
             if not res:
                 raise Exception(
@@ -893,7 +899,6 @@ class HighAvailability:
 
                         # check gateway for its own original path.
                         if gateway.ana_group["name"] in state:
-                            end_counter, end_time = get_current_timestamp()
                             LOG.info(
                                 f"{hostname} restored to original path - {log_json_dump(state)}"
                             )
@@ -913,7 +918,6 @@ class HighAvailability:
                 raise TimeoutError(
                     f"[ {hostname} ] Fail-back of NVMeofGW service failed even after 60s timeout.."
                 )
-            self.validate_io(namespaces)
 
             return {
                 "failed-gw": gateway,
@@ -922,30 +926,8 @@ class HighAvailability:
         except BaseException as err:  # noqa
             raise Exception(err)
 
-        finally:
-            # Wait for IO to complete and collect FIO outputs
-            if io_tasks:
-                LOG.info("Waiting for completion of IOs.")
-                executor.shutdown(wait=True, cancel_futures=True)
-                fio_outputs = []
-
-                for task in io_tasks:
-                    try:
-                        fio_outputs.append(task.result())
-                    except Exception as e:
-                        LOG.error(f"FIO execution failed: {e}")
-
-            # Extract failback time
-            for idx, output in enumerate(fio_outputs):
-                try:
-                    max_clat_in_ms = get_max_clat_from_fio_output(output[0][0])
-                    max_clat_in_sec = max_clat_in_ms / 1000
-                    LOG.info(f"Failback time for {max_clat_in_sec} ms")
-                except Exception as e:
-                    LOG.error(f"Failed to parse FIO output: {e}")
-
     @retry(IOError, tries=3, delay=3)
-    def compare_client_namespace(self, uuids):
+    def compare_client_namespace(self, uuids, FEWR_NAMESPACES=False):
         lsblk_devs = []
         for client in self.clients:
             lsblk_devs.extend(client.fetch_lsblk_nvme_devices())
@@ -953,8 +935,12 @@ class HighAvailability:
         LOG.info(
             f"Expected NVMe Targets : {set(list(uuids))} Vs LSBLK devices: {set(list(lsblk_devs))}"
         )
-        if sorted(uuids) != sorted(set(lsblk_devs)):
-            raise IOError("Few Namespaces are missing!!!")
+        if FEWR_NAMESPACES:
+            if not set(uuids).issubset(lsblk_devs):
+                raise IOError("Few Namespaces are missing!!!")
+        else:
+            if sorted(uuids) != sorted(set(lsblk_devs)):
+                raise IOError("Few Namespaces are missing!!!")
         LOG.info("All namespaces are listed at Client(s)")
         return True
 
@@ -971,7 +957,7 @@ class HighAvailability:
             if io_client.get("subnqn"):
                 nqn = io_client.get("subnqn")
             client = self.get_or_create_initiator(io_client["node"], nqn)
-            client.connect_targets(io_client)
+            client.connect_targets(self.gateways[0], io_client)
             if client not in self.clients:
                 self.clients.append(client)
         if return_clients:
@@ -987,7 +973,7 @@ class HighAvailability:
             list of namespaces
         """
         args = {"base_cmd_args": {"format": "json"}}
-        _, subsystems = gateway.subsystem.list(**args)
+        subsystems, _ = gateway.subsystem.list(**args)
         subsystems = json.loads(subsystems)
 
         namespaces = []
@@ -995,7 +981,7 @@ class HighAvailability:
         for subsystem in subsystems["subsystems"]:
             sub_name = subsystem["nqn"]
             cmd_args = {"args": {"subsystem": subsystem["nqn"]}}
-            _, nspaces = gateway.namespace.list(**{**args, **cmd_args})
+            nspaces, _ = gateway.namespace.list(**{**args, **cmd_args})
             nspaces = json.loads(nspaces)["namespaces"]
             all_ns.extend(nspaces)
 
@@ -1091,15 +1077,10 @@ class HighAvailability:
         """Validate that the namespace visibility is correct from all initiators."""
         for node in init_nodes:
             initiator_node = get_node_by_id(self.cluster, node)
-            client = NVMeInitiator(initiator_node, self.gateways[0])
+            client = NVMeInitiator(initiator_node)
             client.disconnect_all()  # Reconnect NVMe targets
-            client.connect_targets(config={"nqn": "connect-all"})
+            client.connect_targets(self.gateways[0], config={"nqn": "connect-all"})
             serial_to_namespace = defaultdict(set)
-
-            out, _ = initiator_node.exec_command(
-                sudo=True, cmd="cat /etc/os-release | grep VERSION_ID"
-            )
-            rhel_version = out.split("=")[1].strip().strip('"')
 
             @retry(
                 IOError,
@@ -1118,19 +1099,26 @@ class HighAvailability:
                 continue
 
             for device in devices_json:
-                if rhel_version == "9.5":
+                # --- Case 1: RHEL 9.5 style fields ---
+                # device["SerialNumber"] and device["NameSpace"]
+                if "SerialNumber" in device and "NameSpace" in device:
                     key = device["NameSpace"]
-                    value = int(device["SerialNumber"])
-                    serial_to_namespace[key].add(value)
-                elif rhel_version == "9.6":
-                    for subsys in device.get("Subsystems", []):
-                        for controller in subsys.get("Controllers", []):
-                            if controller.get("ModelNumber") == "Ceph bdev Controller":
-                                serial = controller.get("SerialNumber", "")
-                                value = int(serial)
-                                for ns in subsys.get("Namespaces", []):
-                                    key = ns.get("NSID")
-                                    serial_to_namespace[key].add(value)
+                    serial_to_namespace[key].add(int(device["SerialNumber"]))
+                    continue
+
+                # --- Case 2: RHEL 9.6 style NVMe subsystem/namespace/controller tree ---
+                for subsys in device.get("Subsystems", []):
+                    for controller in subsys.get("Controllers", []):
+                        if controller.get("ModelNumber") == "Ceph bdev Controller":
+                            serial = controller.get("SerialNumber")
+                            if serial is None:
+                                continue
+
+                            for ns in subsys.get("Namespaces", []):
+                                nsid = ns.get("NSID")
+                                if nsid is not None:
+                                    LOG.info(f"NSID: {nsid} Serial: {serial}")
+                                    serial_to_namespace[nsid].add(serial)
 
             def subsystem_nsid_found(dictionary, key, value):
                 return key in dictionary and value in dictionary[key]
@@ -1200,14 +1188,10 @@ class HighAvailability:
                     not expected_visibility
                 ):  # If expected visibility is False, devices should be empty
                     # Determine if devices list is empty (no Namespaces in any Subsystem)
-                    devices_json_empty = (
-                        all(
-                            not subsys.get("Namespaces")  # True if empty or missing
-                            for device in devices_json
-                            for subsys in device.get("Subsystems", [])
-                        )
-                        if rhel_version == "9.6"
-                        else not devices_json
+                    devices_json_empty = all(
+                        not subsys.get("Namespaces")  # True if empty or missing
+                        for device in devices_json
+                        for subsys in device.get("Subsystems", [])
                     )
                     if not devices_json_empty:  # Check if Devices is not empty
                         LOG.error(
@@ -1221,14 +1205,10 @@ class HighAvailability:
                 elif (
                     expected_visibility
                 ):  # If expected visibility is True, devices should not be empty
-                    devices_json_empty = (
-                        all(
-                            not subsys.get("Namespaces")  # True if empty or missing
-                            for device in devices_json
-                            for subsys in device.get("Subsystems", [])
-                        )
-                        if rhel_version == "9.6"
-                        else not devices_json
+                    devices_json_empty = all(
+                        not subsys.get("Namespaces")  # True if empty or missing
+                        for device in devices_json
+                        for subsys in device.get("Subsystems", [])
                     )
                     if devices_json_empty:
                         LOG.error(
@@ -1240,24 +1220,30 @@ class HighAvailability:
                     else:
                         # Log Namespace and SerialNumber from each device
                         for device in devices_json:
-                            if rhel_version == "9.5":
-                                namespace = device.get("NameSpace", None)
-                                serial_number = device.get("SerialNumber", None)
-                            elif rhel_version == "9.6":
-                                for subsys in device.get("Subsystems", []):
-                                    for controller in subsys.get("Controllers", []):
-                                        if (
-                                            controller.get("ModelNumber")
-                                            == "Ceph bdev Controller"
-                                        ):
-                                            serial_number = int(
-                                                controller.get("SerialNumber", "")
-                                            )
-                                            for ns in subsys.get("Namespaces", []):
-                                                namespace = ns.get("NSID")
-                                                LOG.info(
-                                                    f"Namespace: {namespace}, SerialNumber: {serial_number}"
-                                                )
+                            # --- Case 1: RHEL 9.5 style fields ---
+                            # device["SerialNumber"] and device["NameSpace"]
+                            if "SerialNumber" in device and "NameSpace" in device:
+                                key = device["NameSpace"]
+                                serial_to_namespace[key].add(
+                                    int(device["SerialNumber"])
+                                )
+                                continue
+
+                            # --- Case 2: RHEL 9.6 style NVMe subsystem/namespace/controller tree ---
+                            for subsys in device.get("Subsystems", []):
+                                for controller in subsys.get("Controllers", []):
+                                    if (
+                                        controller.get("ModelNumber")
+                                        == "Ceph bdev Controller"
+                                    ):
+                                        serial = controller.get("SerialNumber")
+                                        if serial is None:
+                                            continue
+
+                                        for ns in subsys.get("Namespaces", []):
+                                            nsid = ns.get("NSID")
+                                            if nsid is not None:
+                                                serial_to_namespace[nsid].add(serial)
                         LOG.info(
                             f"Validated - {len(devices_json)} devices found on {node}"
                         )
@@ -1318,21 +1304,33 @@ class HighAvailability:
 
         else:
             # Validate visibility based on the expected value (for non-add/del host commands)
-            # ns_visibility = str(ns_visibility)
-            LOG.info(command)
-            # if ns_visibility.lower() == expected_visibility.lower():
-            if ns_visibility == expected_visibility:
+            if str(ns_visibility).lower() == str(expected_visibility).lower():
                 LOG.info(
                     f"Validated - Namespace {nsid} has correct visibility: {ns_visibility}"
                 )
+            else:
                 LOG.error(
-                    f"NS {nsid} of {subnqn} has wrong visibility.Expected {expected_visibility} got{ns_visibility}"
+                    f"NS {nsid} of {subnqn} has wrong visibility.Expected {expected_visibility} got {ns_visibility}"
                 )
                 raise Exception(
                     f"NS {nsid} of {subnqn} has wrong visibility.Expected {expected_visibility} got {ns_visibility}"
                 )
 
-    def run(self):
+    def calculate_max_clat_time(self, fio_outputs):
+        # Extract failover time
+        # TODO: Current approach of extracting CLAT using regex will not work with different FIO
+        #  workload and clat duration calculation is invalid which needs modification using right approach.
+        #  Instead of CLI repsonse, modify the fio command to provide output json file
+        #  to parse and calculate the Completion latency.
+        for idx, output in enumerate(fio_outputs):
+            try:
+                max_clat_in_ms = get_max_clat_from_fio_output(output[0][0])
+                max_clat_in_sec = max_clat_in_ms / 1000
+                LOG.info(f"Failover time for {max_clat_in_sec} ms")
+            except Exception as e:
+                LOG.error(f"Failed to parse FIO output: {e}")
+
+    def run(self, FEWR_NAMESPACES=False):
         """Execute the HA failover and failback with IO validation."""
         fail_methods = self.config["fault-injection-methods"]
         initiators = self.config["initiators"]
@@ -1344,7 +1342,12 @@ class HighAvailability:
             self.prepare_io_execution(initiators)
 
             # Check for targets at clients
-            self.compare_client_namespace([i["uuid"] for i in namespaces])
+            if FEWR_NAMESPACES:
+                self.compare_client_namespace(
+                    [i["uuid"] for i in namespaces], FEWR_NAMESPACES=True
+                )
+            else:
+                self.compare_client_namespace([i["uuid"] for i in namespaces])
 
             repeat_ha_count = self.config.get("repeat_ha_count", 1)
 
@@ -1382,22 +1385,52 @@ class HighAvailability:
 
                     # Fail Over
                     with parallel() as p:
+                        initiators = self.config["initiators"]
+                        io_tasks = []
+
+                        # TODO: Move this outside of the run
+                        #   keep it as separate function.
+                        if len(namespaces) >= 1:
+                            max_workers = (
+                                len(initiators) * len(namespaces)
+                                if initiators
+                                else len(namespaces)
+                            )  # 20 devices + 10 buffer per initiator
+                            executor = ThreadPoolExecutor(
+                                max_workers=max_workers,
+                            )
+                        else:
+                            executor = ThreadPoolExecutor()
+
+                        # Start IO Execution
+                        for initiator in self.clients:
+                            io_tasks.append(
+                                executor.submit(initiator.start_fio, "100%")
+                            )
+                        time.sleep(20)  # time sleep for IO to Kick-in
+
+                        self.validate_io(namespaces)
+
+                        LOG.info("Failover started")
                         for gw in fail_gws:
                             if fail_tool == "daemon_redeploy":
                                 p.spawn(self.daemon_redeploy, gw)
                             else:
-                                p.spawn(self.failover, gw, fail_tool, namespaces)
+                                p.spawn(self.failover, gw, fail_tool)
                         for result in p:
                             if not isinstance(result, dict):
                                 raise Exception("Failover failed")
                             failed_gw = result.pop("failed-gw", None)
                             if not failed_gw:
                                 raise Exception("Failover failed")
+                        LOG.info("Failover Completed")
+
+                        self.validate_io(namespaces)
 
                         for gw in fail_gws:
                             active = self.get_optimized_state(gw.ana_group_id)
                             active_gw = list(active[0])[0]
-                            LOG.info(log_json_dump(result))
+                            LOG.info(log_json_dump(active_gw))
                             active_gw_obj = [
                                 gw
                                 for gw in self.gateways
@@ -1417,11 +1450,50 @@ class HighAvailability:
                             )
                             validate_initiator(self.clients, active_gw_obj, ns_list, gw)
 
+                        # Wait for IO to complete and collect FIO outputs
+                        fio_outputs = []
+                        if io_tasks:
+                            LOG.info("Waiting for completion of IOs.")
+                            executor.shutdown(wait=True, cancel_futures=True)
+
+                            for task in io_tasks:
+                                try:
+                                    fio_outputs.append(task.result())
+                                except Exception as e:
+                                    LOG.error(f"FIO execution failed: {e}")
+
+                        self.calculate_max_clat_time(fio_outputs)
+
                     # Fail Back
                     if fail_tool != "daemon_redeploy":
                         with parallel() as p:
+
+                            initiators = self.config["initiators"]
+                            io_tasks = []
+                            if len(namespaces) >= 1:
+                                max_workers = (
+                                    len(initiators) * len(namespaces)
+                                    if initiators
+                                    else len(namespaces)
+                                )  # 20 devices + 10 buffer per initiator
+                                executor = ThreadPoolExecutor(
+                                    max_workers=max_workers,
+                                )
+                            else:
+                                executor = ThreadPoolExecutor()
+
+                            # Start IO Execution
+                            for initiator in self.clients:
+                                io_tasks.append(
+                                    executor.submit(initiator.start_fio, "100%")
+                                )
+                            time.sleep(20)  # time sleep for IO to Kick-in
+
+                            self.validate_io(namespaces)
+
+                            LOG.info("Failback started")
                             for gw in fail_gws:
-                                p.spawn(self.failback, gw, fail_tool, namespaces)
+                                p.spawn(self.failback, gw, fail_tool)
                             for result in p:
                                 if not isinstance(result, dict):
                                     raise Exception("Failback failed")
@@ -1441,6 +1513,23 @@ class HighAvailability:
                                     f"Active gateway after failback is {failed_gw.node.ip_address}"
                                 )
                                 validate_initiator(self.clients, failed_gw, ns_list)
+                            LOG.info("Failback completed started")
+
+                            self.validate_io(namespaces)
+                            # Wait for IO to complete and collect FIO outputs
+                            fio_outputs = []
+                            if io_tasks:
+                                LOG.info("Waiting for completion of IOs.")
+                                executor.shutdown(wait=True, cancel_futures=True)
+
+                                for task in io_tasks:
+                                    try:
+                                        fio_outputs.append(task.result())
+                                    except Exception as e:
+                                        LOG.error(f"FIO execution failed: {e}")
+
+                            self.calculate_max_clat_time(fio_outputs)
+
                         time.sleep(20)
         except BaseException as err:  # noqa
             raise Exception(err)

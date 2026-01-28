@@ -96,7 +96,7 @@ def run(ceph_cluster, **kw):
         # Wait for all get attribute threads to complete
         for thread_get in get_attributes:
             thread_get.join()
-
+        return 0
     except Exception as e:
         log.error(f"Failed to validate extended attribute with parallel clients : {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -105,6 +105,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes)
         log.info("Cleaning up successful")
-    return 0

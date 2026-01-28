@@ -176,6 +176,7 @@ def run(ceph_cluster, **kw):
         # Wait to complete operations
         for Thread_operation in Thread_operations:
             Thread_operation.join()
+        return 0
 
     except Exception as e:
         log.error(
@@ -194,5 +195,6 @@ def run(ceph_cluster, **kw):
             log.info("Removing nfs-ganesha squash mount dir on client:")
             client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_squash_mount}")
         Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_squash)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(
+            clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )

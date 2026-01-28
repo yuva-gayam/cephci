@@ -5,7 +5,6 @@ import os
 import random
 import re
 import smtplib
-import subprocess
 import time
 import traceback
 from copy import deepcopy
@@ -13,7 +12,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from ipaddress import ip_address
 from string import ascii_uppercase, digits
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib import request
 
 import requests
@@ -25,7 +24,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja_markdown import MarkdownExtension
-from reportportal_client import ReportPortalService
 
 from utility.log import Log
 
@@ -53,9 +51,16 @@ magna_server = "http://magna002.ceph.redhat.com"
 magna_url = f"{magna_server}/cephci-jenkins/"
 magna_rhcs_artifacts = f"{magna_server}/cephci-jenkins/latest-rhceph-container-info/"
 KAFKA_HOME = "/usr/local/kafka"
+MANIFEST_URL = (
+    "https://raw.githubusercontent.com/ibmstorage/qe-ceph-manifest/refs/heads/main/"
+)
 
 
 class TestSetupFailure(Exception):
+    pass
+
+
+class GKLMSetupError(Exception):
     pass
 
 
@@ -870,26 +875,6 @@ def create_run_dir(run_id, log_dir=""):
     return base_dir
 
 
-def create_report_portal_session():
-    """
-    Configures and creates a session to the Report Portal instance.
-
-    Returns:
-        The session object
-    """
-    cfg = get_cephci_config()["report-portal"]
-
-    try:
-        return ReportPortalService(
-            endpoint=cfg["endpoint"],
-            project=cfg["project"],
-            token=cfg["token"],
-            verify_ssl=False,
-        )
-    except BaseException:  # noqa
-        print("Encountered an issue in connecting to report portal.")
-
-
 def timestamp():
     """
     The current epoch timestamp in milliseconds as a string.
@@ -1093,7 +1078,7 @@ def email_results(test_result):
     run_status = get_run_status(results_list)
     msg["Subject"] = "[{run_status}]  Suite:{suite}  Build:{compose}  ID:{id}".format(
         suite=results_list[0]["suite-name"],
-        compose=results_list[0]["compose-id"],
+        compose=results_list[0]["ceph-version"],
         run_status=run_status,
         id=run_id,
     )
@@ -1105,7 +1090,7 @@ def email_results(test_result):
 
     props_content = f"""
     run_status=\"{run_status}\"
-    compose=\"{results_list[0]['compose-id']}\"
+    compose=\"{results_list[0]['ceph-version']}\"
     suite=\"{results_list[0]['suite-name']}\"
     """
 
@@ -1457,14 +1442,52 @@ def generate_self_signed_certificate(subject: Dict) -> Tuple:
     )
 
 
+def get_build_details(product: str, release: str, build_type: str) -> dict[str, Any]:
+    """Retrieves the build details based on the provided input.
+
+    The build details are stored in qe-ceph-manifest repository. It
+    contains test artifact information for various supported releases
+    and ceph version.
+
+    Args:
+        product:    The type of Ceph version required. Supported types are
+                    ceph, redhat, ibm
+        release:    The product version that needs to queried. Ex. 9.0
+        platform:   The test platform operating systems. Ex. rhel-9
+        build_type: The section or build details that needs to be queried.
+
+    Returns:
+        A dict holding the build details.
+    """
+    try:
+        _url = MANIFEST_URL
+        if product == "upstream" or product == "community" or product == "ceph":
+            _url += "ceph/"
+        elif product == "redhat":
+            _url += "redhat/"
+        else:
+            _url += "ibm/"
+
+        _url += f"{release}"
+
+        release_details = requests.get(_url, verify=False)
+        build_details = yaml.safe_load(release_details.text)
+
+        return build_details[build_type]
+
+    except requests.RequestException as e:
+        raise RuntimeError("Resource not found. %s threw \n%s", _url, e)
+    except yaml.YAMLError as e:
+        raise RuntimeError("Unexpected error encountered during reterival. \n%s", e)
+
+
 def fetch_build_artifacts(
     build, ceph_version, platform, upstream_build=None, ibm_build=False
 ):
-    """Retrieves build details from magna002.ceph.redhat.com.
+    """Retrieves build details from qe-ceph-manifest.
 
     if "{build}" is "upstream"  "{build}.yaml" would be file name
-    else its "RHCEPH-{ceph_version}.yaml" which is
-    searched in magna002 Ceph artifacts location.
+    else its redhat/{ceph_version}.yaml" from the repository.
 
     Args:
         ceph_version: RHCS version
@@ -1472,45 +1495,42 @@ def fetch_build_artifacts(
         platform: OS distribution name with major Version(ex., rhel-8)
         upstream_build: upstream build(ex., pacific/quincy)
         ibm_build: flag to decide if IBM artifact needs to be fetched
+
     Returns:
         base_url, container_registry, image-name, image-tag
     """
-    try:
-        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
-        filename = f"RHCEPH-{ceph_version}.yaml"
-        if ibm_build:
-            filename = f"IBMCEPH-{ceph_version}.yaml"
-        if build == "upstream":
-            version = str(upstream_build).upper() if upstream_build else "MAIN"
-            filename = f"UPSTREAM-{version}.yaml"
+    log.warning(
+        "[Deprecated] This method is deprecated in favor of CephTestManifest object."
+    )
 
-        url = f"{recipe_url}{filename}"
-        data = requests.get(url, verify=False)
-        yml_data = yaml.safe_load(data.text)
+    datacenter = get_cephci_config().get("datacenter", "default")
+    if datacenter == "redhat":
+        datacenter = "default"
 
-        build_info = yml_data["latest"] if build == "upstream" else yml_data[build]
+    product = "redhat"
+    if ibm_build:
+        product = "ibm"
 
-        container_image = build_info["repository"]
+    if build == "upstream":
+        product = "ceph"
+        build = "nightly"
+        ceph_version = "main"
 
-        registry, image_name = container_image.split(":")[0].split("/", 1)
-        image_tag = container_image.split(":")[-1]
-        base_url = build_info["composes"][platform]
+    if upstream_build:
+        product = "ceph"
 
-        # Todo: Extend the support for RH builds if RH staging repos
-        # are no longer maintained in future
-        if ibm_build:
-            _release = str(ceph_version)[0]
-            ibm_cdn_repo = (
-                f"https://public.dhe.ibm.com/ibmdl/export/pub/"
-                f"storage/ceph/ibm-storage-ceph-{_release}-{platform}.repo"
-            )
-            repo_data = requests.get(base_url)
-            if repo_data.status_code != 200:
-                base_url = ibm_cdn_repo
+    build_details: dict[str, Any] = get_build_details(product, ceph_version, build)
+    ceph_image: str = build_details["images"]["ceph-base"]
+    _dtr: str = ceph_image.split("/", 1)[0]
+    _tag: str = ceph_image.split(":")[-1]
+    _image_path: str = ceph_image.split("/", 1)[-1].split(":")[0]
 
-        return base_url, registry, image_name, image_tag
-    except Exception as e:
-        raise TestSetupFailure(f"Could not fetch build details of : {e}")
+    return (
+        build_details["repositories"][datacenter][platform],
+        _dtr,
+        _image_path,
+        _tag,
+    )
 
 
 def fetch_image_manifest(
@@ -1530,60 +1550,27 @@ def fetch_image_manifest(
     Returns:
         Tuple: (build_info_dict, custom_images_dict)
     """
-    try:
-        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
+    log.warning(
+        "[Deprecated] This method is deprecated in favor of CephTestManifest object."
+    )
+    log.warning("[UnSupported]: platform is not used - %s", platform)
 
-        # Determine filename
-        if ibm_build:
-            filename = f"IBMCEPH-{ceph_version}.yaml"
-        elif build == "upstream":
-            version = str(upstream_build).upper() if upstream_build else "MAIN"
-            filename = f"UPSTREAM-{version}.yaml"
-        else:
-            filename = f"RHCEPH-{ceph_version}.yaml"
+    datacenter = get_cephci_config().get("datacenter", "default")
+    if datacenter == "redhat":
+        datacenter = "default"
 
-        url = f"{recipe_url}{filename}"
-        response = requests.get(url, verify=False)
-        if response.status_code != 200:
-            raise TestSetupFailure(
-                f"Failed to fetch: {url} [HTTP {response.status_code}]"
-            )
+    product = "redhat"
+    if ibm_build:
+        product = "ibm"
 
-        yml_data = yaml.safe_load(response.text)
+    if upstream_build:
+        product = "ceph"
 
-        # Fetch the dictionary for the specific build tag
-        build_info = yml_data.get(build)
-        if not build_info:
-            raise TestSetupFailure(f"Build tag '{build}' not found in {filename}")
+    build_details: dict[str, Any] = get_build_details(product, ceph_version, build)
+    _custom_images = deepcopy(build_details["images"])
+    del _custom_images["ceph-base"]
 
-        # For IBM builds, handle fallback logic for repo URL
-        if (
-            ibm_build
-            and "composes" in build_info
-            and platform in build_info["composes"]
-        ):
-            base_url = build_info["composes"][platform]
-            repo_data = requests.get(base_url)
-            if repo_data.status_code != 200:
-                release_major = str(ceph_version).split(".")[0]
-                build_info["composes"][platform] = (
-                    f"https://public.dhe.ibm.com/ibmdl/export/pub/"
-                    f"storage/ceph/ibm-storage-ceph-{release_major}-{platform}.repo"
-                )
-
-        # Extract all custom image URLs
-        custom_images = {}
-
-        custom_configs = build_info.get("custom-configs", {})
-        if isinstance(custom_configs, dict):
-            custom_images = deepcopy(custom_configs)
-        elif isinstance(custom_configs, list):
-            custom_images = dict(item.split("=") for item in custom_configs)
-
-        return build_info, custom_images
-
-    except Exception as e:
-        raise TestSetupFailure(f"Could not fetch build details: {e}")
+    return build_details, _custom_images
 
 
 def check_build_overrides(
@@ -1617,162 +1604,6 @@ def check_build_overrides(
         return False
     elif 0 < values < length:
         raise Exception(f"{check_build_overrides.__doc__}")
-
-
-def rp_deco(func):
-    def inner_method(cls, *args, **kwargs):
-        if not cls.client:
-            return
-
-        try:
-            func(cls, *args, **kwargs)
-        except BaseException as be:  # noqa
-            log.debug(be, exc_info=True)
-            log.warning("Encountered an error during report portal operation.")
-
-    return inner_method
-
-
-class ReportPortal:
-    """Handles logging to report portal."""
-
-    def __init__(self):
-        """Initializes the instance."""
-        cfg = get_cephci_config()
-        access = cfg.get("report-portal")
-
-        self.client = None
-        self._test_id = None
-
-        if access:
-            try:
-                self.client = ReportPortalService(
-                    endpoint=access["endpoint"],
-                    project=access["project"],
-                    token=access["token"],
-                    verify_ssl=False,
-                )
-            except BaseException:  # noqa
-                log.warning("Unable to connect to Report Portal.")
-
-    @rp_deco
-    def start_launch(self, name: str, description: str, attributes: dict) -> None:
-        """
-        Initiates a test execution with the provided details
-
-        Args:
-            name (str):         Name of test execution.
-            description (str):  Meta data information to be added to the launch.
-            attributes (dict):  Meta data information as dict
-
-        Returns:
-             None
-        """
-        self.client.start_launch(
-            name, start_time=timestamp(), description=description, attributes=attributes
-        )
-
-    @rp_deco
-    def start_test_item(self, name: str, description: str, item_type: str) -> None:
-        """
-        Records an entry within the initiated launch.
-
-        Args:
-            name (str):         Name to be set for the test step
-            description (str):  Meta information to be used.
-            item_type (str):    Type of entry to be created.
-
-        Returns:
-            None
-        """
-        self._test_id = self.client.start_test_item(
-            name, start_time=timestamp(), item_type=item_type, description=description
-        )
-
-    @rp_deco
-    def finish_test_item(self, status: Optional[str] = "PASSED") -> None:
-        """
-        Ends a test entry with the given status.
-
-        Args:
-            status (str):
-        """
-        if not self._test_id:
-            return
-
-        self.client.finish_test_item(
-            item_id=self._test_id, end_time=timestamp(), status=status
-        )
-
-    @rp_deco
-    def finish_launch(self) -> None:
-        """Closes the Report Portal execution run."""
-        self.client.finish_launch(end_time=timestamp())
-        self.client.terminate()
-        tfacon(self.client.get_launch_ui_id())
-
-    @rp_deco
-    def log(self, message: str, level="INFO") -> None:
-        """
-        Adds log records to the event.
-
-        Args:
-            message (str):  Message to be logged.
-            level (str):    The level at which the record has to be logged.
-
-        Returns:
-            None
-        """
-        self.client.log(
-            time=timestamp(),
-            message=message.__str__(),
-            level=level,
-            item_id=self._test_id,
-        )
-
-
-def tfacon(launch_id):
-    """
-    Connects the launch with TFA and gives the predictions for the launch
-    It will fail silently
-
-    Args:
-         launch_id : launch_id that has been created
-    """
-    cfg = get_cephci_config()
-    tfacon_cfg = cfg.get("tfacon")
-    if not tfacon_cfg:
-        return
-    project_name = tfacon_cfg.get("project_name")
-    auth_token = tfacon_cfg.get("auth_token")
-    platform_url = tfacon_cfg.get("platform_url")
-    tfa_url = tfacon_cfg.get("tfa_url")
-    re_url = tfacon_cfg.get("re_url")
-    connector_type = tfacon_cfg.get("connector_type")
-    cmd = (
-        f"~/.local/bin/tfacon run --auth-token {auth_token} "
-        f"--connector-type {connector_type} "
-        f"--platform-url {platform_url} "
-        f"--project-name {project_name} "
-        f"--tfa-url {tfa_url} "
-        f"--re-url {re_url} -r "
-        f"--launch-id {launch_id}"
-    )
-    log.info(cmd)
-    p1 = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdin=None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    result, result_err = p1.communicate()
-
-    log.info(result.decode("utf-8"))
-    if p1.returncode != 0:
-        log.warning("Unable to get the TFA anaylsis for the results")
-        log.warning(result_err.decode("utf-8"))
-        log.warning(result.decode("utf-8"))
 
 
 def install_start_kafka(rgw_node, cloud_type):
@@ -2034,7 +1865,7 @@ def configure_kafka_cluster_with_security(ceph_cluster, cloud_type):
         log.info(f"installing kafka on node {rgw_node.ip_address}")
         rgw_node.exec_command(
             sudo=True,
-            cmd="yum install -y https://download.oracle.com/java/24/latest/jdk-24_linux-x64_bin.rpm",
+            cmd="yum install -y https://download.oracle.com/java/25/latest/jdk-25_linux-x64_bin.rpm",
         )
         install_kafka(rgw_node, cloud_type)
         rgw_node.exec_command(
@@ -2237,6 +2068,30 @@ def clone_the_repo(config, node, path_to_clone):
     repo_url = config.get("git-url")
     log.info(f"repo_url: {repo_url}")
     git_clone_cmd = f"sudo git clone {repo_url} -b {branch}"
+    node.exec_command(cmd=f"cd {path_to_clone} ; {git_clone_cmd}")
+
+
+def clone_configs_repo(node, repo_name=None):
+    """clone the repo on to test node.
+
+    Args:
+        node: ceph node
+        repo_name: fetches the git repo details based on this repo_name from .cephci.yaml
+
+    """
+    try:
+        repo_dict = get_cephci_config()["repos"][repo_name]
+    except KeyError:
+        raise Exception(
+            f"Repo details are missing for the key {repo_name} in ~/.cephci.yaml to clone it on the node."
+        )
+    repo_url = repo_dict["git_url"]
+    log.info(f"cloning the repo {repo_url}")
+    path_to_clone = repo_dict["dest"]
+    oauth_token = repo_dict.get("oauth_token")
+    if oauth_token:
+        repo_url = repo_url.replace("https://", f"https://oauth2:{oauth_token}@")
+    git_clone_cmd = f"git clone --depth 1 {repo_url}"
     node.exec_command(cmd=f"cd {path_to_clone} ; {git_clone_cmd}")
 
 
@@ -2447,6 +2302,8 @@ def run_fio(**fio_args):
             fio_file = f"{fio_args['output_dir']}/{fio_file}"
         cmd_args.update({"output-format": output_fmt, "output": fio_file})
 
+    if fio_args.get("output"):
+        cmd_args.update({"output": True})
     # Execute FIO
     exec_args = {
         "cmd": f"fio {config_dict_to_string(cmd_args)}",
@@ -2489,8 +2346,8 @@ def fetch_image_tag(rhbuild):
         raise TestSetupFailure(f"Could not fetch image tag : {e}")
 
 
-def fetch_build_version(rhbuild, version, ibm_build=None):
-    """Retrieves ceph-version from magna002 artifacts
+def fetch_build_version(rhbuild, version, upstream_build=None, ibm_build=None):
+    """Retrieves ceph-version from the manifest artifacts
     for a particular build
 
         Args:
@@ -2501,21 +2358,26 @@ def fetch_build_version(rhbuild, version, ibm_build=None):
             ceph-version from recipe file
             e.g. - 19.2.1-230 | 18.2.1-340
     """
-    try:
-        # Todo: add support for Upstream build if necessary
-        _ver = str(rhbuild).split("-")[0]
-        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
-        filename = f"RHCEPH-{_ver}.yaml"
-        if ibm_build:
-            filename = f"IBMCEPH-{_ver}.yaml"
+    log.warning(
+        "[Deprecated] This method is deprecated in favor of CephTestManifest object."
+    )
 
-        url = f"{recipe_url}{filename}"
-        data = requests.get(url, verify=False)
-        yml_data = yaml.safe_load(data.text)
+    datacenter: str = get_cephci_config().get("datacenter", "default")
+    if datacenter == "redhat":
+        datacenter = "default"
 
-        return yml_data[version]["ceph-version"]
-    except Exception as e:
-        raise TestSetupFailure(f"Could not fetch build details of : {e}")
+    product: str = "redhat"
+    if ibm_build:
+        product = "ibm"
+
+    if upstream_build:
+        product = "ceph"
+
+    ceph_version: str = rhbuild.split("-", 1)[0]
+
+    build_details: dict[str, Any] = get_build_details(product, ceph_version, version)
+
+    return build_details["version"]
 
 
 def validate_conf(conf):
@@ -2905,3 +2767,113 @@ def restart_rgw_and_wait(rgw_node, rgw_service_name):
                 break
     else:
         log.info("RGW daemons are up and running")
+
+
+def setup_gklm_prereq(ceph_cluster, cloud_type, custom_config):
+    """setup GKLM authentication certs on the rgw nodes, redeploy rgw to mounted gklm certs path
+    and set ceph configs for sse-kms-kmip"""
+    log.info("setting up GKLM prerequisites")
+    rgw_nodes = ceph_cluster.get_ceph_objects("rgw")
+    gklm_auth_cert_path_remote = "/usr/local/gklm/rgwselfsigned.cert"
+    gklm_auth_key_path_remote = "/usr/local/gklm/rgwselfsigned.key"
+    gklm_auth_cert_path_local = None
+    gklm_auth_key_path_local = None
+    gklm_endpoint_openstack = None
+    gklm_endpoint_ibmc = None
+
+    for config_item in custom_config:
+        key, value = config_item.split("=")
+        if key == "gklm-auth-cert-path":
+            gklm_auth_cert_path_local = value.strip()
+        if key == "gklm-auth-key-path":
+            gklm_auth_key_path_local = value.strip()
+        if key == "gklm-endpoint-openstack":
+            gklm_endpoint_openstack = value.strip()
+        if key == "gklm-endpoint-ibmc":
+            gklm_endpoint_ibmc = value.strip()
+
+    if gklm_auth_cert_path_local is None:
+        raise GKLMSetupError(
+            "gklm-auth-cert-path not passed as custom-config which is required for gklm tests prerequisites"
+        )
+    if gklm_auth_key_path_local is None:
+        raise GKLMSetupError(
+            "gklm-auth-cert-path not passed as custom-config which is required for gklm tests prerequisites"
+        )
+    if gklm_endpoint_openstack is None or gklm_endpoint_ibmc is None:
+        raise GKLMSetupError(
+            "gklm-endpoint not passed as custom-config which is required for gklm tests prerequisites"
+        )
+
+    for rgw_node_obj in rgw_nodes:
+        rgw_node = rgw_node_obj.node
+        log.info(f"setting up auth certs on node {rgw_node.ip_address}")
+        rgw_node.exec_command(sudo=True, cmd="mkdir -p /usr/local/gklm")
+        # copy gklm_auth_cert
+        log.info(
+            f"copying local file '{gklm_auth_cert_path_local}' to remote file '{gklm_auth_cert_path_remote}'. "
+            + f"remote node ip: {rgw_node.ip_address}"
+        )
+        rgw_node.upload_file(
+            sudo=True, src=gklm_auth_cert_path_local, dst=gklm_auth_cert_path_remote
+        )
+        # copy gklm_auth_key
+        log.info(
+            f"copying local file '{gklm_auth_key_path_local}' to remote file '{gklm_auth_key_path_remote}'. "
+            + f"remote node ip: {rgw_node.ip_address}"
+        )
+        rgw_node.upload_file(
+            sudo=True, src=gklm_auth_key_path_local, dst=gklm_auth_key_path_remote
+        )
+
+    # set ceph configs for kmip
+    client_node = ceph_cluster.get_ceph_object("client").node
+    client_node.exec_command(
+        sudo=True, cmd="ceph config set client.rgw rgw_crypt_require_ssl false"
+    )
+    client_node.exec_command(
+        sudo=True, cmd="ceph config set client.rgw rgw_crypt_s3_kms_backend kmip"
+    )
+    client_node.exec_command(
+        sudo=True,
+        cmd="ceph config set client.rgw rgw_crypt_kmip_client_cert /usr/local/gklm/rgwselfsigned.cert",
+    )
+    client_node.exec_command(
+        sudo=True,
+        cmd="ceph config set client.rgw rgw_crypt_kmip_client_key /usr/local/gklm/rgwselfsigned.key",
+    )
+    if cloud_type == "openstack":
+        if gklm_endpoint_openstack is None:
+            raise GKLMSetupError(
+                "gklm-endpoint-openstack not passed as custom-config which is required for gklm tests prerequisites"
+            )
+        client_node.exec_command(
+            sudo=True,
+            cmd=f"ceph config set client.rgw rgw_crypt_kmip_addr {gklm_endpoint_openstack}:5696",
+        )
+    elif cloud_type == "ibmc":
+        if gklm_endpoint_ibmc is None:
+            raise GKLMSetupError(
+                "gklm-endpoint-ibmc not passed as custom-config which is required for gklm tests prerequisites"
+            )
+        client_node.exec_command(
+            sudo=True,
+            cmd=f"ceph config set client.rgw rgw_crypt_kmip_addr {gklm_endpoint_ibmc}:5696",
+        )
+
+    # redeploy rgw to mount gklm certs path to rgw container
+    client_node.exec_command(
+        sudo=True, cmd="ceph orch ls --service-type rgw --export > /root/rgw_spec.yaml"
+    )
+    out, _ = client_node.exec_command(sudo=True, cmd="cat /root/rgw_spec.yaml")
+    log.info(out)
+    client_node.exec_command(
+        sudo=True,
+        cmd="grep -q 'extra_container_args:\n - \"-v /usr/local/gklm:/usr/local/gklm\"' /root/rgw_spec.yaml"
+        + " || echo '\nextra_container_args:\n - \"-v /usr/local/gklm:/usr/local/gklm\"' >> /root/rgw_spec.yaml",
+    )
+    out, _ = client_node.exec_command(sudo=True, cmd="cat /root/rgw_spec.yaml")
+    log.info(out)
+    client_node.exec_command(sudo=True, cmd="ceph orch apply -i /root/rgw_spec.yaml")
+    log.info("sleeping for 20 seconds")
+    time.sleep(20)

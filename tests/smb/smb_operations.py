@@ -196,13 +196,14 @@ def smbclient_check_shares(
                     elif auth_mode == "user":
                         cmd = (
                             f"smbclient -U {smb_user_name}%{smb_user_password}"
+                            f" -p {smb_port} "
                             f" //{public_addr.split('/')[0]}/{smb_share} -c ls"
                         )
                         client.exec_command(
                             sudo=True,
                             cmd=cmd,
                         )
-                    sleep(1)
+                    sleep(3)
         else:
             for smb_node in smb_nodes:
                 for smb_share in smb_shares:
@@ -220,6 +221,7 @@ def smbclient_check_shares(
                     elif auth_mode == "user":
                         cmd = (
                             f"smbclient -U {smb_user_name}%{smb_user_password}"
+                            f" -p {smb_port} "
                             f" //{smb_node.ip_address}/{smb_share} -c ls"
                         )
                         client.exec_command(
@@ -233,7 +235,9 @@ def smbclient_check_shares(
         )
 
 
-def smb_cleanup(installer, smb_shares, smb_cluster_id):
+def smb_cleanup(
+    installer, smb_shares, smb_cluster_id, volume="cephfs", group_name="smb"
+):
     """Smb service cleanup
     Args:
         installer (obj): Installer node obj
@@ -246,6 +250,26 @@ def smb_cleanup(installer, smb_shares, smb_cluster_id):
         # Remove smb cluster
         remove_smb_cluster(installer, smb_cluster_id)
         sleep(9)
+        # Remove subvolume and subvolume group
+        # List subvolumes
+        cmd = (
+            f"cephadm shell -- ceph fs subvolume ls {volume} --group_name {group_name}"
+        )
+        out, _ = installer.exec_command(sudo=True, cmd=cmd)
+        subvols = json.loads(out)
+        # Remove all subvolumes
+        for sv in [s["name"] for s in subvols]:
+            installer.exec_command(
+                sudo=True,
+                cmd=f"cephadm shell -- ceph fs subvolume rm {volume} {sv} --group_name {group_name}",
+            )
+        # Remove subvolumegroup
+        cmd = (
+            f"cephadm shell -- ceph fs subvolumegroup rm {volume} {group_name} --force"
+        )
+        installer.exec_command(sudo=True, cmd=cmd)
+        sleep(9)
+
     except Exception as e:
         raise CephadmOpsExecutionError(
             f"Fail to cleanup smb cluster {smb_cluster_id}, Error {e}"
@@ -414,6 +438,19 @@ def create_smb_share(
             log.error("Samba shares list count not matching")
     except Exception as e:
         raise CephadmOpsExecutionError(f"Fail to create smb shares, Error {e}")
+
+
+def get_smb_shares(installer, smb_cluster_id):
+    """Get SMB shares
+    Args:
+        installer (obj): Installer node obj
+        smb_cluster_id (str): Smb cluster id
+    Return:
+        List of shares
+    """
+    shares = CephAdm(installer).ceph.smb.share.ls(smb_cluster_id)
+    list_shares = json.loads(shares)
+    return list_shares
 
 
 def verify_smb_service(node, service_name):

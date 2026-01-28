@@ -71,11 +71,13 @@ def run(ceph_cluster, **kw):
             for cmd in cmds:
                 client.exec_command(cmd=cmd, sudo=True)
         log.info("Successfully completed pynfs tests on nfs cluster")
+        return 0
     except Exception as e:
         log.error(f"Failed to run bonnie tests : {e}")
         return 1
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successful")
-    return 0

@@ -75,12 +75,12 @@ def run(ceph_cluster, **kw):
         if failed_tests:
             log.error(f"Unexpected pynfs test failures: {failed_tests}")
             return 1
+        return 0
 
     except Exception as e:
         log.error(f"Failed to run pynfs on {clients[0].hostname}, Error: {e}")
         return 1
 
     finally:
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

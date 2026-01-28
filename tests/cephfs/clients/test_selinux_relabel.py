@@ -236,7 +236,7 @@ def run(ceph_cluster, **kw):
             files_per_second,
         )
 
-        if validate_selinux_context(client[0], label_to_apply, test_dir):
+        if validate_selinux_context(clients[0], label_to_apply, test_dir):
             log.error(f"Failed to validate SELinux context for {test_dir}")
             return 1
 
@@ -269,7 +269,8 @@ def run(ceph_cluster, **kw):
             "nfs_t": "nfs_share",
             "samba_share_t": "samba_share",
             "tmp_t": "tmp",
-            "httpd_t": "httpd_process",
+            # "httpd_t": "httpd_process",  # Commented out after discussion:
+            # requires httpd service to be running
             "device_t": "device",
         }
 

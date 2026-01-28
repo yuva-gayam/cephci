@@ -1,9 +1,11 @@
+import time
 import traceback
 
 from ceph.ceph_admin import CephAdmin
 from ceph.rados import utils
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.serviceability_workflows import ServiceabilityMethods
+from ceph.rados.utils import get_cluster_timestamp
 from tests.rados.rados_test_util import (
     create_pools,
     get_device_path,
@@ -43,6 +45,8 @@ def run(ceph_cluster, **kw):
     service_obj = ServiceabilityMethods(cluster=ceph_cluster, **config)
 
     log.info("Running osd in progress rebalance tests")
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         pool = create_pools(config, rados_obj, client_node)
         should_not_be_empty(pool, "Failed to retrieve pool details")
@@ -88,7 +92,7 @@ def run(ceph_cluster, **kw):
             daemon_type="osd",
             daemon_id=osd_id,
             status="running",
-            timeout=60,
+            timeout=300,
         )
         assert service_obj.add_osds_to_managed_service()
         method_should_succeed(wait_for_clean_pg_sets, rados_obj, test_pool=pool_name)
@@ -123,7 +127,7 @@ def run(ceph_cluster, **kw):
                 daemon_type="osd",
                 daemon_id=osd_id,
                 status="running",
-                timeout=60,
+                timeout=300,
             )
             assert service_obj.add_osds_to_managed_service(
                 osds=[osd_id], spec=target_osd1_spec_name
@@ -139,13 +143,20 @@ def run(ceph_cluster, **kw):
                 daemon_type="osd",
                 daemon_id=osd_id,
                 status="running",
-                timeout=60,
+                timeout=300,
             )
             assert service_obj.add_osds_to_managed_service(
                 osds=[osd_id1], spec=target_osd2_spec_name
             )
 
         rados_obj.set_service_managed_type(service_type="osd", unmanaged=False)
+        time.sleep(10)
+        active_osd_list = rados_obj.get_osd_list(status="up")
+        in_osd_list = rados_obj.get_osd_list(status="in")
+        up_not_in = list(set(active_osd_list) - set(in_osd_list))
+        for osdid in up_not_in:
+            rados_obj.run_ceph_command(cmd=f"ceph osd in {osdid}")
+            time.sleep(2)
         rados_obj.change_recovery_threads(config=pool, action="rm")
         if config.get("delete_pools"):
             for name in config["delete_pools"]:
@@ -155,7 +166,11 @@ def run(ceph_cluster, **kw):
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
     return 0

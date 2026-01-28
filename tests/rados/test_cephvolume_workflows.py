@@ -13,8 +13,8 @@ from ceph.ceph_admin import CephAdmin
 from ceph.rados import utils
 from ceph.rados.cephvolume_workflows import CephVolumeWorkflows
 from ceph.rados.core_workflows import RadosOrchestrator
-from cli.utilities.operations import wait_for_osd_daemon_state
-from tests.rados.rados_test_util import get_device_path
+from ceph.rados.utils import get_cluster_timestamp
+from tests.rados.rados_test_util import get_device_path, wait_for_daemon_status
 from utility.log import Log
 
 log = Log(__name__)
@@ -52,7 +52,8 @@ def run(ceph_cluster, **kw):
     rados_obj = RadosOrchestrator(node=cephadm)
     volumeobject = CephVolumeWorkflows(node=cephadm)
     rhbuild = config.get("rhbuild")
-
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         if config.get("zap_with_destroy_flag") or config.get(
             "zap_without_destroy_flag"
@@ -339,7 +340,25 @@ def run(ceph_cluster, **kw):
                         )
                         raise Exception(log_msg)
 
-                wait_for_osd_daemon_state(rados_obj.client, osd_id, "up")
+                # Retry for waiting OSD to be added back
+                # throws
+                for _ in range(5):
+                    try:
+                        wait_for_daemon_status(
+                            rados_obj,
+                            daemon_type="osd",
+                            daemon_id=str(osd_id),
+                            status="running",
+                            timeout=1800,
+                        )
+                        log.info(f"OSD {osd_id} is added back to cluster")
+                        break
+                    except Exception as e:
+                        log.info(
+                            "Sleeping for additional 20 seconds for OSD to be added back"
+                        )
+                        log.error(e)
+                        time.sleep(20)
 
                 log.info(
                     f"Successfully added back osd {osd_id} to cluster\n"
@@ -365,7 +384,11 @@ def run(ceph_cluster, **kw):
         rados_obj.log_cluster_health()
 
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
 

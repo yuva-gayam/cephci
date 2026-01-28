@@ -145,7 +145,7 @@ def run(ceph_cluster, **kw):
 
         # Validate if the files are created by root user
         validate_file_owner(mount_dir_lin, linux_clients, owner=owner[1])
-
+        return 0
     except Exception as e:
         log.error(f"Failed to validate export rootsquash: {e}")
         return 1
@@ -163,6 +163,7 @@ def run(ceph_cluster, **kw):
         Ceph(linux_clients[0]).nfs.export.delete(nfs_name, nfs_export2)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(linux_clients[0], nfs_mount1, nfs_name, nfs_export1)
+        cleanup_cluster(
+            linux_clients[0], nfs_mount1, nfs_name, nfs_export1, nfs_nodes=servers
+        )
         log.info("Cleaning up successfull")
-    return 0

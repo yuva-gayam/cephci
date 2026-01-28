@@ -109,18 +109,8 @@ tests:
           - nqn: nqn.2016-06.io.spdk:cnode1
             serial: 1
             bdevs:
-              - count: 2
+              - count: 8
                 size: 5G
-                lb_group: node6
-              - count: 2
-                size: 5G
-                lb_group: node7
-              - count: 2
-                size: 5G
-                lb_group: node8
-              - count: 2
-                size: 5G
-                lb_group: node9
             listener_port: 4420
             listeners:
               - node6
@@ -145,6 +135,7 @@ tests:
       config:
         rbd_pool: rbd
         do_not_create_image: true
+        nvme_metadata_pool: rbd
         rep-pool-only: true
         gw_group: gw_group1
         rep_pool_config:
@@ -163,18 +154,8 @@ tests:
           - nqn: nqn.2016-06.io.spdk:cnode2
             serial: 2
             bdevs:
-              - count: 2
+              - count: 8
                 size: 5G
-                lb_group: node6
-              - count: 2
-                size: 5G
-                lb_group: node7
-              - count: 2
-                size: 5G
-                lb_group: node8
-              - count: 2
-                size: 5G
-                lb_group: node9
             listener_port: 4420
             listeners:
               - node6

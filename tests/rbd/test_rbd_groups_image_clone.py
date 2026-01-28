@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 from ceph.rbd.initial_config import initial_rbd_config
 from ceph.rbd.utils import getdict, random_string
@@ -71,7 +72,7 @@ def test_rbd_groups_image_clone(rbd_obj, client, **kw):
 
     for pool_type in rbd_obj.get("pool_types"):
         rbd_config = kw.get("config", {}).get(pool_type, {})
-        multi_pool_config = getdict(rbd_config)
+        multi_pool_config = deepcopy(getdict(rbd_config))
         for pool, pool_config in multi_pool_config.items():
             if "data_pool" in pool_config.keys():
                 _ = pool_config.pop("data_pool")
@@ -164,7 +165,7 @@ def test_rbd_groups_image_clone(rbd_obj, client, **kw):
                     "group": group,
                     "format": "json",
                 }
-                (g_ls_out, _) = group_info(**group_ls_kw)
+                g_ls_out, _ = group_info(**group_ls_kw)
                 log.info(g_ls_out)
                 g_ls_out = json.loads(g_ls_out)
                 if g_ls_out["group_id"].isalnum():
@@ -184,7 +185,7 @@ def test_rbd_groups_image_clone(rbd_obj, client, **kw):
                     "snap": group_snap,
                     "format": "json",
                 }
-                (snap_g_out, _) = group_snap_info(**snap_group_info)
+                snap_g_out, _ = group_snap_info(**snap_group_info)
                 log.info(snap_g_out)
                 snap_g_out = json.loads(snap_g_out)
                 snap_id = snap_g_out["images"][0]["snap_id"]

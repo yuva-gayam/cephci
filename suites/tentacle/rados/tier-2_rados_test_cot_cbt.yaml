@@ -48,6 +48,13 @@ tests:
               args:
                 placement:
                   label: mon
+          - config:
+              command: apply_spec
+              service: orch
+              specs:
+              - service_type: crash
+                placement:
+                  host_pattern: "*"
       destroy-cluster: false
       abort-on-fail: true
 
@@ -206,3 +213,73 @@ tests:
       module: test_objectstoretool_workflows.py
       polarion-id: CEPH-83581811
       desc: Verify ceph-objectstore-tool functionalities
+
+  - test:
+      name: ceph-kvstore-tool utility
+      module: test_kvstoretool_workflows.py
+      polarion-id: CEPH-83629905
+      desc: Verify ceph-kvstore-tool functionalities
+
+  - test:
+      name: ceph-objectstore-tool functionalities during enospc
+      module: test_objectstoretool_workflows.py
+      polarion-id: CEPH-83620743
+      config:
+        bluestore-enospc: true
+      desc: Verify ceph-objectstore-tool functionalities during ENOSPC
+
+  - test:
+      name: ceph-kvstore-tool functionalities during enospc
+      module: test_kvstoretool_workflows.py
+      polarion-id: CEPH-83629283
+      config:
+        bluestore-enospc: true
+      desc: Verify ceph-kvstore-tool functionalities during ENOSPC
+
+# Bluestore compression tests - moved here as part of optimization to reduce RHOS-d run time
+# Tests:-
+# setup - setup phase for bluestore compression tests
+#     --> Cephfs - replicated & EC
+#     --> RBD - replicated & EC
+#     --> RGW - replicated
+# scenario 15 - compression required ratio tests
+# scenario 16 - compression tests post recovery
+
+  - test:
+      name: Bluestore compression v1 - setup rbd , rgw and cephfs
+      module: test_bluestore_comp_enhancements.py
+      desc: Positive workflows for bluestore data compression enhancements
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_coded_pools: true
+        cleanup_objects: true
+        cleanup_pools: false
+        scenarios_to_run:
+          - setup
+
+  - test:
+      name: Bluestore compression v1 - compression required ratio tests
+      module: test_bluestore_comp_enhancements.py
+      desc: Bluestore compression v1 - compression required ratio tests
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_coded_pools: true
+        cleanup_objects: true
+        cleanup_pools: false
+        scenarios_to_run:
+          - scenario-15
+
+  - test:
+      name: Bluestore compression v1 - OSD recovery tests
+      module: test_bluestore_comp_enhancements.py
+      desc: Bluestore compression v1 - OSD recovery tests
+      polarion-id: CEPH-83620071
+      abort-on-fail: true
+      config:
+        include_erasure_coded_pools: true
+        cleanup_pools: true
+        cleanup_objects: true
+        scenarios_to_run:
+          - scenario-16

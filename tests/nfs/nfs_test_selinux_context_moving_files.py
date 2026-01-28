@@ -48,13 +48,6 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
 
-        # Mount the share on Client 2
-        cmd = f"umount -l {nfs_mount}"
-        clients[1].exec_command(sudo=True, cmd=cmd)
-
-        cmd = f"mount -t nfs {nfs_nodes[0].ip_address}:{nfs_export}_0 {nfs_mount}"
-        clients[1].exec_command(sudo=True, cmd=cmd)
-
         # Create 5 file on Mount point from client 1
         try:
             for i in range(1, num_files + 1):
@@ -134,7 +127,7 @@ def run(ceph_cluster, **kw):
             raise OperationFailedError(
                 f"failed to get the selinux label for file {filename}_{i}"
             )
-
+        return 0
     except Exception as e:
         log.error(f"Failed to set the selinux label on NFS v4.2 : {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -143,6 +136,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

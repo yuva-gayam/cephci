@@ -88,12 +88,14 @@ def run(ceph_cluster, **kw):
         # Wait for the ops to complete
         for op in operations:
             op.join()
+        return 0
 
     except Exception as e:
         log.error(f"Failed to validate parallel write, lookup and rm : {e}")
         return 1
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successful")
-    return 0

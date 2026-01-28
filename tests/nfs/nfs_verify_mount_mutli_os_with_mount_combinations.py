@@ -84,6 +84,8 @@ def run(ceph_cluster, **kw):
 
         linux_io.join()
         windows_io.join()
+        return 0
+
     except Exception as e:
         log.error(f"Failed to setup nfs-ganesha cluster {e}")
         # Cleanup
@@ -101,5 +103,6 @@ def run(ceph_cluster, **kw):
             windows_client.exec_command(cmd=cmd)
             cmd = f"umount {window_nfs_mount}"
             windows_client.exec_command(cmd=cmd)
-        cleanup_cluster(linux_clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(
+            linux_clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers
+        )

@@ -99,12 +99,11 @@ def run(ceph_cluster, **kw):
             return 1
         else:
             log.info("Successfully created symbolic links to file")
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
     finally:
         log.info("Cleaning up")
         sleep(3)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successfull")
-    return 0

@@ -61,11 +61,18 @@ def run(ceph_cluster, **kw):
 
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
-        client1.exec_command(
-            sudo=True,
-            cmd=f'ceph nfs cluster create {nfs_name} "2 {nfs_servers[0].node.hostname} '
-            f'{nfs_servers[1].node.hostname} {nfs_servers[2].node.hostname}" '
-            f"--ingress --virtual-ip {virtual_ip}/{subnet} --port {non_default_port}",
+        fs_util_v1.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=[
+                "2",
+                nfs_servers[0].node.hostname,
+                nfs_servers[1].node.hostname,
+                nfs_servers[2].node.hostname,
+            ],
+            ha=True,
+            vip=f"{virtual_ip}/{subnet}",
+            port=non_default_port,
         )
 
         log.info("validate the services have started on nfs")
@@ -121,7 +128,7 @@ def run(ceph_cluster, **kw):
             )
             nfs_mounting_dir = f"/mnt/cephfs_nfs{mounting_dir}_1/"
             client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-            command = f"mount -t nfs -o port={non_default_port} {virtual_ip}:{nfs_export} {nfs_mounting_dir}"
+            command = f"mount -t nfs -o vers=4,port={non_default_port} {virtual_ip}:{nfs_export} {nfs_mounting_dir}"
             client1.exec_command(sudo=True, cmd=command, check_ec=False)
             mount_dir.append(nfs_mounting_dir)
         backend_server = fs_util_v1.get_active_nfs_server(

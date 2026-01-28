@@ -46,13 +46,6 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
         )
 
-        # Mount the share on Client 2
-        cmd = f"umount -l {nfs_mount}"
-        clients[1].exec_command(sudo=True, cmd=cmd)
-
-        cmd = f"mount -t nfs {nfs_nodes[0].ip_address}:{nfs_export}_0 {nfs_mount}"
-        clients[1].exec_command(sudo=True, cmd=cmd)
-
         # Create a file on Mount point from client 1
         cmd = f"touch {nfs_mount}/{filename}"
         clients[0].exec_command(cmd=cmd, sudo=True)
@@ -69,7 +62,7 @@ def run(ceph_cluster, **kw):
             log.info(f"selinux lable is set correctly: {out[0]}")
         else:
             raise OperationFailedError("Failed to set/get the selinux context")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to set the selinux label on NFS v4.2 : {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -78,6 +71,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

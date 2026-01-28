@@ -156,6 +156,7 @@ def run(ceph_cluster, **kw):
             mount_and_validate_export(
                 clients[0], version, port, nfs_server_name, nfs_export_name, i
             )
+        return 0
     except Exception as e:
         log.error(
             f"Failed to validate multiple export creation from multiple filesystems: {e}"
@@ -164,6 +165,7 @@ def run(ceph_cluster, **kw):
     finally:
         log.info("Cleaning up")
         cleanup_exports_and_filesystems(clients[0])
-        cleanup_cluster(clients[0], "/mnt/nfs", "cephfs-nfs", "/export")
+        cleanup_cluster(
+            clients[0], "/mnt/nfs", "cephfs-nfs", "/export", nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleanup successful")
-    return 0

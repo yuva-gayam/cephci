@@ -56,8 +56,10 @@ def run(ceph_cluster, **kw):
         nfs_name = "cephfs-nfs"
         default_fs = "cephfs" if not erasure else "cephfs-ec"
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -94,14 +96,20 @@ def run(ceph_cluster, **kw):
             sudo=True, cmd=f"ceph nfs export get {nfs_name} {nfs_export_name}"
         )
         output = json.loads(out)
+        log.debug("NFS Export Get: {}".format(output))
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
         nfs_mounting_dir = f"/mnt/cephfs_nfs{mounting_dir}_1/"
         client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-        command = f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_name} {nfs_mounting_dir}"
-        output, err = client1.exec_command(sudo=True, cmd=command, check_ec=False)
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_name, nfs_mounting_dir
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
+
         if build.startswith("5"):
             kernel_mounting_dir_1 = f"/mnt/cephfs_kernel{mounting_dir}_1/"
             mon_node_ips = fs_util.get_mon_node_ips()
@@ -156,10 +164,10 @@ def run(ceph_cluster, **kw):
         fusepath = f"{fuse_mounting_dir_1}{clients[0].node.hostname}dd_file_fuse"
         nfspath = f"{nfs_mounting_dir}{clients[0].node.hostname}dd_file_nfs"
         mv_bw_mounts = [
-            f"cp {kernelpath} {nfs_mounting_dir}_dd_file_kernel",
-            f"cp {fusepath} {nfs_mounting_dir}_dd_file_fuse",
-            f"cp {nfspath} {kernel_mounting_dir_1}_dd_file_nfs1",
-            f"cp {nfspath} {fuse_mounting_dir_1}_dd_file_nfs2",
+            f"rsync -av {kernelpath} {nfs_mounting_dir}_dd_file_kernel",
+            f"rsync -av {fusepath} {nfs_mounting_dir}_dd_file_fuse",
+            f"rsync -av {nfspath} {kernel_mounting_dir_1}_dd_file_nfs1",
+            f"rsync -av {nfspath} {fuse_mounting_dir_1}_dd_file_nfs2",
         ]
         for cmd in mv_bw_mounts:
             clients[0].exec_command(sudo=True, cmd=cmd)

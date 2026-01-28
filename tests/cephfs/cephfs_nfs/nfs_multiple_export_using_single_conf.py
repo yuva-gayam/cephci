@@ -1,7 +1,8 @@
 import random
 import string
 import traceback
-from distutils.version import LooseVersion
+
+from looseversion import LooseVersion
 
 from ceph.ceph import CommandFailed
 from tests.cephfs.cephfs_utilsV1 import FsUtils
@@ -42,8 +43,10 @@ def run(ceph_cluster, **kw):
         clients = ceph_cluster.get_ceph_objects("client")
         client1 = clients[0]
         ceph_version = get_ceph_version_from_cluster(clients[0])
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             raise CommandFailed("Cluster has not been created")
@@ -179,7 +182,9 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         log.info("Cleaning Up")
-        client1.exec_command(sudo=True, cmd=f"rm -rf {nfs_mounting_dir}*")
+        client1.exec_command(
+            sudo=True, cmd=f"rm -rf {nfs_mounting_dir}*", check_ec=False
+        )
         log.info("Unmount NFS export")
         client1.exec_command(
             sudo=True, cmd=f"umount -l {nfs_mounting_dir}", check_ec=False

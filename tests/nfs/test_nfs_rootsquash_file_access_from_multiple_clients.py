@@ -86,6 +86,7 @@ def run(ceph_cluster, **kw):
 
         # Try accessing the file from client 2
         perform_lookups(clients[1], nfs_squash_mount, 1)
+        return 0
 
     except Exception as e:
         log.error(f"Failed to validate export rootsquash: {e}")
@@ -104,6 +105,7 @@ def run(ceph_cluster, **kw):
             Ceph(client).nfs.export.delete(nfs_name, nfs_export_squash)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successfull")
-    return 0

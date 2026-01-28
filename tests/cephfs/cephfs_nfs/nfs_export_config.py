@@ -2,8 +2,9 @@ import json
 import secrets
 import string
 import traceback
-from distutils.version import LooseVersion
 from json import JSONDecodeError
+
+from looseversion import LooseVersion
 
 from ceph.ceph import CommandFailed
 from tests.cephfs.cephfs_utilsV1 import FsUtils
@@ -65,8 +66,10 @@ def run(ceph_cluster, **kw):
         nfs_mounting_dir = "/mnt/nfs_" + "".join(
             secrets.choice(string.ascii_uppercase + string.digits) for i in range(5)
         )
-        out, rc = client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             raise CommandFailed("Cluster has not been created")
@@ -149,7 +152,7 @@ def run(ceph_cluster, **kw):
             f" 1000 --files-per-dir 10 --dirs-per-dir 2 --top {nfs_mounting_dir}/dir1",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command, long_running=True)
+            client1.exec_command(sudo=True, cmd=command, timeout=300)
 
         return 0
     except Exception as e:
@@ -164,7 +167,7 @@ def run(ceph_cluster, **kw):
             f"ceph nfs export delete {nfs_name} {nfs_export_name}",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command)
+            client1.exec_command(sudo=True, cmd=command, check_ec=False)
         client1.exec_command(
             sudo=True, cmd=f"rm -rf {nfs_mounting_dir}/", check_ec=False
         )

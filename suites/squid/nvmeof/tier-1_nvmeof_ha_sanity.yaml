@@ -73,6 +73,7 @@ tests:
       abort-on-fail: true
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -91,8 +92,7 @@ tests:
             serial: 1
             bdevs:
             - count: 2
-              size: 2G
-              lb_group: node6
+              size: 4G
             listener_port: 4420
             listeners:
               - node6
@@ -102,8 +102,7 @@ tests:
             serial: 2
             bdevs:
             - count: 2
-              size: 2G
-              lb_group: node7
+              size: 4G
             listener_port: 4420
             listeners:
               - node6
@@ -126,6 +125,7 @@ tests:
       abort-on-fail: true
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -144,8 +144,7 @@ tests:
             serial: 1
             bdevs:
             - count: 2
-              size: 2G
-              lb_group: node6
+              size: 4G
             listener_port: 4420
             listeners:
               - node6
@@ -155,8 +154,7 @@ tests:
             serial: 2
             bdevs:
             - count: 2
-              size: 2G
-              lb_group: node7
+              size: 4G
             listener_port: 4420
             listeners:
               - node6

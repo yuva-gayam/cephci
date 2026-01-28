@@ -3,13 +3,18 @@ from collections import namedtuple
 
 from ceph.ceph import CephNode
 from ceph.rados.core_workflows import RadosOrchestrator
+from ceph.rados.monitor_workflows import MonitorWorkflows
+from tests.rados.monitor_configurations import MonElectionStrategies
+from tests.rados.test_election_strategies import check_mon_status
 from tests.rados.test_stretch_site_down import get_stretch_site_hosts
 from tests.rados.test_stretch_site_reboot import get_host_obj_from_hostname
 from utility.log import Log
+from utility.retry import retry
 
 log = Log(__name__)
 
 Hosts = namedtuple("Hosts", ["dc_1_hosts", "dc_2_hosts", "tiebreaker_hosts"])
+from typing import List
 
 
 class StretchMode:
@@ -35,6 +40,9 @@ class StretchMode:
         self.pool_obj = kwargs.get("pool_obj")
         self.custom_crush_rule = {}
         self.stretch_bucket = kwargs.get("stretch_bucket", "datacenter")
+        self.mon_election_obj = kwargs.get(
+            "mon_election_obj", MonElectionStrategies(self.rados_obj)
+        )
 
         # parameters to be populated by segregate_hosts_based_on_stretch_bucket()
         self.site_1_hosts = None
@@ -45,6 +53,12 @@ class StretchMode:
         self.segregate_hosts_based_on_stretch_bucket()
 
         self.client_node = kwargs.get("client_node", None)
+
+        self.site_1_mon_hosts = list()
+        self.site_2_mon_hosts = list()
+        self.host_labels_map = dict()
+        mon_obj: MonitorWorkflows = kwargs.get("mon_obj")
+        self.segregate_mon_hosts_based_on_stretch_bucket(mon_obj=mon_obj)
 
     def get_tiebreaker_mon(self):
         """
@@ -68,7 +82,7 @@ class StretchMode:
                 tiebreaker_mon = mon["name"]
         return tiebreaker_mon
 
-    def enable_stretch_mode(self, tiebreaker_mon):
+    def enable_stretch_mode(self, tiebreaker_mon, crush_rule="stretch_rule"):
         """
         Enables stretch mode in the Ceph cluster using the specified tiebreaker monitor.
 
@@ -82,10 +96,12 @@ class StretchMode:
             When command `ceph mon enable_stretch_mode {tiebreaker_mon} stretch_rule datacenter` fails
         """
         stretch_enable_cmd = (
-            f"ceph mon enable_stretch_mode {tiebreaker_mon} stretch_rule datacenter"
+            f"ceph mon enable_stretch_mode {tiebreaker_mon} {crush_rule} datacenter"
         )
         if (
-            self.rados_obj.run_ceph_command(cmd=stretch_enable_cmd, print_output=True)
+            self.rados_obj.run_ceph_command(
+                cmd=stretch_enable_cmd, print_output=True, client_exec=True
+            )
             is None
         ):
             raise Exception("Failed to enable stretch mode")
@@ -100,11 +116,8 @@ class StretchMode:
             err_msg = f"Failed to create pool : {pool_name}"
             log.error(err_msg)
             raise Exception(err_msg)
-        if (
-            self.pool_obj.do_rados_put(
-                client=client_node, pool=pool_name, nobj=200, timeout=100
-            )
-            == 1
+        if not self.rados_obj.bench_write(
+            pool_name=pool_name, byte_size="4MB", max_objs=400
         ):
             err_msg = f"Failed to write IO using rados put command to pool {pool_name}"
             log.error(err_msg)
@@ -136,58 +149,6 @@ class StretchMode:
         self.custom_crush_rule[crush_rule_name] = out["rule_id"]
         return self.custom_crush_rule[crush_rule_name]
 
-    def simulate_netsplit_between_hosts(self, group1, group2):
-        """
-        Method to simulate netsplit between hosts. Netsplit will be simulate by dropping incoming & outgoing
-        traffic using "iptables -A INPUT -s {target_host_ip} -j DROP; iptables -A OUTPUT -d {target_host_ip} -j DROP"
-        group1 : node1, node2, node3
-        group2 : node4, node5
-
-        All incoming/outgoing traffic from group2 hosts will be blocked on group1 hosts.
-        Ip table rules will be added on:-
-         node4 to drop incoming/outgoing packets to/from node1
-         node4 to drop incoming/outgoing packets to/from node2
-         node4 to drop incoming/outgoing packets to/from node3
-         node5 to drop incoming/outgoing packets to/from node1
-         node5 to drop incoming/outgoing packets to/from node2
-         node5 to drop incoming/outgoing packets to/from node3
-
-        Args:
-            group1: List of hosts ( type: list of strings containing hostnames ) ["host1", "host2"]
-            group2: List of hosts ( type: list of strings containing hostnames ) ["host3", "host4"]
-        Returns:
-            None
-        """
-        info_msg = f"Adding IPtable rules between {group1} and {group2}"
-        log.info(info_msg)
-
-        for host1 in group1:
-            target_host_obj = self.rados_obj.get_host_object(hostname=host1)
-            if not target_host_obj:
-                log.error(f"target host : {host1} not found . Exiting...")
-                raise Exception("Test execution Failed")
-            log.debug(
-                f"Proceeding to add IPtables rules to block incoming - outgoing traffic to host {host1} "
-            )
-            for host2 in group2:
-                source_host_obj = self.rados_obj.get_host_object(hostname=host2)
-                log.debug(
-                    f"Proceeding to add IPtables rules to block incoming - outgoing traffic to host {host1} "
-                    f"Applying rules on host : {host2}"
-                )
-                if not source_host_obj:
-                    log.error(f"Source host : {host2} not found . Exiting...")
-                if not self.rados_obj.block_in_out_packets_on_host(
-                    source_host=source_host_obj, target_host=target_host_obj
-                ):
-                    log.error(
-                        f"Failed to add IPtable rules to block {host1} on {host2}"
-                    )
-                    raise Exception("Test execution Failed")
-
-        info_msg = f"Completed adding IPtable rules between {group1} and {group2}"
-        log.info(info_msg)
-
     def segregate_hosts_based_on_stretch_bucket(self):
         """
         Method to segregate hosts based on stretch bucket.
@@ -201,6 +162,8 @@ class StretchMode:
         dc_buckets = [
             d for d in buckets["nodes"] if d.get("type") == self.stretch_bucket
         ]
+        while len(dc_buckets) > 2:
+            dc_buckets.pop()
         dc_1 = dc_buckets.pop()
         dc_1_name = dc_1["name"]
         dc_2 = dc_buckets.pop()
@@ -209,34 +172,20 @@ class StretchMode:
             rados_obj=self.rados_obj,
             tiebreaker_mon_site_name=self.tiebreaker_mon_site_name,
         )
-        self.site_1_hosts = all_hosts.dc_1_hosts
-        self.site_2_hosts = all_hosts.dc_2_hosts
+        self.site_1_hosts = all_hosts.dc_2_hosts
+        self.site_2_hosts = all_hosts.dc_1_hosts
         self.tiebreaker_hosts = all_hosts.tiebreaker_hosts
-        self.site_1_name = dc_1_name
-        self.site_2_name = dc_2_name
-        log.debug(f"Hosts present in Datacenter : {dc_1_name} : {self.site_1_hosts}")
-        log.debug(f"Hosts present in Datacenter : {dc_2_name} : {self.site_2_hosts}")
+        self.site_2_name = dc_1_name
+        self.site_1_name = dc_2_name
         log.debug(
-            f"Hosts present in Datacenter : {self.tiebreaker_mon_site_name} : { self.tiebreaker_hosts}"
+            f"Hosts present in Datacenter : {self.site_1_name} : {self.site_1_hosts}"
         )
-
-    def flush_ip_table_rules_on_all_hosts(self):
-        """
-        Method to flush iptable rules on all hosts part of the cluster
-        Executes iptables -F and reboots the host
-        Returns:
-            None
-        """
-        log.info("Proceeding to flush IP table rules on all hosts")
-        for hostname in self.site_1_hosts + self.site_2_hosts + self.tiebreaker_hosts:
-            host = get_host_obj_from_hostname(
-                hostname=hostname, rados_obj=self.rados_obj
-            )
-            log.debug(f"Proceeding to flush iptable rules on host : {host.hostname}")
-            host.exec_command(sudo=True, cmd="iptables -F", long_running=True)
-            host.exec_command(sudo=True, cmd="reboot", check_ec=False)
-            time.sleep(20)
-        log.info("Completed flushing IP table rules on all hosts")
+        log.debug(
+            f"Hosts present in Datacenter : {self.site_2_name} : {self.site_2_hosts}"
+        )
+        log.debug(
+            f"Hosts present in Datacenter : {self.tiebreaker_mon_site_name} : {self.tiebreaker_hosts}"
+        )
 
     def write_io_and_validate_objects(
         self, pool_name: str, init_objects: int, obj_name: str
@@ -308,6 +257,136 @@ class StretchMode:
             )
             return False
         return True
+
+    @retry(Exception, tries=4, delay=600, backoff=1)
+    def wait_till_stretch_mode_status(self, degraded=False):
+        """
+        Method to check if stretch mode is degraded stretch mode or not.
+        Retuns:
+
+        """
+        stretch_details = self.rados_obj.get_stretch_mode_dump()
+        if degraded and not stretch_details["degraded_stretch_mode"]:
+            err_msg = (
+                f"Stretch Cluster is not marked as degraded : {stretch_details}"
+                f"Waiting for stretch mode to be degraded state"
+            )
+            log.error(err_msg)
+            raise Exception(err_msg)
+        elif not degraded and stretch_details["degraded_stretch_mode"]:
+            err_msg = (
+                f"Stretch Cluster is still in healthy state : {stretch_details}"
+                f"Waiting for stretch mode to be health state"
+            )
+            log.error(err_msg)
+            raise Exception(err_msg)
+
+    @retry(Exception, tries=4, delay=600, backoff=1)
+    def wait_till_stretch_mode_status_reaches(self, status="healthy"):
+        """
+        Method to check if stretch mode is recovering stretch mode or not.
+        Args:
+            status: (type: str) Status of the stretch mode to wait for. Valid values are "recovering", "healthy",
+            "degraded". Default value is "healthy".
+        Retuns:
+            None
+        Raises Exception:
+            When stretch mode is not in the expected status after the retry limit is reached
+        """
+        stretch_details = self.rados_obj.get_stretch_mode_dump()
+
+        log.info("checking cluster health status...")
+        status_report = self.rados_obj.run_ceph_command(
+            cmd="ceph report", client_exec=True
+        )
+        ceph_health_status = list(status_report["health"]["checks"].keys())
+        log.info(f"Cluster health status: {ceph_health_status}")
+
+        if status == "recovering":
+            if stretch_details["recovering_stretch_mode"] == 0:
+                err_msg = (
+                    f"Stretch Cluster is not marked as recovering : {stretch_details}"
+                    f"Waiting for stretch mode to be recovering state"
+                )
+                log.error(err_msg)
+                raise Exception(err_msg)
+            else:
+                log.info(f"Stretch Cluster is marked as recovering : {stretch_details}")
+        elif status == "healthy":
+            if (
+                stretch_details["recovering_stretch_mode"] == 1
+                or stretch_details["degraded_stretch_mode"] == 1
+            ):
+                err_msg = (
+                    f"Stretch Cluster is still not in healthy state : {stretch_details}"
+                    f"Waiting for stretch mode to be health state"
+                )
+                log.error(err_msg)
+                raise Exception(err_msg)
+            else:
+                log.info(f"Stretch Cluster is healthy: {stretch_details}")
+        elif status == "degraded":
+            if stretch_details["degraded_stretch_mode"] == 0:
+                err_msg = (
+                    f"Stretch Cluster is not marked as degraded : {stretch_details}"
+                    f"Waiting for stretch mode to be degraded state"
+                )
+                log.error(err_msg)
+                raise Exception(err_msg)
+            else:
+                log.info(f"Stretch Cluster is marked as degraded : {stretch_details}")
+
+    def segregate_mon_hosts_based_on_stretch_bucket(self, mon_obj: MonitorWorkflows):
+        for host in self.site_1_hosts + self.site_2_hosts + self.tiebreaker_hosts:
+            self.host_labels_map[host] = mon_obj.get_host_labels(host=host)
+        log_msg = f"Host labels are {self.host_labels_map}"
+        log.info(log_msg)
+        for host in self.host_labels_map:
+            if "mon" in self.host_labels_map[host] and host in self.site_1_hosts:
+                self.site_1_mon_hosts.append(host)
+            elif "mon" in self.host_labels_map[host] and host in self.site_2_hosts:
+                self.site_2_mon_hosts.append(host)
+        log_msg = (
+            f"Site 1 Mons -> {self.site_1_mon_hosts}"
+            f"Site 2 Mons -> {self.site_2_mon_hosts}"
+        )
+        log.info(log_msg)
+
+    @retry(
+        Exception,
+        tries=5,
+        delay=10,
+        backoff=1,
+    )
+    def check_mon_in_running_state(self):
+        log.info("checking if all mons are in 'running' state")
+        if (
+            check_mon_status(rados_obj=self.rados_obj, mon_obj=self.mon_election_obj)
+            is False
+        ):
+            raise Exception("All mons are not in 'running' state")
+        log.info("all mons daemons are in 'running' state")
+
+    def set_mon_location(
+        self, location_name: str, location_type: str, hostnames: List[str]
+    ):
+        log.info(
+            f"Setting mon location {location_type}={location_name} for hosts: {hostnames}"
+        )
+        for hostname in hostnames:
+            cmd = f"ceph mon set_location {hostname} {location_type}={location_name}"
+            try:
+                self.rados_obj.run_ceph_command(cmd=cmd, client_exec=True)
+                log.info(
+                    f"Successfully added mon location to {hostname} as {location_name}"
+                )
+            except Exception as err:
+                raise Exception(
+                    f"Failed to add mon location to {hostname} as {location_name}: {err}"
+                )
+        log.info(
+            f"Successfully added mon location {location_type}={location_name} to all hosts: {hostnames}"
+        )
 
 
 class RevertStretchModeFunctionalities(StretchMode):
@@ -474,3 +553,96 @@ class RevertStretchModeFunctionalities(StretchMode):
                 raise Exception(log_msg)
 
         log.info("Successfully validated MON map configs of stretch mode")
+
+
+def simulate_netsplit_between_hosts(rados_obj, group1, group2):
+    """
+    Method to simulate netsplit between hosts. Netsplit will be simulate by dropping incoming & outgoing
+    traffic using "iptables -A INPUT -s {target_host_ip} -j DROP; iptables -A OUTPUT -d {target_host_ip} -j DROP"
+    group1 : node1, node2, node3
+    group2 : node4, node5
+
+    All incoming/outgoing traffic from group2 hosts will be blocked on group1 hosts.
+    Ip table rules will be added on:-
+     node4 to drop incoming/outgoing packets to/from node1
+     node4 to drop incoming/outgoing packets to/from node2
+     node4 to drop incoming/outgoing packets to/from node3
+     node5 to drop incoming/outgoing packets to/from node1
+     node5 to drop incoming/outgoing packets to/from node2
+     node5 to drop incoming/outgoing packets to/from node3
+
+    Args:
+        group1: List of hosts ( type: list of strings containing hostnames ) ["host1", "host2"]
+        group2: List of hosts ( type: list of strings containing hostnames ) ["host3", "host4"]
+    Returns:
+        None
+    """
+    info_msg = f"Adding IPtable rules between {group1} and {group2}"
+    log.info(info_msg)
+
+    for host1 in group1:
+        target_host_obj = rados_obj.get_host_object(hostname=host1)
+        if not target_host_obj:
+            err_msg = f"target host : {host1} not found . Exiting..."
+            log.error(err_msg)
+            raise Exception("Test execution Failed")
+        debug_msg = f"Proceeding to add IPtables rules to block incoming - outgoing traffic to host {host1} "
+        log.debug(debug_msg)
+        for host2 in group2:
+            source_host_obj = rados_obj.get_host_object(hostname=host2)
+            debug_msg = (
+                f"Proceeding to add IPtables rules to block incoming - outgoing traffic to host {host1}"
+                f". Applying rules on host : {host2}"
+            )
+            log.debug(debug_msg)
+            if not source_host_obj:
+                err_msg = f"Source host : {host2} not found . Exiting..."
+                log.error(err_msg)
+            if not rados_obj.block_in_out_packets_on_host(
+                source_host=source_host_obj, target_host=target_host_obj
+            ):
+                err_msg = f"Failed to add IPtable rules to block {host1} on {host2}"
+                log.error(err_msg)
+                raise Exception("Test execution Failed")
+
+    info_msg = f"Completed adding IPtable rules between {group1} and {group2}"
+    log.info(info_msg)
+
+
+def flush_ip_table_rules_on_all_hosts(rados_obj, hosts):
+    """
+    Method to flush iptable rules on all hosts part of the cluster
+    Executes iptables -F and reboots the host
+    Returns:
+        None
+    """
+    log.info("Proceeding to flush IP table rules on all hosts")
+    for hostname in hosts:
+        host = get_host_obj_from_hostname(hostname=hostname, rados_obj=rados_obj)
+        debug_msg = f"Proceeding to flush iptable rules on host : {host.hostname}"
+        log.debug(debug_msg)
+        host.exec_command(sudo=True, cmd="iptables -F", long_running=True)
+        host.exec_command(sudo=True, cmd="reboot", check_ec=False)
+        time.sleep(20)
+    log.info("Completed flushing IP table rules on all hosts")
+
+
+def wait_till_host_status_reaches(
+    rados_obj: RadosOrchestrator, status: str, hostnames: List[str], duration: int = 600
+):
+    start_time = time.time()
+    while time.time() - start_time < duration:
+        try:
+            for hostname in hostnames:
+                if (
+                    rados_obj.check_host_status(hostname=hostname, status=status)
+                    is False
+                ):
+                    raise Exception(f"Host {hostname} is not offline")
+            log.info(f"All hosts {hostnames} reached {status} in {duration} seconds")
+            return
+        except Exception as err:
+            log.info(f"Host {err} is not {status}, sleeping for {10} seconds")
+            time.sleep(10)
+
+    raise Exception(f"Hosts {hostnames} did not reach {status} in {duration} seconds")

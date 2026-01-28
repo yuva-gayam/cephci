@@ -74,6 +74,7 @@ from ceph.rbd.workflows.cleanup import cleanup
 from ceph.rbd.workflows.group import add_image_to_group_and_verify
 from ceph.rbd.workflows.group_mirror import (
     enable_group_mirroring_and_verify_state,
+    get_mirror_group_snap_copied_status,
     verify_group_snapshot_schedule,
     wait_for_idle,
 )
@@ -81,6 +82,7 @@ from ceph.rbd.workflows.krbd_io_handler import krbd_io_handler
 from ceph.rbd.workflows.namespace import enable_namespace_mirroring
 from ceph.rbd.workflows.snap_scheduling import add_snapshot_scheduling
 from utility.log import Log
+from utility.utils import run_fio
 
 log = Log(__name__)
 
@@ -117,6 +119,8 @@ def test_mirror_group_consistency(
             group_config = {}
             if "data_pool" in pool_config.keys():
                 _ = pool_config.pop("data_pool")
+            if "ec_pool" in pool_config.keys():
+                continue
             group_spec = pool_config.get("group-spec")
             group_config.update({"group-spec": group_spec})
 
@@ -132,7 +136,7 @@ def test_mirror_group_consistency(
                     image_large_name = pool_spec + "image_" + random_string(len=4)
                     # Create large size images
                     rbd_primary.create(
-                        **{"image-spec": image_large_name, "size": "10G"}
+                        **{"image-spec": image_large_name, "size": "11G"}
                     )
                     image_spec_large.append(image_large_name)
                     if add_image_to_group_and_verify(
@@ -175,28 +179,84 @@ def test_mirror_group_consistency(
                 )
             log.info("md5sums on site B after first sync: %s", md5sum_first_sync_site_b)
 
-            bench_kw = {}
             io_small_cfg = kw.get("config", {}).get("io_small", {})
-            bench_kw.update(
-                {
-                    "io-type": io_small_cfg.get("io-type", "write"),
-                    "io-total": io_small_cfg.get("io-size_init", "20M"),
-                    "io-threads": io_small_cfg.get("io-threads", "16"),
+            file_random_small1 = "/mnt/mnt_" + random_string(len=5) + "/file1"
+            file_random_small2 = "/mnt/mnt_" + random_string(len=5) + "/file2"
+            io_config = {
+                "size": io_small_cfg.get("io-size_init", "20M"),
+                "do_not_create_image": True,
+                "config": {
+                    "size": io_small_cfg.get("io-size_init", "20M"),
+                    "file_path": [
+                        file_random_small1,
+                        file_random_small2,
+                    ],
+                    "get_time_taken": True,
+                    "operations": {
+                        "fs": "ext4",
+                        "io": False,
+                        "mount": True,
+                        "map": True,
+                        "nounmap": True,
+                    },
+                    "cmd_timeout": 2400,
+                },
+            }
+            image_spec_copy = deepcopy(image_spec_small)
+            io_config["rbd_obj"] = rbd_primary
+            io_config["client"] = client_primary
+            io_config["config"]["image_spec"] = image_spec_copy
+            io, err = krbd_io_handler(**io_config)
+            if err:
+                raise Exception(
+                    "Map, mount and run IOs failed for " + str(image_spec_small)
+                )
+            else:
+                log.info("Map, mount and IOs successful for " + str(image_spec_small))
+
+            for dev_name in [file_random_small1, file_random_small2]:
+                io_args = {
+                    "client_node": client_primary,
+                    "filename": dev_name,
+                    "size": io_small_cfg.get("io-size_init", "20M"),
+                    "num_jobs": io_small_cfg.get("num_jobs", "1"),
+                    "iodepth": io_small_cfg.get("iodepth", "16"),
+                    "io_type": io_small_cfg.get("io-type", "write"),
+                    "run_time": 30,
+                    "cmd_timeout": 2400,
                 }
-            )
-
-            for image_spec in image_spec_small:
-                bench_kw.update({"image-spec": image_spec})
-                out, err = rbd_primary.bench(**bench_kw)
-
+                run_fio(**io_args)
             io_large_cfg = kw.get("config", {}).get("io_large", {})
-            bench_kw.update({"io-total": io_large_cfg.get("io-size_init", "1G")})
+            file_random_large1 = "/mnt/mnt_" + random_string(len=5) + "/file3"
+            file_random_large2 = "/mnt/mnt_" + random_string(len=5) + "/file4"
+            io_config.update({"size": io_large_cfg.get("io-size_init", "1G")})
+            io_config["config"].update({"size": io_large_cfg.get("io-size_init", "1G")})
+            io_config["config"].update(
+                {"file_path": [file_random_large1, file_random_large2]}
+            )
+            image_spec_copy = deepcopy(image_spec_large)
+            io_config["config"]["image_spec"] = image_spec_copy
+            io, err = krbd_io_handler(**io_config)
+            if err:
+                raise Exception(
+                    "Map, mount and run IOs failed for " + str(image_spec_large)
+                )
+            else:
+                log.info("Map, mount and IOs successful for " + str(image_spec_large))
 
-            for image_spec in image_spec_large:
-                bench_kw.update({"image-spec": image_spec})
-                out, err = rbd_primary.bench(**bench_kw)
-                if err:
-                    raise Exception("Failed to write IO to the image %s", image_spec)
+            for dev_name in [file_random_large1, file_random_large2]:
+                io_args = {
+                    "client_node": client_primary,
+                    "filename": dev_name,
+                    "size": io_large_cfg.get("io-size_init", "1G"),
+                    "num_jobs": io_large_cfg.get("num_jobs", "1"),
+                    "iodepth": io_large_cfg.get("iodepth", "16"),
+                    "io_type": io_large_cfg.get("io-type", "write"),
+                    "run_time": 100,
+                    "cmd_timeout": 2400,
+                }
+                run_fio(**io_args)
+            time.sleep(120)
 
             # Create first manual mirror group snapshot
             out, err = rbd_primary.mirror.group.snapshot.add(
@@ -205,10 +265,29 @@ def test_mirror_group_consistency(
             if err:
                 raise Exception("Failed to add manual mirror group snapshot %s", out)
 
+            log.info("Created first manual mirror group snapshot: %s", out)
+            snapshot_id = out.strip().split(":")[1].strip()
+            log.info("Snapshot ID is %s", snapshot_id)
             # Wait for snapshot to sync on site-B
-            wait_for_idle(rbd_primary, **{"group-spec": group_spec})
+            time.sleep(10)
+            snap_state = get_mirror_group_snap_copied_status(
+                rbd_secondary,
+                snapshot_id,
+                **{"group-spec": group_spec, "format": "json"},
+            )
+            log.info("Mirror group snapshot copied status on site-B is %s", snap_state)
+            while snap_state is not True:
+                time.sleep(5)
+                snap_state = get_mirror_group_snap_copied_status(
+                    rbd_secondary,
+                    snapshot_id,
+                    **{"group-spec": group_spec, "format": "json"},
+                )
+                log.info(
+                    "Mirror group snapshot copied status on site-B is %s", snap_state
+                )
             log.info(
-                "Data replay state is idle for all images in the group. Syncing completed"
+                "Mirror group snapshot synced on site-B after first manual snapshot"
             )
 
             md5sum_second_sync_site_b = []
@@ -225,20 +304,32 @@ def test_mirror_group_consistency(
                 "md5sums on site B after second sync: %s", md5sum_second_sync_site_b
             )
 
-            bench_kw.update({"io-total": io_small_cfg.get("io-size", "40M")})
+            for dev_name in [file_random_small1, file_random_small2]:
+                io_args = {
+                    "client_node": client_primary,
+                    "filename": dev_name,
+                    "size": io_small_cfg.get("io-size", "40M"),
+                    "num_jobs": io_small_cfg.get("num_jobs", "1"),
+                    "iodepth": io_small_cfg.get("iodepth", "16"),
+                    "io_type": io_small_cfg.get("io-type", "write"),
+                    "run_time": 90,
+                    "cmd_timeout": 2400,
+                }
+                run_fio(**io_args)
+            for dev_name in [file_random_large1, file_random_large2]:
+                io_args = {
+                    "client_node": client_primary,
+                    "filename": dev_name,
+                    "size": io_large_cfg.get("io-size", "9G"),
+                    "num_jobs": io_large_cfg.get("num_jobs", "1"),
+                    "iodepth": io_large_cfg.get("iodepth", "16"),
+                    "io_type": io_large_cfg.get("io-type", "write"),
+                    "run_time": 500,
+                    "cmd_timeout": 2400,
+                }
+                run_fio(**io_args)
 
-            for image_spec in image_spec_small:
-                bench_kw.update({"image-spec": image_spec})
-                out, err = rbd_primary.bench(**bench_kw)
-
-            bench_kw.update({"io-total": io_large_cfg.get("io-size", "9G")})
-
-            for image_spec in image_spec_large:
-                bench_kw.update({"image-spec": image_spec})
-                out, err = rbd_primary.bench(**bench_kw)
-                if err:
-                    raise Exception("Failed to write IO to the image %s", image_spec)
-
+            time.sleep(120)
             md5sum_second_write_site_a = []
             for image in image_spec_all:
                 md5sum_second_write_site_a.append(
@@ -260,67 +351,67 @@ def test_mirror_group_consistency(
             if err:
                 raise Exception("Failed to add manual mirror group snapshot %s", out)
 
-            retry = 0
-            while retry < 10:
-                time.sleep(2)
-                md5sum_third_sync_site_b = []
-                for image in image_spec_all[0:2]:
-                    md5sum_third_sync_site_b.append(
-                        get_md5sum_rbd_image(
-                            image_spec=image,
-                            rbd=rbd_secondary,
-                            client=client_secondary,
-                            file_path="file" + random_string(len=5),
-                        )
-                    )
-                log.info(
-                    "md5sums of small size images on site-B after sync : %s",
-                    md5sum_third_sync_site_b,
+            log.info("Created second manual mirror group snapshot: %s", out)
+            snapshot_id = out.strip().split(":")[1].strip()
+            log.info("Snapshot ID is %s", snapshot_id)
+
+            time.sleep(10)
+            snap_state = get_mirror_group_snap_copied_status(
+                rbd_secondary,
+                snapshot_id,
+                **{"group-spec": group_spec, "format": "json"},
+            )
+            log.info("Mirror group snapshot copied status on site-B is %s", snap_state)
+            if snap_state is False:
+                if exec_cmd(
+                    node=client_secondary,
+                    cmd="ceph orch stop rbd-mirror",
+                ):
+                    raise Exception("Failed to stop rbd-mirror daemon on site-B")
+                log.info("Stopped rbd-mirror daemon on site-B before force promote")
+                mirror_node = secondary_cluster.get_nodes(role="rbd-mirror")[0]
+                service_name = exec_cmd(
+                    node=mirror_node,
+                    cmd="systemctl list-units --all | grep rbd-mirror | grep -Ev \\.target | awk {{'print $1'}}",
+                    output=True,
                 )
-                log.info(
-                    "md5sums of small images on site-A after second write : %s",
-                    md5sum_second_write_site_a[0:2],
+                # "ceph orch stop" shuts the daemon gracefully. Since, we need to stop the syncing abruptly.
+                # we need to abruptly terminate the daemon. Hence, SIGKILL is passed
+                # to systemctl as below.
+                exec_cmd(
+                    node=mirror_node,
+                    cmd=f"systemctl kill --signal=SIGKILL {service_name}",
                 )
+                log.info("Force killed rbd-mirror daemon before force promote")
 
-                if md5sum_third_sync_site_b == md5sum_second_write_site_a[0:2]:
-                    if exec_cmd(
-                        node=client_secondary,
-                        cmd="ceph orch stop rbd-mirror",
-                    ):
-                        raise Exception("Failed to stop rbd-mirror daemon on site-B")
-                    log.info("Stopped rbd-mirror daemon on site-B before force promote")
-                    mirror_node = secondary_cluster.get_nodes(role="rbd-mirror")[0]
-                    service_name = exec_cmd(
-                        node=mirror_node,
-                        cmd="systemctl list-units --all | grep rbd-mirror | grep -Ev \\.target | awk {{'print $1'}}",
-                        output=True,
+            time.sleep(10)
+            md5sum_third_sync_site_b = []
+            for image in image_spec_all[0:2]:
+                md5sum_third_sync_site_b.append(
+                    get_md5sum_rbd_image(
+                        image_spec=image,
+                        rbd=rbd_secondary,
+                        client=client_secondary,
+                        file_path="file" + random_string(len=5),
                     )
-                    # "ceph orch stop" shuts the daemon gracefully. Since, we need to stop the syncing abruptly.
-                    # we need to abruptly terminate the daemon. Hence, SIGKILL is passed
-                    # to systemctl as below.
-                    exec_cmd(
-                        node=mirror_node,
-                        cmd=f"systemctl kill --signal=SIGKILL {service_name}",
-                    )
-                    log.info("Force killed rbd-mirror daemon before force promote")
-                    time.sleep(40)
-                    break
-                else:
-                    time.sleep(1)
-                    retry = retry + 1
+                )
+            log.info(
+                "md5sums of small size images on site-B after sync : %s",
+                md5sum_third_sync_site_b,
+            )
+            log.info(
+                "md5sums of small images on site-A after second write : %s",
+                md5sum_second_write_site_a[0:2],
+            )
 
-                if retry == 10:
-                    raise Exception(
-                        "Small images on site-B failed to sync with those on site-A"
-                    )
-            log.info("Small images on site-B synced with those on site-A")
-
-            (out, err) = rbd_secondary.mirror.group.promote(
+            time.sleep(5)
+            out, err = rbd_secondary.mirror.group.promote(
                 **{"group-spec": group_spec, "force": True}
             )
             if err:
                 raise Exception("Failed to force promote group on site-B: " + str(err))
 
+            time.sleep(60)
             md5sum_after_force_promote_site_b = []
             for image in image_spec_all:
                 md5sum_after_force_promote_site_b.append(
@@ -389,6 +480,8 @@ def test_mirror_group_snapshot_consistency(
         log.info("Running test CEPH-83610861  for %s", pool_type)
         # FIO Params Required for ODF workload exclusively in group mirroring
         fio = kw.get("config", {}).get("fio", {})
+        file_random1 = "/mnt/mnt_" + random_string(len=5) + "/file"
+        file_random2 = "/mnt/mnt_" + random_string(len=5) + "/file"
         io_config = {
             "size": fio["size"],
             "do_not_create_image": True,
@@ -400,8 +493,8 @@ def test_mirror_group_snapshot_consistency(
             "config": {
                 "file_size": fio["size"],
                 "file_path": [
-                    "/mnt/mnt_" + random_string(len=5) + "/file",
-                    "/mnt/mnt_" + random_string(len=5) + "/file",
+                    file_random1,
+                    file_random2,
                 ],
                 "get_time_taken": True,
                 "operations": {
@@ -409,6 +502,7 @@ def test_mirror_group_snapshot_consistency(
                     "io": True,
                     "mount": True,
                     "map": True,
+                    "nounmap": True,
                 },
                 "cmd_timeout": 2400,
                 "io_type": fio["ODF_CONFIG"]["io_type"],
@@ -447,7 +541,7 @@ def test_mirror_group_snapshot_consistency(
             io_config["rbd_obj"] = rbd_primary
             io_config["client"] = client_primary
             io_config["config"]["image_spec"] = image_spec_copy
-            (io, err) = krbd_io_handler(**io_config)
+            io, err = krbd_io_handler(**io_config)
             if err:
                 raise Exception("Map, mount and run IOs failed for " + str(image_spec))
             else:
@@ -457,6 +551,7 @@ def test_mirror_group_snapshot_consistency(
             wait_for_idle(rbd_primary, **{"group-spec": group_spec})
             log.info("Data replay state is idle for all images in the group")
 
+            time.sleep(120)
             md5sum_first_write_site_a = []
             for image in image_spec:
                 md5sum_first_write_site_a.append(
@@ -496,6 +591,44 @@ def test_mirror_group_snapshot_consistency(
                     "Failed to verify Snapshot creation as per %s schedule", interval
                 )
 
+            # Remove snapshot schedule
+            snap_schedule_rm_config = deepcopy(snap_schedule_config)
+            snap_schedule_rm_config.update({"interval": interval})
+            snap_schedule_rm_config.pop("level")
+            out, err = rbd_primary.mirror.group.snapshot.schedule.remove_(
+                **snap_schedule_rm_config
+            )
+            if err:
+                raise Exception(
+                    "Failed to remove group snapshot schedule of %s", interval
+                )
+            log.info("Removed group snapshot schedule of %s", interval)
+
+            snap_list_primary, err = rbd_primary.group.snap.list(
+                **{"group-spec": group_spec, "format": "json"}
+            )
+            log.info(snap_list_primary)
+            snapshot_id = json.loads(snap_list_primary)[-1].get("id")
+
+            time.sleep(10)
+            snap_state = get_mirror_group_snap_copied_status(
+                rbd_secondary,
+                snapshot_id,
+                **{"group-spec": group_spec, "format": "json"},
+            )
+            log.info("Mirror group snapshot copied status on site-B is %s", snap_state)
+            while snap_state is not True:
+                time.sleep(5)
+                snap_state = get_mirror_group_snap_copied_status(
+                    rbd_secondary,
+                    snapshot_id,
+                    **{"group-spec": group_spec, "format": "json"},
+                )
+                log.info(
+                    "Mirror group snapshot copied status on site-B is %s", snap_state
+                )
+            log.info("Mirror group snapshot synced on site-B after schedule snapshot")
+
             md5sum_after_first_snap_site_b = []
             for image in image_spec:
                 md5sum_after_first_snap_site_b.append(
@@ -511,6 +644,20 @@ def test_mirror_group_snapshot_consistency(
                 md5sum_after_first_snap_site_b,
             )
 
+            md5sum_first_write_site_a = []
+            for image in image_spec:
+                md5sum_first_write_site_a.append(
+                    get_md5sum_rbd_image(
+                        image_spec=image,
+                        rbd=rbd_primary,
+                        client=client_primary,
+                        file_path="file" + random_string(len=5),
+                    )
+                )
+            log.info(
+                "md5sums on site A after first write: %s", md5sum_first_write_site_a
+            )
+
             if md5sum_first_write_site_a != md5sum_after_first_snap_site_b:
                 raise Exception(
                     "md5sums after snapshot created through scheduler \n"
@@ -522,40 +669,22 @@ def test_mirror_group_snapshot_consistency(
                 "with site-A after group snapshot created by scheduler"
             )
 
-            snap_schedule_rm_config = deepcopy(snap_schedule_config)
-            snap_schedule_rm_config.update({"interval": interval})
-            snap_schedule_rm_config.pop("image")
-            snap_schedule_rm_config.pop("level")
-            out, err = rbd_primary.mirror.group.snapshot.schedule.remove_(
-                **snap_schedule_rm_config
-            )
-            if err:
-                raise Exception(
-                    "Failed to remove group snapshot schedule of %s", interval
-                )
-            log.info("Removed group snapshot schedule of %s", interval)
-
             image_spec_copy = deepcopy(image_spec)
-            io_config["config"]["image_spec"] = image_spec_copy
-            (io, err) = krbd_io_handler(**io_config)
-            if err:
-                raise Exception("Map, mount and run IOs failed for " + str(image_spec))
-            else:
-                log.info("Map, mount and IOs successful for " + str(image_spec))
-
-            md5sum_second_write_site_a = []
-            for image in image_spec:
-                md5sum_second_write_site_a.append(
-                    get_md5sum_rbd_image(
-                        image_spec=image,
-                        rbd=rbd_primary,
-                        client=client_primary,
-                        file_path="file" + random_string(len=5),
-                    )
-                )
-            log.info(
-                "md5sums on site A after second write: %s", md5sum_second_write_site_a
-            )
+            for dev_name in [file_random1, file_random2]:
+                io_args = {
+                    "client_node": client_primary,
+                    "filename": dev_name,
+                    "size": fio["size"],
+                    "num_jobs": fio["ODF_CONFIG"]["num_jobs"],
+                    "iodepth": fio["ODF_CONFIG"]["iodepth"],
+                    "rwmixread": fio["ODF_CONFIG"]["rwmixread"],
+                    "direct": fio["ODF_CONFIG"]["direct"],
+                    "invalidate": fio["ODF_CONFIG"]["invalidate"],
+                    "io_type": fio["ODF_CONFIG"]["io_type"],
+                    "run_time": 30,
+                    "cmd_timeout": 2400,
+                }
+                run_fio(**io_args)
 
             if verify_group_snapshot_schedule(
                 rbd_primary,
@@ -613,6 +742,8 @@ def test_mirror_group_snapshot_consistency(
                 )
             snap_id = json.loads(snap_info)["id"]
 
+            log.info("Waiting for 120 seconds")
+            time.sleep(120)
             snap_list, err = rbd_secondary.group.snap.list(
                 **{"group-spec": group_spec, "format": "json"}
             )
@@ -661,6 +792,39 @@ def test_mirror_group_snapshot_consistency(
             wait_for_idle(rbd_primary, **{"group-spec": group_spec})
             log.info(
                 "Data replay state is idle for all images in the group. Syncing completed"
+            )
+
+            time.sleep(10)
+            snap_state = get_mirror_group_snap_copied_status(
+                rbd_secondary,
+                mirror_snap_id,
+                **{"group-spec": group_spec, "format": "json"},
+            )
+            log.info("Mirror group snapshot copied status on site-B is %s", snap_state)
+            while snap_state is not True:
+                time.sleep(5)
+                snap_state = get_mirror_group_snap_copied_status(
+                    rbd_secondary,
+                    mirror_snap_id,
+                    **{"group-spec": group_spec, "format": "json"},
+                )
+                log.info(
+                    "Mirror group snapshot copied status on site-B is %s", snap_state
+                )
+            log.info("Mirror group manual snapshot synced on site-B")
+
+            md5sum_second_write_site_a = []
+            for image in image_spec:
+                md5sum_second_write_site_a.append(
+                    get_md5sum_rbd_image(
+                        image_spec=image,
+                        rbd=rbd_primary,
+                        client=client_primary,
+                        file_path="file" + random_string(len=5),
+                    )
+                )
+            log.info(
+                "md5sums on site A after second write: %s", md5sum_second_write_site_a
             )
 
             md5sum_after_manual_snap_site_b = []

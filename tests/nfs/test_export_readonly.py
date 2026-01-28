@@ -89,6 +89,8 @@ def run(ceph_cluster, **kw):
             sudo=True,
             cmd=f"touch {nfs_mount}/file_rw",
         )
+        return 0
+
     except Exception as e:
         log.error(f"Failed to validate export readonly: {e}")
         return 1
@@ -106,6 +108,7 @@ def run(ceph_cluster, **kw):
         Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_readonly)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients[0], nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients[0], nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successfull")
-    return 0

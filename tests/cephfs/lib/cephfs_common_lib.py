@@ -20,6 +20,7 @@ from tests.smb.smb_operations import (
     smbclient_check_shares,
 )
 from utility.log import Log
+from utility.retry import retry
 
 log = Log(__name__)
 
@@ -49,6 +50,7 @@ class CephFSCommonUtils(FsUtils):
         accepted_list = [
             "experiencing slow operations in BlueStore",
             "Slow OSD heartbeats",
+            "stray daemon(s) not managed by cephadm",
         ]
         while ceph_healthy == 0 and (datetime.datetime.now() < end_time):
             if self.check_ceph_status(client, "HEALTH_OK"):
@@ -85,7 +87,7 @@ class CephFSCommonUtils(FsUtils):
             return True
         return False
 
-    def test_setup(self, fs_name, client):
+    def test_setup(self, fs_name, client, nfs_name="cephfs-nfs"):
         """
         This method is Setup to create test configuration - subvolumegroup,subvolumes,nfs servers
         Returns setup_params as dict variable upon setup sucess else 1
@@ -100,11 +102,13 @@ class CephFSCommonUtils(FsUtils):
 
         nfs_servers = self.ceph_cluster.get_ceph_objects("nfs")
         nfs_server = nfs_servers[0].node.hostname
-        nfs_name = "cephfs-nfs"
-
-        client.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
-        )
+        out, _ = client.exec_command(sudo=True, cmd="ceph nfs cluster ls")
+        if nfs_name not in out:
+            self.create_nfs(
+                client,
+                nfs_cluster_name=nfs_name,
+                nfs_server_name=nfs_server,
+            )
         if wait_for_process(client=client, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
         else:
@@ -142,7 +146,9 @@ class CephFSCommonUtils(FsUtils):
         }
         return setup_params
 
-    def test_mount(self, clients, setup_params):
+    def test_mount(
+        self, clients, setup_params, mnt_type_list=["kernel", "fuse", "nfs"]
+    ):
         """
         This method is to run mount on test subvolumes
         Params:
@@ -162,7 +168,6 @@ class CephFSCommonUtils(FsUtils):
                 for _ in list(range(4))
             )
 
-            mnt_type_list = ["kernel", "fuse", "nfs"]
             mount_details = {}
             sv_list = setup_params["sv_list"]
             fs_name = setup_params["fs_name"]
@@ -243,7 +248,6 @@ class CephFSCommonUtils(FsUtils):
             )
             sv_list = setup_params["sv_list"]
             fs_name = setup_params["fs_name"]
-            group_name = setup_params["subvolumegroup"]["group_name"]
             for i in range(len(sv_list)):
                 subvol_name = sv_list[i]["subvol_name"]
                 fs_name = sv_list[i]["vol_name"]
@@ -273,7 +277,13 @@ class CephFSCommonUtils(FsUtils):
                     validate=True,
                     group_name=sv_list[i].get("group_name", None),
                 )
-            self.remove_subvolumegroup(client, fs_name, group_name, validate=True)
+            if setup_params.get("subvolumegroup"):
+                self.remove_subvolumegroup(
+                    client,
+                    fs_name,
+                    setup_params["subvolumegroup"]["group_name"],
+                    validate=True,
+                )
         except CommandFailed as ex:
             log.error("Cleanup failed with error : %s", ex)
             return 1
@@ -285,6 +295,7 @@ class CephFSCommonUtils(FsUtils):
             random.choice(string.ascii_lowercase + string.digits) for _ in range(10)
         )
 
+    @retry(CommandFailed, tries=5, delay=60)
     def subvolume_get_path(self, client, fs_name, **kwargs):
         """
         Get the path of a subvolume.
@@ -468,6 +479,8 @@ class CephFSCommonUtils(FsUtils):
 
         self.create_nfs(client, cluster, nfs_server_name=server)
 
+        wait_for_process(client, process_name=cluster)
+
         subvolume_name = kwargs.get("subvolume_name")
         if subvolume_name:
             self.create_nfs_export(
@@ -484,7 +497,14 @@ class CephFSCommonUtils(FsUtils):
         return mount_path
 
     def enc_tag(
-        self, client, op_type, subvol, enc_tag="cephfs_enctag", validate=True, **kwargs
+        self,
+        client,
+        op_type,
+        subvol,
+        enc_tag="cephfs_enctag",
+        add_suffix=True,
+        validate=True,
+        **kwargs,
     ):
         """
         This method is to set,get or remove the enctag in subvolume command
@@ -507,7 +527,10 @@ class CephFSCommonUtils(FsUtils):
         if kwargs.get("group_name"):
             cmd += f" --group_name {kwargs['group_name']}"
         if op_type == "set":
-            cmd += f" --enctag {enc_tag}_{rand_str}"
+            enc_tag = kwargs.get(enc_tag, enc_tag)
+            if kwargs.get(add_suffix, add_suffix):
+                enc_tag = f"{enc_tag}_{rand_str}"
+            cmd += f" --enctag {enc_tag}"
         out, _ = client.exec_command(
             sudo=True,
             cmd=cmd,
@@ -568,7 +591,7 @@ class CephFSCommonUtils(FsUtils):
             elif "not mounted" in str(ex):
                 return 0
 
-    def rolling_mds_failover(self, client, fs_name):
+    def rolling_mds_failover(self, client, fs_name, mds_fail_cnt=3):
         """
         This method will perform Rolling MDS failover on given FS, wait for active MDS
         Return 0 on success, 1 on failure
@@ -585,12 +608,12 @@ class CephFSCommonUtils(FsUtils):
         standby_replay_mds = [
             mds["name"] for mds in output["mdsmap"] if (mds["state"] == st2)
         ]
-        sample_cnt = min(3, len(standby_replay_mds))
+        sample_cnt = min(mds_fail_cnt, len(standby_replay_mds))
         if len(standby_replay_mds) == 0:
             standby_mds = [
                 mds["name"] for mds in output["mdsmap"] if (mds["state"] == st1)
             ]
-            sample_cnt = min(3, len(standby_mds))
+            sample_cnt = min(mds_fail_cnt, len(standby_mds))
         mds_to_fail = random.sample(mds_ls, sample_cnt)
         for mds in mds_to_fail:
             out, rc = client.exec_command(cmd=f"ceph mds fail {mds}", client_exec=True)
@@ -634,3 +657,26 @@ class CephFSCommonUtils(FsUtils):
                 time.sleep(retry_interval)  # Retry after the specified interval
 
         return 1
+
+    def is_subscription_registered(self, client):
+        """Identify if the system is subscribed or not"""
+        try:
+            cmd = (
+                "subscription-manager status | grep 'Overall Status' | awk '{print $3}'"
+            )
+            out, _ = client.exec_command(sudo=True, cmd=cmd)
+            status = out.strip()
+            log.info("Subscription status output: {}".format(status))
+            # In RHEL-9, "Disabled" means registered
+            # In RHEL-10, "Registered" means registered
+            is_subscribed = status.lower() in ["registered", "disabled"]
+            log.info(
+                "System is {}".format(
+                    "subscribed" if is_subscribed else "not subscribed"
+                )
+            )
+            return is_subscribed
+        except Exception as e:
+            raise CommandFailed(
+                "Failed to identify subscription status \n error: {0}".format(e)
+            )
