@@ -27,7 +27,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 7.1
-                    release: "nightly"
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -89,7 +89,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 7.1
-                    release: "nightly"
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -255,41 +255,41 @@ tests:
       name: setup multisite
       polarion-id: CEPH-10362
 
-  # - test:
-  #     abort-on-fail: true
-  #     clusters:
-  #       ceph-pri:
-  #         config:
-  #           cephadm: true
-  #           commands:
-  #             - "ceph versions"
-  #             - "radosgw-admin sync status"
-  #             - "ceph -s"
-  #             - "radosgw-admin realm list"
-  #             - "radosgw-admin zonegroup list"
-  #             - "radosgw-admin zone list"
-  #     desc: Retrieve the configured environment details
-  #     polarion-id: CEPH-83575227
-  #     module: exec.py
-  #     name: get shared realm info on primary
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            cephadm: true
+            commands:
+              - "ceph versions"
+              - "radosgw-admin sync status"
+              - "ceph -s"
+              - "radosgw-admin realm list"
+              - "radosgw-admin zonegroup list"
+              - "radosgw-admin zone list"
+      desc: Retrieve the configured environment details
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: get shared realm info on primary
 
-  # - test:
-  #     abort-on-fail: true
-  #     clusters:
-  #       ceph-sec:
-  #         config:
-  #           cephadm: true
-  #           commands:
-  #             - "ceph versions"
-  #             - "radosgw-admin sync status"
-  #             - "ceph -s"
-  #             - "radosgw-admin realm list"
-  #             - "radosgw-admin zonegroup list"
-  #             - "radosgw-admin zone list"
-  #     desc: Retrieve the configured environment details
-  #     polarion-id: CEPH-83575227
-  #     module: exec.py
-  #     name: get shared realm info on secondary
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-sec:
+          config:
+            cephadm: true
+            commands:
+              - "ceph versions"
+              - "radosgw-admin sync status"
+              - "ceph -s"
+              - "radosgw-admin realm list"
+              - "radosgw-admin zonegroup list"
+              - "radosgw-admin zone list"
+      desc: Retrieve the configured environment details
+      polarion-id: CEPH-83575227
+      module: exec.py
+      name: get shared realm info on secondary
 
   - test:
       clusters:
@@ -306,30 +306,30 @@ tests:
 
   # Baseline tests before upgrade
 
-  # - test:
-  #     clusters:
-  #       ceph-pri:
-  #         config:
-  #           script-name: test_Mbuckets_with_Nobjects.py
-  #           config-file-name: test_Mbuckets_with_Nobjects.yaml
-  #           verify-io-on-site: ["ceph-sec"]
-  #     desc: test to create "M" no of buckets and "N" no of objects
-  #     module: sanity_rgw_multisite.py
-  #     name: m buckets with n objects pre upgrade
-  #     polarion-id: CEPH-83575435
+  - test:
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_Mbuckets_with_Nobjects.py
+            config-file-name: test_Mbuckets_with_Nobjects.yaml
+            verify-io-on-site: ["ceph-sec"]
+      desc: test to create "M" no of buckets and "N" no of objects
+      module: sanity_rgw_multisite.py
+      name: m buckets with n objects pre upgrade
+      polarion-id: CEPH-83575435
 
-  # - test:
-  #     name: Verify DBR feature enabled on pre-upgraded cluster
-  #     desc: Check DBR feature enabled on pre-upgraded cluster
-  #     abort-on-fail: true
-  #     module: sanity_rgw_multisite.py
-  #     polarion-id: CEPH-83573596
-  #     clusters:
-  #       ceph-pri:
-  #         config:
-  #           script-name: test_check_sharding_enabled.py
-  #           config-file-name: test_check_sharding_enabled_brownfield.yaml
-  #           verify-io-on-site: ["ceph-pri", "ceph-sec"]
+  - test:
+      name: Verify DBR feature enabled on pre-upgraded cluster
+      desc: Check DBR feature enabled on pre-upgraded cluster
+      abort-on-fail: true
+      module: sanity_rgw_multisite.py
+      polarion-id: CEPH-83573596
+      clusters:
+        ceph-pri:
+          config:
+            script-name: test_check_sharding_enabled.py
+            config-file-name: test_check_sharding_enabled_brownfield.yaml
+            verify-io-on-site: ["ceph-pri", "ceph-sec"]
 
 #   # Performing cluster upgrade
 
