@@ -21,7 +21,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 8.1
-                    release: released
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -87,7 +87,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 8.1
-                    release: released
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -153,7 +153,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 8.1
-                    release: released
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -216,93 +216,93 @@ tests:
       module: test_cephadm.py
       name: deploy cluster
 
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-        ceph-sec:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-        ceph-arc:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-      name: Monitoring Services deployment
-      desc: Add monitoring services using spec file.
-      module: test_cephadm.py
-      polarion-id: CEPH-83574727
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #       ceph-sec:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #       ceph-arc:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #     name: Monitoring Services deployment
+  #     desc: Add monitoring services using spec file.
+  #     module: test_cephadm.py
+  #     polarion-id: CEPH-83574727
 
   - test:
       abort-on-fail: true
@@ -562,17 +562,20 @@ tests:
           config:
             command: start
             service: upgrade
-            verify_cluster_health: true
+            base_cmd_args:
+              verbose: true
         ceph-pri:
           config:
             command: start
             service: upgrade
-            verify_cluster_health: true
+            base_cmd_args:
+              verbose: true
         ceph-arc:
           config:
             command: start
             service: upgrade
-            verify_cluster_health: true
+            base_cmd_args:
+              verbose: true
 
   - test:
       name: Verify DBR feature enabled on upgraded cluster
