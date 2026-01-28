@@ -346,7 +346,8 @@ tests:
           config:
             command: start
             service: upgrade
-            verify_cluster_health: true
+            base_cmd_args:
+              verbose: true
 
   - test:
       clusters:
@@ -385,7 +386,8 @@ tests:
           config:
             command: start
             service: upgrade
-            verify_cluster_health: true
+            base_cmd_args:
+              verbose: true
 
   - test:
       clusters:
