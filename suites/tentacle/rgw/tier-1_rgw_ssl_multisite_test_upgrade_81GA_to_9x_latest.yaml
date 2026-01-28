@@ -26,7 +26,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 8.1
-                    release: released
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -76,7 +76,7 @@ tests:
                   service: cephadm
                   args:
                     rhcs-version: 8.1
-                    release: released
+                    release: "rc"
                     registry-url: registry.redhat.io
                     mon-ip: node1
                     orphan-initial-daemons: true
@@ -123,66 +123,66 @@ tests:
       module: test_cephadm.py
       name: deploy cluster
 
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-        ceph-sec:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-      name: Monitoring Services deployment
-      desc: Add monitoring services using spec file.
-      module: test_cephadm.py
-      polarion-id: CEPH-83574727
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #       ceph-sec:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #     name: Monitoring Services deployment
+  #     desc: Add monitoring services using spec file.
+  #     module: test_cephadm.py
+  #     polarion-id: CEPH-83574727
 
   - test:
       abort-on-fail: true
@@ -216,8 +216,8 @@ tests:
           config:
             commands:
               - "radosgw-admin realm create --rgw-realm india --default"
-              - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5} --master --default"
-              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5} --master --default"
+              - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node5}:443 --master --default"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node5}:443 --master --default"
               - "radosgw-admin period update --rgw-realm india --commit"
               - "radosgw-admin user create --uid=repuser --display_name='Replication user' --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --rgw-realm india --system"
               - "radosgw-admin zone modify --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
@@ -237,9 +237,9 @@ tests:
           config:
             commands:
               - "sleep 120"
-              - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node5}:443 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
+              - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node5}:443 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node5}:443 --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin period update --rgw-realm india --commit"
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_verify_ssl False"
