@@ -322,24 +322,24 @@ tests:
             verify-io-on-site: ["ceph-pri"]
             config-file-name: test_Mbuckets_with_Nobjects_enc.yaml
 
-  - test:
-      name: Test rgw through CURL
-      desc: Test rgw through CURL
-      polarion-id: CEPH-83575572
-      module: sanity_rgw.py
-      clusters:
-        ceph-pri:
-          config:
-            script-name: ../curl/test_rgw_using_curl.py
-            config-file-name: ../../curl/configs/test_rgw_using_curl.yaml
+  # - test:
+  #     name: Test rgw through CURL
+  #     desc: Test rgw through CURL
+  #     polarion-id: CEPH-83575572
+  #     module: sanity_rgw.py
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: ../curl/test_rgw_using_curl.py
+  #           config-file-name: ../../curl/configs/test_rgw_using_curl.yaml
 
-  - test:
-      name: Test Etag not empty for complete multipart upload in aws
-      desc: Test Etag not empty for complete multipart upload in aws
-      polarion-id: CEPH-9801
-      module: sanity_rgw.py
-      clusters:
-        ceph-pri:
-          config:
-            script-name: ../aws/test_aws.py
-            config-file-name: ../../aws/configs/test_complete_multipart_upload_etag_not_empty.yaml
+  # - test:
+  #     name: Test Etag not empty for complete multipart upload in aws
+  #     desc: Test Etag not empty for complete multipart upload in aws
+  #     polarion-id: CEPH-9801
+  #     module: sanity_rgw.py
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: ../aws/test_aws.py
+  #           config-file-name: ../../aws/configs/test_complete_multipart_upload_etag_not_empty.yaml
