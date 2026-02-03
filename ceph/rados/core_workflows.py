@@ -1626,7 +1626,7 @@ class RadosOrchestrator:
         stripe_unit = kwargs.get("stripe_unit", None)
         profile_name = kwargs.get("profile_name", f"ecp_{pool_name}")
         rule_name = f"rule_{pool_name}"
-        enable_fast_ec_features = kwargs.get("enable_fast_ec_features", False)
+        enable_fast_ec_features = kwargs.get("enable_fast_ec_features", True)
         # enable allow_ec_overwrites by default
         kwargs["erasure_code_use_overwrites"] = kwargs.get(
             "erasure_code_use_overwrites", True
@@ -1669,6 +1669,15 @@ class RadosOrchestrator:
                     "Params 'crush-osds-per-failure-domain' only supported from 8.x"
                     "No modification of the command done."
                 )
+        disabled_ec_optimizations_global_flag = False
+        if major_version >= 9 and not enable_fast_ec_features:
+            log.info(
+                "EC pool to be created without fast ec. Disabling fast ec at global level"
+            )
+            self.node.shell(
+                ["ceph config set global osd_pool_default_flag_ec_optimizations false"]
+            )
+            disabled_ec_optimizations_global_flag = True
 
         if plugin == "lrc":
             cmd = cmd + f" l={l}"
@@ -1755,6 +1764,12 @@ class RadosOrchestrator:
             )
         except Exception as err:
             log.error("Exception hit while listing the EC Crush rule used: %s", err)
+            return False
+        finally:
+            if disabled_ec_optimizations_global_flag:
+                self.node.shell(
+                    ["ceph config rm global osd_pool_default_flag_ec_optimizations"]
+                )
         return True
 
     def change_osd_state(self, action: str, target: int, timeout: int = 300) -> bool:
@@ -7246,7 +7261,6 @@ EOF"""
                 log.warning(f"Failed to delete cluster {cluster_id}: {e}")
 
         # Step 3: Delete filesystem
-        # Note: Pools are deleted separately via created_pools tracking in the caller
         fs_name = nfs_config.get("fs_name")
         if fs_name:
             try:
