@@ -66,6 +66,15 @@ deb_packages = ["wget", "git-core", "python-virtualenv", "lsb-release", "ntp"]
 deb_all_packages = " ".join(deb_packages)
 
 
+def ensure_git_installed(ceph):
+    """Check if git is installed on the node (no install)."""
+    out, err = ceph.exec_command(sudo=True, cmd="command -v git", check_ec=False)
+    if out and out.strip():
+        log.info("git is installed on %s", ceph.hostname)
+    else:
+        log.warning("git is not installed on %s", ceph.hostname)
+
+
 def run(**kw):
     log.info("Running test")
     ceph_nodes = kw.get("ceph_nodes")
@@ -175,6 +184,7 @@ def install_prereq(
         ceph.exec_command(
             cmd="sudo apt-get install -y " + deb_all_packages, long_running=True
         )
+        ensure_git_installed(ceph)
     else:
         if distro_ver.startswith("7"):
             ceph.exec_command(cmd="sudo systemctl restart NetworkManager.service")
@@ -208,6 +218,7 @@ def install_prereq(
         ceph.exec_command(
             cmd=f"sudo yum install -y {rpm_all_packages}", long_running=True
         )
+        ensure_git_installed(ceph)
 
         # Restarting the node for qdisc filter to be loaded. This is required for
         # RHEL-8

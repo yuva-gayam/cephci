@@ -2062,8 +2062,7 @@ def clone_the_repo(config, node, path_to_clone):
     TODO: if path_to_clone is not given, make temporary dir on test
           node and clone the repo in it.
     """
-    # Ensure git is installed (e.g. multisite sets up multiple nodes; not all use perform_env_setup)
-    node.exec_command(sudo=True, cmd="yum install -y --nogpgcheck git", check_ec=False)
+
     log.info("cloning the repo")
     branch = config.get("branch", "master")
     log.info(f"branch: {branch}")
@@ -2180,8 +2179,6 @@ def perform_env_setup(config, node, ceph_cluster):
     pip_cmd = "venv/bin/pip"
     node.exec_command(cmd=f'sudo rm -rf {config["test_folder"]}')
     node.exec_command(cmd=f"sudo mkdir {config['test_folder']}")
-    # Ensure git is installed before cloning (client nodes may not have it by default)
-    node.exec_command(sudo=True, cmd="yum install -y --nogpgcheck git", check_ec=False)
     clone_the_repo(config, node, test_folder_path)
 
     setup_cluster_access(ceph_cluster, node)
