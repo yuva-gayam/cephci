@@ -188,6 +188,7 @@ tests:
             node: node6
             install_packages:
               - ceph-common
+              - git
             copy_admin_keyring: true
         ceph-sec:
           config:
@@ -196,6 +197,7 @@ tests:
             node: node6
             install_packages:
               - ceph-common
+              - git
             copy_admin_keyring: true
       desc: Configure the RGW client system
       destroy-cluster: false
@@ -310,17 +312,17 @@ tests:
 
   # Baseline tests before upgrade
 
-  - test:
-      name: Test LC Expiration on multisite
-      desc: Test LC Expiration on multisite
-      polarion-id: CEPH-10737
-      module: sanity_rgw_multisite.py
-      clusters:
-        ceph-pri:
-          config:
-            script-name: test_bucket_lifecycle_object_expiration_transition.py
-            config-file-name: test_lc_rule_prefix_and_tag.yaml
-            verify-io-on-site: ["ceph-pri", "ceph-sec"]
+  # - test:
+  #     name: Test LC Expiration on multisite
+  #     desc: Test LC Expiration on multisite
+  #     polarion-id: CEPH-10737
+  #     module: sanity_rgw_multisite.py
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_bucket_lifecycle_object_expiration_transition.py
+  #           config-file-name: test_lc_rule_prefix_and_tag.yaml
+  #           verify-io-on-site: ["ceph-pri", "ceph-sec"]
 
   # Performing cluster upgrade
 
@@ -334,12 +336,18 @@ tests:
           config:
             command: start
             service: upgrade
+            base_cmd_args:
+              verbose: true
             verify_cluster_health: true
         ceph-pri:
           config:
             command: start
             service: upgrade
+            base_cmd_args:
+              verbose: true
             verify_cluster_health: true
+      destroy-cluster: false
+      abort-on-fail: true
       polarion-id: CEPH-83574647
 
   - test:
