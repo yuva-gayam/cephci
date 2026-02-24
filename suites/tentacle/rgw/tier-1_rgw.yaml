@@ -104,7 +104,22 @@ tests:
       module: sanity_rgw.py
       name: Test test_iam_get_account_summary RFE
       polarion-id: CEPH-9789
-
+  - test:
+      config:
+        script-name: test_rgw_user_keys_create_date.py
+        config-file-name: test_rgw_user_keys_create_date.yaml
+      desc: Test test_iam_get_account_summary RFE
+      module: sanity_rgw.py
+      name: Test test_iam_get_account_summary RFE
+      polarion-id: CEPH-9789
+  - test:
+      config:
+        script-name: test_rgw_user_keys_create_date.py
+        config-file-name: test_rgw_user_keys_create_date.yaml
+      desc: Test test_iam_get_account_summary RFE
+      module: sanity_rgw.py
+      name: Test test_iam_get_account_summary RFE
+      polarion-id: CEPH-9789
   # - test:
   #     config:
   #       script-name: test_Mbuckets_with_Nobjects.py
