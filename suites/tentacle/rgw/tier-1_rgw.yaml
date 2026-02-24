@@ -98,8 +98,8 @@ tests:
   # Testing stage
   - test:
       config:
-        script-name: ../aws/test_iam_get_account_summary.py
-        config-file-name: ../../aws/configs//test_iam_account_summary.yaml
+        script-name: test_rgw_user_keys_create_date.py
+        config-file-name: test_rgw_user_keys_create_date.yaml
       desc: Test test_iam_get_account_summary RFE
       module: sanity_rgw.py
       name: Test test_iam_get_account_summary RFE
