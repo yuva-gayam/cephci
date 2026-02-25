@@ -485,7 +485,32 @@ tests:
       module: sanity_rgw_multisite.py
       name: create 20 bucket in primary
       polarion-id: CEPH-83575383
-
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            set-env: true
+            script-name: ../aws/test_aws.py
+            config-file-name: ../../aws/configs/test_aws_buckets_creation.yaml
+            run-on-haproxy: true
+      desc: create 20 bucket in primary
+      module: sanity_rgw_multisite.py
+      name: create 20 bucket in primary
+      polarion-id: CEPH-83575383  
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-pri:
+          config:
+            set-env: true
+            script-name: ../aws/test_aws.py
+            config-file-name: ../../aws/configs/test_aws_buckets_creation.yaml
+            run-on-haproxy: true
+      desc: create 20 bucket in primary
+      module: sanity_rgw_multisite.py
+      name: create 20 bucket in primary
+      polarion-id: CEPH-83575383
   - test:
       abort-on-fail: true
       clusters:
@@ -516,7 +541,32 @@ tests:
       module: sanity_rgw_multisite.py
       name: create 20 bucket on tertiary
       polarion-id: CEPH-83575383
-
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-ter:
+          config:
+            set-env: true
+            script-name: ../aws/test_aws.py
+            config-file-name: ../../aws/configs/test_aws_buckets_creation.yaml
+            run-on-haproxy: true
+      desc: create 20 bucket on tertiary
+      module: sanity_rgw_multisite.py
+      name: create 20 bucket on tertiary
+      polarion-id: CEPH-83575383
+  - test:
+      abort-on-fail: true
+      clusters:
+        ceph-ter:
+          config:
+            set-env: true
+            script-name: ../aws/test_aws.py
+            config-file-name: ../../aws/configs/test_aws_buckets_creation.yaml
+            run-on-haproxy: true
+      desc: create 20 bucket on tertiary
+      module: sanity_rgw_multisite.py
+      name: create 20 bucket on tertiary
+      polarion-id: CEPH-83575383
   - test:
       abort-on-fail: true
       clusters:
