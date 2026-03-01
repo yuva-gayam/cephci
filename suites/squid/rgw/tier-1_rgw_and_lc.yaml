@@ -155,4 +155,3 @@ tests:
       config:
         script-name: test_bucket_lifecycle_config_ops.py
         config-file-name: test_bucket_lc_disable_object_exp.yaml
-

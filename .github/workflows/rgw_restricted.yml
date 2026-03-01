@@ -1,0 +1,61 @@
+name: rgw-test-suites
+
+on:
+  push:
+    paths:
+      - "suites/squid/rgw/**"
+      - "suites/tentacle/rgw/**"
+      - "suites/reef/rgw/**"
+  pull_request:
+    paths:
+      - "suites/squid/rgw/**"
+      - "suites/tentacle/rgw/**"
+      - "suites/reef/rgw/**"
+
+jobs:
+  rgw-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   
+
+      - name: Fetch base branch
+        run: |
+          git fetch origin ${{ github.base_ref }}
+
+      - name: Fail if new tests are added to restricted suites
+        run: |
+          set -euo pipefail
+          base_branch="origin/${{ github.base_ref }}"
+          restricted_hits=()
+
+          echo "🔎 Checking if testcases are added in restricted suites"
+          while read -r suite_path; do
+            [[ -z "$suite_path" || "$suite_path" =~ ^# ]] && continue
+
+            if [ -d "$suite_path" ]; then
+              if git diff "$base_branch"...HEAD -- "$suite_path"/*.yaml | grep -q '^\+.*- test:'; then
+                echo "🚫 New testcases detected in restricted suite dir: $suite_path"
+                restricted_hits+=("$suite_path")
+              fi
+            elif [ -f "$suite_path" ]; then
+              if git diff "$base_branch"...HEAD -- "$suite_path" | grep -q '^\+.*- test:'; then
+                echo "🚫 New testcases detected in restricted suite file: $suite_path"
+                restricted_hits+=("$suite_path")
+              fi
+            else
+              echo "ℹ️ $suite_path not found (skipping)"
+            fi
+          done < restricted_suites.txt
+
+          if [ ${#restricted_hits[@]} -gt 0 ]; then
+            echo ""
+            echo "❌ These suites are restricted. Please move the new tests to a different suite:"
+            for suite in "${restricted_hits[@]}"; do
+              echo "   - $suite"
+            done
+            exit 1
+          else
+            echo "✅ No restricted suites were modified with new testcases."
+          fi
