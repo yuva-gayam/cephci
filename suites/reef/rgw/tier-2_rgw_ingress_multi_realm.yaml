@@ -1,12 +1,8 @@
-# Tier 2: CEPH-83574608 - Create a RGW Ingress ingress daemon on multiple realms
-# Tier 2: CEPH-83574609 - Create a RGW Ingress ingress daemon on multiple realms with SSL
+# conf: conf/tentacle/rgw/rgw_ec_2+2_cluster.yaml
+# suite includes tests with ingress service
 #
-# This test suite evaluates the Ingress HAproxy deployment scenario wherein there exists more than one
-# RGW daemons configured with multiple realm, along with zones and zonegroups.
 
 tests:
-
-  # Cluster deployment stage
 
   - test:
       abort-on-fail: true
@@ -52,95 +48,20 @@ tests:
               args:
                 all-available-devices: true
           - config:
-              command: apply_spec
-              service: orch
-              specs:
-                - service_type: rgw
-                  service_id: rgw.realm1
-                  placement:
-                    nodes:
-                      - node5
-                      - node6
-                  spec:
-                    rgw_frontend_port: 8080
-          - config:
-              command: apply_spec
-              service: orch
-              specs:
-                - service_type: rgw
-                  service_id: rgw.realm2
-                  placement:
-                    nodes:
-                      - node5
-                      - node6
-                  spec:
-                    rgw_frontend_port: 8081
+              command: apply
+              service: rgw
+              pos_args:
+                - rgw.1
+              args:
+                placement:
+                  label: rgw
+                  nodes:
+                    - node3
+                    - node4
       desc: RHCS cluster deployment using cephadm.
-      polarion-id: CEPH-83573713
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy cluster
-
-  - test:
-      name: Monitoring Services deployment
-      desc: Add monitoring services using spec file.
-      module: test_cephadm.py
-      polarion-id: CEPH-83574727
-      config:
-        steps:
-          - config:
-              command: apply_spec
-              service: orch
-              validate-spec-services: true
-              specs:
-                - service_type: prometheus
-                  placement:
-                    count: 1
-                    nodes:
-                      - node1
-                - service_type: grafana
-                  placement:
-                    nodes:
-                      - node1
-                - service_type: alertmanager
-                  placement:
-                    count: 1
-                - service_type: node-exporter
-                  placement:
-                    host_pattern: "*"
-                - service_type: crash
-                  placement:
-                    host_pattern: "*"
-
-  - test:
-      abort-on-fail: true
-      config:
-        cephadm: true
-        commands:
-          - "radosgw-admin realm create --rgw-realm india --default"
-          - "radosgw-admin zonegroup create --rgw-zonegroup south --rgw-realm india --master --default"
-          - "radosgw-admin zone create --rgw-zone ka --rgw-zonegroup south --rgw-realm india --endpoints http://{node:node5}:8080 --master --default"
-          - "radosgw-admin period update --commit --rgw-realm india"
-          - "ceph config set client.{service_name:rgw.realm1} rgw_realm india"
-          - "ceph config set client.{service_name:rgw.realm1} rgw_zonegroup south"
-          - "ceph config set client.{service_name:rgw.realm1} rgw_zone ka"
-          - "ceph orch restart {service_name:rgw.realm1}"
-          - "radosgw-admin realm create --rgw-realm us"
-          - "radosgw-admin zonegroup create --rgw-zonegroup east --rgw-realm us --master --default"
-          - "radosgw-admin zone create --rgw-zone east-1 --rgw-zonegroup east --rgw-realm us --endpoints http://{node:node6}:8081 --master --default"
-          - "radosgw-admin period update --commit --rgw-realm us"
-          - "ceph config set client.{service_name:rgw.realm2} rgw_realm us"
-          - "ceph config set client.{service_name:rgw.realm2} rgw_zonegroup east"
-          - "ceph config set client.{service_name:rgw.realm2} rgw_zone east-1"
-          - "ceph orch restart {service_name:rgw.realm2}"
-          - "ceph -s"
-          - "radosgw-admin realm list"
-          - "radosgw-admin zonegroup list"
-          - "radosgw-admin zone list"
-      desc: Configure the Object realms and its zones
-      module: exec.py
-      name: configure realm
-      polarion-id: CEPH-83573815
 
   - test:
       name: Deploy RGW Ingress daemon with SSL
@@ -156,40 +77,31 @@ tests:
               validate-spec-services: true
               specs:
                 - service_type: ingress
-                  service_id: rgw.realm1
+                  service_id: rgw.rgw.1
                   placement:
                     nodes:
                       - node3
                       - node4
                   spec:
-                    backend_service: rgw.rgw.realm1
-                    virtual_ip: 10.0.195.174/24 # floating ip1 in rhos-01
+                    backend_service: rgw.rgw.1
+                    virtual_ip:  get_floating_ip # pick the free floating ip from test env
                     frontend_port: 443
                     monitor_port: 1967
                     ssl: true
                     certificate_source: cephadm-signed
-
   - test:
-      name: Deploy RGW Ingress daemon
       abort-on-fail: true
-      desc: Add RGW and HA Proxy services using spec file.
-      module: test_cephadm.py
-      polarion-id: CEPH-83574608
       config:
-        steps:
-          - config:
-              command: apply_spec
-              service: orch
-              validate-spec-services: true
-              specs:
-                - service_type: ingress
-                  service_id: rgw.realm2
-                  placement:
-                    nodes:
-                      - node5
-                      - node6
-                  spec:
-                    backend_service: rgw.rgw.realm2
-                    virtual_ip: 10.0.195.111/24 # floating ip2 in rhos-01
-                    frontend_port: 8083
-                    monitor_port: 1967
+        command: add
+        id: client.1
+        node: node1
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure the RGW client system
+      polarion-id: CEPH-83573758
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
