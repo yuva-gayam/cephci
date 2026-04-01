@@ -1,0 +1,39 @@
+
+#Conf for: Feature testing configuration: 2+2 on 4 nodes
+globals:
+  - ceph-cluster:
+      name: ceph
+
+      node1:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - _admin
+          - installer
+          - mgr
+          - mon
+          - osd
+          - client
+
+      node2:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - mgr
+          - mon
+          - osd
+
+      node3:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - mon
+          - osd
+          - rgw
+
+      node4:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
