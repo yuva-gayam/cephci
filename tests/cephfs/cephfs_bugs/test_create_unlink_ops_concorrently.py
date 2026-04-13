@@ -117,8 +117,10 @@ def run(ceph_cluster, **kw):
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
         nfs_server = nfs_servers[0].node.hostname
         clients[0].exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        clients[0].exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util_v1.create_nfs(
+            clients[0],
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=clients[0], process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -143,19 +145,17 @@ def run(ceph_cluster, **kw):
 
         log.info("Run create and unlink ops.")
         for j in range(10):
-            for i in range(1024):
-                filename = f"file-{i}"
-                for directory in [
-                    kernel_mounting_dir_1,
-                    fuse_mounting_dir_1,
-                    nfs_mountung_dir_1,
-                ]:
-                    clients[0].exec_command(
-                        sudo=True, cmd=f"touch {directory}{filename}"
-                    )
-                    clients[0].exec_command(
-                        sudo=True, cmd=f"rm -rf {directory}{filename}"
-                    )
+            for directory in [
+                kernel_mounting_dir_1,
+                fuse_mounting_dir_1,
+                nfs_mountung_dir_1,
+            ]:
+                clients[0].exec_command(
+                    sudo=True,
+                    cmd=f"for i in $(seq 0 1023); do "
+                    f"touch {directory}file-$i && rm -rf {directory}file-$i; done",
+                    timeout=600,
+                )
         log.info(
             "Check for the Ceph Health to see if there are any crash and Health Errors."
         )

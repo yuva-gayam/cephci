@@ -56,8 +56,10 @@ def run(ceph_cluster, **kw):
         nfs_name = "cephfs-nfs"
         default_fs = "cephfs" if not erasure else "cephfs-ec"
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -72,6 +74,7 @@ def run(ceph_cluster, **kw):
 
         if not fs_details:
             fs_util.create_fs(client1, fs_name)
+            fs_util.wait_for_mds_process(client1, fs_name)
         if "5.0" in rhbuild:
             client1.exec_command(
                 sudo=True,
@@ -162,10 +165,10 @@ def run(ceph_cluster, **kw):
         fusepath = f"{fuse_mounting_dir_1}{clients[0].node.hostname}dd_file_fuse"
         nfspath = f"{nfs_mounting_dir}{clients[0].node.hostname}dd_file_nfs"
         mv_bw_mounts = [
-            f"cp {kernelpath} {nfs_mounting_dir}_dd_file_kernel",
-            f"cp {fusepath} {nfs_mounting_dir}_dd_file_fuse",
-            f"cp {nfspath} {kernel_mounting_dir_1}_dd_file_nfs1",
-            f"cp {nfspath} {fuse_mounting_dir_1}_dd_file_nfs2",
+            f"rsync -av {kernelpath} {nfs_mounting_dir}_dd_file_kernel",
+            f"rsync -av {fusepath} {nfs_mounting_dir}_dd_file_fuse",
+            f"rsync -av {nfspath} {kernel_mounting_dir_1}_dd_file_nfs1",
+            f"rsync -av {nfspath} {fuse_mounting_dir_1}_dd_file_nfs2",
         ]
         for cmd in mv_bw_mounts:
             clients[0].exec_command(sudo=True, cmd=cmd)

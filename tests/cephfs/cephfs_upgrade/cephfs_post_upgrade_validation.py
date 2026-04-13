@@ -122,8 +122,10 @@ def nfs_test(nfs_req_params):
     log.info("Create new nfs cluster, new exports and run IO")
 
     new_nfs_name = f"{nfs_name}_new"
-    out, rc = nfs_client.exec_command(
-        sudo=True, cmd=f"ceph nfs cluster create {new_nfs_name} {nfs_server_name_1}"
+    fs_util.create_nfs(
+        nfs_client,
+        nfs_cluster_name=new_nfs_name,
+        nfs_server_name=nfs_server_name_1,
     )
     log.info("Verify ceph nfs cluster is created")
     if wait_for_process(client=nfs_client, process_name=nfs_name, ispresent=True):
@@ -317,11 +319,32 @@ def snap_sched_test(snap_req_params):
     for sv in sv_snap:
         snap_client = sv_snap[sv]["mnt_client_new"]
         for mnt_pt in [sv_snap[sv]["mnt_kernel"], sv_snap[sv]["mnt_fuse"]]:
-            cmd = f"ls {mnt_pt}/.snap/*{sv_snap[sv]['snap_list'][0]}*/*"
-            out, rc = snap_client.exec_command(sudo=True, cmd=cmd)
+            try:
+                cmd = f"ls {mnt_pt}/.snap/*{sv_snap[sv]['snap_list'][0]}*/*"
+                out, rc = snap_client.exec_command(sudo=True, cmd=cmd)
+            except CommandFailed as ex:
+                log.info(ex)
+                retry_exec = retry(CommandFailed, tries=3, delay=20)(
+                    snap_client.exec_command
+                )
+                cmd = f"cd {mnt_pt}/.snap/;ls -l ./*"
+                out1, _ = retry_exec(
+                    sudo=True,
+                    cmd=cmd,
+                )
+                log.info(out1)
+                cmd = f"ls {mnt_pt}/.snap/_{sv_snap[sv]['snap_list'][0]}*/dd_test_file"
+                out, _ = retry_exec(
+                    sudo=True,
+                    cmd=cmd,
+                )
+                log.info(out)
             file_path = out.strip()
+            retry_exec = retry(CommandFailed, tries=3, delay=20)(
+                snap_client.exec_command
+            )
             cmd = f"dd if={file_path} count=10 bs=1M > read_dd"
-            out, rc = snap_client.exec_command(sudo=True, cmd=cmd)
+            out, rc = retry_exec(sudo=True, cmd=cmd)
 
     log.info("Verified that existing snapshots are accessible and read op suceeds")
 
@@ -631,7 +654,8 @@ def dir_pin_test(dir_pin_req_params):
         for sv in config["CephFS"][vol_name][svg]:
             if "svg" in svg:
                 if config["CephFS"][vol_name][svg][sv].get("pinned_dir_list"):
-                    pin_vol.update(
+                    pin_vol.update({sv: {}})
+                    pin_vol[sv].update(
                         {
                             "sv": sv,
                             "svg": svg,
@@ -639,79 +663,57 @@ def dir_pin_test(dir_pin_req_params):
                                 "pinned_dir_list"
                             ],
                             "pin_rank": config["CephFS"][vol_name][svg][sv]["pin_rank"],
+                            "mnt_client": config["CephFS"][vol_name][svg][sv][
+                                "mnt_client"
+                            ],
+                            "mnt_pt": config["CephFS"][vol_name][svg][sv]["mnt_pt"],
                         }
                     )
-
-    mon_node_ips = fs_util.get_mon_node_ips()
-    subvol_path, rc = client.exec_command(
-        sudo=True,
-        cmd=f"ceph fs subvolume getpath {vol_name} {pin_vol['sv']} {pin_vol['svg']}",
-    )
-    subvol_path = subvol_path.strip()
-    fuse_mounting_dir_1 = f"/mnt/{pin_vol['sv']}_post_upgrade_fuse"
-    kernel_mounting_dir_1 = f"/mnt/{pin_vol['sv']}_post_upgrade_kernel"
-    mnt_client = random.choice(dir_pin_req_params["clients"])
-    log.info(f"Mount subvolume having pinned dirs {pin_vol['sv']}")
-    fs_util.fuse_mount(
-        [mnt_client],
-        fuse_mounting_dir_1,
-        extra_params=f"-r {subvol_path} --client_fs {vol_name}",
-    )
-    fs_util.kernel_mount(
-        [mnt_client],
-        kernel_mounting_dir_1,
-        ",".join(mon_node_ips),
-        sub_dir=f"{subvol_path}",
-        extra_params=f",fs={vol_name}",
-    )
-
-    pin_dir = random.choice(pin_vol["pinned_dirs"])
+    sv_iter = random.choice(list(pin_vol.keys()))
+    pin_dir = random.choice(pin_vol[sv_iter]["pinned_dirs"])
     log.info(f"Pinned dir selected for IO with kernel-mount - {pin_dir}")
-    io_path_kernel = f"{kernel_mounting_dir_1}/{pin_dir}"
-    pin_dir = random.choice(pin_vol["pinned_dirs"])
-    log.info(f"Pinned dir selected for IO with fuse-mount - {pin_dir}")
-    io_path_fuse = f"{fuse_mounting_dir_1}/{pin_dir}"
-    for io_path in [io_path_kernel, io_path_fuse]:
-        out, rc = client.exec_command(
-            sudo=True,
-            cmd=f"ceph fs status {vol_name} --format json",
-        )
-        output_before = json.loads(out)
-        for mds in output_before["mdsmap"]:
-            log.info(mds)
-            if int(mds["rank"]) == int(pin_vol["pin_rank"]):
-                mds_dirs_before = mds["dirs"]
-                break
-        log.info("Run IO on pinned dirs")
-        fs_util.run_ios_V1(mnt_client, io_path)
-        out, rc = client.exec_command(
-            sudo=True,
-            cmd=f"ceph fs status {vol_name} --format json",
-        )
-        output_after = json.loads(out)
-        for mds in output_after["mdsmap"]:
-            if int(mds["rank"]) == int(pin_vol["pin_rank"]):
-                mds_dirs_after = mds["dirs"]
-                break
-        if int(mds_dirs_after) != int(mds_dirs_before):
-            log.info(
-                f"IO from pinned dirs goes through MDS rank {pin_vol['pin_rank']} as expected"
-            )
-            log.info(
-                f"Before IO fs status : {output_before['mdsmap']},\nAfter IO fs status:{output_after['mdsmap']}"
-            )
-        else:
-            log.info(
-                f"Before IO fs status : {output_before['mdsmap']},\nAfter IO fs status:{output_after['mdsmap']}"
-            )
-            log.error(
-                f"IO from pinned dirs doesn't go through MDS rank {pin_vol['pin_rank']}"
-            )
-            test_status = 1
+    io_path = f"{pin_vol[sv_iter]['mnt_pt']}/{pin_dir}"
+    mnt_client = pin_vol[sv_iter]["mnt_client"]
 
-    for mnt_pt in [fuse_mounting_dir_1, kernel_mounting_dir_1]:
-        cmd = f"umount -l {mnt_pt};rm -rf {mnt_pt}"
-        out, rc = mnt_client.exec_command(sudo=True, cmd=cmd)
+    out, rc = client.exec_command(
+        sudo=True,
+        cmd=f"ceph fs status {vol_name} --format json",
+    )
+    output_before = json.loads(out)
+    for mds in output_before["mdsmap"]:
+        log.info(mds)
+        if int(mds["rank"]) == int(pin_vol[sv_iter]["pin_rank"]):
+            mds_dirs_before = mds["dirs"]
+            break
+    log.info("Run IO on pinned dirs")
+    for client_tmp in dir_pin_req_params["clients"]:
+        if client_tmp.node.hostname == mnt_client:
+            fs_util.run_ios_V1(client_tmp, io_path)
+    out, rc = client.exec_command(
+        sudo=True,
+        cmd=f"ceph fs status {vol_name} --format json",
+    )
+    output_after = json.loads(out)
+    for mds in output_after["mdsmap"]:
+        if int(mds["rank"]) == int(pin_vol[sv_iter]["pin_rank"]):
+            mds_dirs_after = mds["dirs"]
+            break
+    if int(mds_dirs_after) != int(mds_dirs_before):
+        log.info(
+            f"IO from pinned dirs goes through MDS rank {pin_vol[sv_iter]['pin_rank']} as expected"
+        )
+        log.info(
+            f"Before IO fs status : {output_before['mdsmap']},\nAfter IO fs status:{output_after['mdsmap']}"
+        )
+    else:
+        log.info(
+            f"Before IO fs status : {output_before['mdsmap']},\nAfter IO fs status:{output_after['mdsmap']}"
+        )
+        log.error(
+            f"IO from pinned dirs doesn't go through MDS rank {pin_vol[sv_iter]['pin_rank']}"
+        )
+        test_status = 1
+
     return test_status
 
 
@@ -1593,13 +1595,14 @@ def run(ceph_cluster, **kw):
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
         config = kw.get("config")
         build = config.get("rhbuild")
-        test_data = kw.get("test_data")
         cg_snap_util = CG_Snap_Utils(ceph_cluster)
         cg_snap_io = CG_snap_IO(ceph_cluster)
         common_util = CephFSCommonUtils(ceph_cluster)
         attr_util = CephFSAttributeUtilities(ceph_cluster)
         fscrypt_util = FscryptUtils(ceph_cluster)
         test_status = 0
+        if common_util.wait_for_healthy_ceph(clients[0], 300):
+            return 1
         if fs_util.get_fs_info(clients[0], "cephfs_new"):
             default_fs = "cephfs_new"
             clients[0].exec_command(sudo=True, cmd="ceph fs volume create cephfs")
@@ -1620,9 +1623,9 @@ def run(ceph_cluster, **kw):
             "fs_name": default_fs,
         }
         f.close()
-        ibm_build = fs_util.get_custom_config_value(test_data, "ibm-build")
+        product = config.get("product")
         space_str = "\t\t\t\t\t\t\t\t\t"
-        if pre_upgrade_config.get("NFS") and ibm_build:
+        if pre_upgrade_config.get("NFS") and product == "ibm":
             log.info(
                 "\n\n %s Test1 CEPH-83575098 : Post-upgrade NFS Validation\n",
                 space_str,
@@ -1633,7 +1636,7 @@ def run(ceph_cluster, **kw):
             log.info(
                 "Skipped NFS test,Either Setup is not IBM Ceph cluster or IBMCEPH version is <7.1"
             )
-            log.info("IBM build : %s", ibm_build)
+            log.info("Product : %s", product)
         log.info(
             f"\n\n {space_str}Test2 : Post-upgrade Snapshot and Schedule Validation\n"
         )
@@ -1643,7 +1646,6 @@ def run(ceph_cluster, **kw):
         log.info(f"\n\n {space_str} Test3 : Post-upgrade Clone Validation \n")
         clone_test(test_reqs)
         log.info(" Clone post upgrade validation succeeded \n")
-
         log.info(f"\n\n {space_str} Test4 : Post-upgrade Pinning Validation \n")
         test_status = dir_pin_test(test_reqs)
         if test_status == 1:

@@ -22,7 +22,7 @@ from compute.ibm_vpc import CephVMNodeIBM, get_ibm_service
 from compute.openstack import CephVMNodeV2, NetworkOpFailure, NodeError, VolumeOpFailure
 from utility.log import Log
 from utility.retry import retry
-from utility.utils import generate_node_name
+from utility.utils import generate_node_name, parse_custom_config_list
 
 from .ceph import Ceph, CommandFailed, RolesContainer
 from .parallel import parallel
@@ -364,7 +364,13 @@ def setup_vm_node_ibm(node, ceph_nodes, **params):
 
 
 def create_ceph_nodes(
-    cluster_conf, inventory, osp_cred, run_id, instances_name=None, enable_eus=False
+    cluster_conf,
+    inventory,
+    osp_cred,
+    run_id,
+    instances_name=None,
+    enable_eus=False,
+    custom_config=None,
 ):
     log.info("Creating osp instances")
     osp_glbs = osp_cred.get("globals")
@@ -376,6 +382,7 @@ def create_ceph_nodes(
         inventory_path = os.path.abspath(ceph_cluster.get("inventory"))
         with open(inventory_path, "r") as inventory_stream:
             inventory = yaml.safe_load(inventory_stream)
+
     node_count = 0
     params["cloud-data"] = inventory.get("instance").get("setup")
     params["username"] = os_cred["username"]
@@ -399,8 +406,22 @@ def create_ceph_nodes(
             )
 
         params["cluster-name"] = ceph_cluster.get("name")
-        params["vm-size"] = inventory.get("instance").get("create").get("vm-size")
         params["vm-network"] = inventory.get("instance").get("create").get("vm-network")
+
+        # Process the VM flavor and network. Highest precedence goes to custom-config
+        params["vm-size"] = inventory.get("instance").get("create").get("vm-size")
+        overrides = parse_custom_config_list(custom_config)
+        if overrides.get("openstack_vm_profile"):
+            params["vm-size"] = overrides["openstack_vm_profile"]
+        openstack_network_override = None
+        if overrides.get("openstack_networks"):
+            _nets = [
+                n.strip()
+                for n in overrides["openstack_networks"].split(",")
+                if n.strip()
+            ]
+            if _nets:
+                openstack_network_override = _nets
 
         if params.get("root-login") is False:
             params["root-login"] = False
@@ -428,7 +449,11 @@ def create_ceph_nodes(
                     node_params["role"],
                 )
 
-                node_params["networks"] = node_dict.get("networks", [])
+                node_params["networks"] = (
+                    openstack_network_override
+                    if openstack_network_override is not None
+                    else node_dict.get("networks", [])
+                )
                 if node_dict.get("no-of-volumes"):
                     node_params["no-of-volumes"] = node_dict.get("no-of-volumes")
                     node_params["size-of-disks"] = node_dict.get("disk-size")
@@ -500,6 +525,186 @@ def setup_vm_node(node, ceph_nodes, **params):
         if vm is not None:
             vm.delete()
 
+        raise
+    except BaseException as be:  # noqa
+        log.error(be, exc_info=True)
+        raise
+
+
+def create_aws_ceph_nodes(
+    cluster_conf,
+    inventory,
+    aws_creds,
+    run_id,
+    instances_name=None,
+    custom_config=None,
+):
+    """
+    Create EC2 instances in AWS (existing VPC/subnet).
+
+    Args:
+        cluster_conf: Configuration of cluster.
+        inventory: Instance configuration file (or path resolved from cluster).
+        aws_creds: Global configuration file with globals["aws-credentials"].
+        run_id: Unique id for the run.
+        instances_name: Optional name prefix for instances.
+        custom_config: CLI options (e.g. aws_vpc=default).
+    """
+    from compute.aws_ec2 import process_aws_custom_config
+
+    log.info("Creating AWS instances")
+    glbs = aws_creds.get("globals")
+    aws_cred = glbs.get("aws-credentials")
+    ceph_cluster = cluster_conf.get("ceph-cluster")
+    platform = process_aws_custom_config(custom_config)
+
+    params = dict()
+    ceph_nodes = dict()
+
+    if ceph_cluster.get("inventory"):
+        inventory_path = os.path.abspath(ceph_cluster.get("inventory"))
+        with open(inventory_path, "r") as inventory_stream:
+            inventory = yaml.safe_load(inventory_stream)
+
+    node_count = 0
+
+    params["cloud-data"] = inventory.get("instance").get("setup", "")
+    params["region"] = aws_cred["region"]
+    # Strip whitespace from credentials
+    access_key = aws_cred.get("access_key")
+    secret_key = aws_cred.get("secret_key")
+    params["access_key"] = access_key.strip() if access_key else None
+    params["secret_key"] = secret_key.strip() if secret_key else None
+    params["subnet_id"] = platform.get("subnet_id") or aws_cred["subnet_id"]
+    params["security_group_ids"] = (
+        platform.get("security_group_ids") or aws_cred["security_group_ids"]
+    )
+    if isinstance(params["security_group_ids"], str):
+        params["security_group_ids"] = [params["security_group_ids"]]
+    params["key_name"] = platform.get("key_name") or aws_cred["key_name"]
+    # Prefer instance type from platform/custom_config (--custom-config aws_instance_type=...),
+    # then inventory (instance.create.instance_type or vm-size),
+    # then osp-cred, then default
+    inv_create = inventory.get("instance", {}).get("create") or {}
+    params["instance_type"] = (
+        platform.get("instance_type")
+        or inv_create.get("instance_type")
+        or inv_create.get("vm-size")
+        or aws_cred.get("instance_type")
+        or "t3.medium"
+    )
+
+    if inventory.get("instance", {}).get("create"):
+        if ceph_cluster.get("image-name"):
+            params["image-id"] = ceph_cluster.get("image-name")
+        else:
+            params["image-id"] = (
+                inventory.get("instance").get("create").get("image-name")
+            )
+        if not params["image-id"]:
+            raise NodeError(
+                "AWS create: image-name (AMI id) is required in inventory or cluster"
+            )
+
+        params["cluster-name"] = ceph_cluster.get("name")
+        if params.get("root-login") is False:
+            params["root-login"] = False
+        else:
+            params["root-login"] = True
+
+        with parallel() as p:
+            for node in range(1, 100):
+                node_key = "node" + str(node)
+                if not ceph_cluster.get(node_key):
+                    break
+
+                node_dict = ceph_cluster.get(node_key)
+                node_params = params.copy()
+                node_params["role"] = RolesContainer(node_dict.get("role"))
+                node_params["id"] = node_dict.get("id") or node_key
+                node_params["location"] = node_dict.get("location")
+                node_params["node-name"] = generate_node_name(
+                    node_params.get("cluster-name", "ceph"),
+                    instances_name or os.getlogin(),
+                    run_id,
+                    node_key,
+                    node_params["role"],
+                )
+
+                if node_dict.get("no-of-volumes"):
+                    node_params["no-of-volumes"] = node_dict.get("no-of-volumes")
+                    node_params["size-of-disks"] = node_dict.get("disk-size")
+                    node_params["osd-scenario"] = node_dict.get("osd-scenario")
+                else:
+                    node_params["no-of-volumes"] = 0
+                    node_params["size-of-disks"] = 0
+
+                if node_dict.get("image-name"):
+                    node_params["image-id"] = node_dict["image-name"].get(
+                        "aws", node_params["image-id"]
+                    )
+
+                if node_dict.get("cloud-data"):
+                    node_params["cloud-data"] = node_dict.get("cloud-data")
+
+                sleep(node_count * 5)
+                node_count += 1
+                p.spawn(setup_vm_node_aws, node_key, ceph_nodes, **node_params)
+
+    if node_count and len(ceph_nodes) != node_count:
+        log.error(
+            "Mismatch error in number of VMs creation. Initiated: %s  Spawned: %s",
+            node_count,
+            len(ceph_nodes),
+        )
+        raise NodeError("Required number of nodes not created")
+
+    log.info("Done creating AWS nodes")
+    return ceph_nodes
+
+
+@retry(RETRY_EXCEPTIONS, tries=3, delay=10)
+def setup_vm_node_aws(node, ceph_nodes, **params):
+    """
+    Create the VM node using AWS EC2 API.
+
+    The retry decorator will trigger a rerun when a soft error is encountered. The VM
+    node is removed in exception scope before re-raising.
+    """
+    from compute.aws_ec2 import CephVMNodeAWS
+
+    vm = None
+    try:
+        vm = CephVMNodeAWS(
+            aws_cred={
+                "region": params["region"],
+                "access_key": params.get("access_key"),
+                "secret_key": params.get("secret_key"),
+            }
+        )
+
+        vm.create(
+            node_name=params["node-name"],
+            image_id=params["image-id"],
+            subnet_id=params["subnet_id"],
+            security_group_ids=params["security_group_ids"],
+            key_name=params["key_name"],
+            instance_type=params["instance_type"],
+            userdata=params.get("cloud-data", ""),
+            size_of_disks=params.get("size-of-disks", 0),
+            no_of_volumes=params.get("no-of-volumes", 0),
+        )
+
+        vm.role = params["role"]
+        vm.root_login = params["root-login"]
+        vm.osd_scenario = params.get("osd-scenario")
+        vm.location = params.get("location")
+        vm.id = params.get("id")
+        ceph_nodes[node] = vm
+    except RETRY_EXCEPTIONS as retry_except:
+        log.warning(retry_except, exc_info=True)
+        if vm is not None:
+            vm.delete()
         raise
     except BaseException as be:  # noqa
         log.error(be, exc_info=True)
@@ -641,6 +846,35 @@ def setup_repos(
         )
         inst_file.write(inst_repo)
         inst_file.flush()
+
+
+def remove_repos(
+    ceph_node,
+    exclude_repos=[
+        "hashicorp.repo",
+        "redhat.repo",
+        "appstream.repo",
+        "baseos.repo",
+        "crb.repo",
+    ],
+    repo_dir="/etc/yum.repos.d/",
+):
+    """Method to remove all repos from a desired directory except 'exclude_repos' entries
+    This method can also be used to remove general files from any directory on input node
+    Args:
+        ceph_node: node on which repos should be removed
+        exclude_repos: list of repos that will be excluded and retained
+        repo_dir: repo directory defaulted to '/etc/yum.repos.d/'
+    """
+    rm_repo_cmd = f"find {repo_dir} -type f -delete"
+    if exclude_repos:
+        rm_repo_cmd = (
+            f"find {repo_dir} -type f ! -name "
+            + " ! -name ".join(exclude_repos)
+            + " -delete"
+        )
+    for _cmd in [rm_repo_cmd, "yum clean all"]:
+        ceph_node.exec_command(sudo=True, cmd=_cmd)
 
 
 def check_ceph_healthly(
@@ -1057,6 +1291,24 @@ def get_public_network(nodes):
     return ",".join(subnets)
 
 
+def get_public_network_ipv6(nodes):
+    """Get IPv6 public network subnet(s) from nodes that have ipv6_subnet.
+    Used only when cluster.use_ipv6 is True (OpenStack dual-stack).
+
+    Args:
+        nodes: cluster nodes (CephNode with optional ipv6_subnet)
+
+    Returns:
+        (str) comma-separated IPv6 CIDRs, or empty string if none
+    """
+    subnets = []
+    for node in nodes:
+        ipv6_sub = getattr(node, "ipv6_subnet", None)
+        if ipv6_sub and ipv6_sub not in subnets:
+            subnets.append(ipv6_sub)
+    return ",".join(subnets)
+
+
 def get_disk_info(node):
     """
     Get node disk(s) info
@@ -1395,3 +1647,33 @@ def is_client(ceph_node):
     Return True if client node else False
     """
     return len(ceph_node.role.role_list) == 1 and "client" in ceph_node.role.role_list
+
+
+def enable_coredump(node):
+    """
+    Method to enable coredump collection
+    Refer: https://bugzilla.redhat.com/show_bug.cgi?id=2170213#c1
+    Args:
+        node: ceph node object
+    Returns:
+        None
+    """
+    log.info("Enabling coredump collection on %s" % node.hostname)
+    log.debug("Ensure /etc/systemd/system.conf file exists or create it")
+    _, _, rc, _ = node.exec_command(
+        sudo=True, cmd="test -e /etc/systemd/system.conf", verbose=True
+    )
+    if rc:
+        log.debug("File /etc/systemd/system.conf does not exist, creating..")
+        node.exec_command(sudo=True, cmd="touch /etc/systemd/system.conf")
+    sys_cmds = [
+        "echo 'fs.suid_dumpable = 2' >> /etc/sysctl.conf",
+        "sysctl -p",
+        "sed -i '/DefaultLimitCORE/d' /etc/systemd/system.conf",
+        "echo 'DefaultLimitCORE=infinity' >> /etc/systemd/system.conf",
+        "systemctl daemon-reexec",
+    ]
+
+    for _cmd in sys_cmds:
+        out, err = node.exec_command(cmd=_cmd, sudo=True)
+        log.info("Out: %s \n Err: %s" % (out, err))

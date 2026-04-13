@@ -8,7 +8,12 @@ from typing import Dict
 from looseversion import LooseVersion
 
 from ceph.ceph_admin.cephadm_ansible import CephadmAnsible
-from ceph.utils import get_node_by_id, get_public_network, setup_repos
+from ceph.utils import (
+    get_node_by_id,
+    get_public_network,
+    get_public_network_ipv6,
+    setup_repos,
+)
 from cephci.utils.build_info import CephTestManifest
 from utility.log import Log
 from utility.utils import get_cephci_config
@@ -269,8 +274,12 @@ class BootstrapMixin:
         else:
             _os_major = manifest_obj.platform.split("-")[-1]
             _ceph_version = manifest_obj.ceph_version
-            # * is to enable any test hotfix provided
-            _rpm_version = f"2:{_ceph_version}*.el{_os_major}cp"
+            if build_type == "upstream" or manifest_obj.product == "community":
+                _rpm_version = f"{_ceph_version}*"
+            else:
+                # * is to enable any test hotfix provided
+                _rpm_version = f"2:{_ceph_version}.el{_os_major}cp"
+
             self.install(**{"rpm_version": _rpm_version})
 
         cmd = "cephadm"
@@ -287,6 +296,25 @@ class BootstrapMixin:
 
         # Construct registry credentials as string or json.
         registry_url = args.pop("registry-url", None)
+        registry_json = args.pop("registry-json", None)
+
+        # Auto-detect registry from custom_image and add credentials if needed
+        if custom_image and not registry_url and not registry_json:
+            if isinstance(custom_image, str):
+                image_registry = custom_image.split("/")[0]
+            else:
+                image_registry = self.config["container_image"].split("/")[0]
+
+            # If using stage or production registry, auto-add credentials
+            if (
+                "registry.stage.redhat.io" in image_registry
+                or "registry.redhat.io" in image_registry
+            ):
+                registry_url = image_registry
+                logger.info(
+                    f"Auto-detected registry {registry_url} from custom image, adding credentials"
+                )
+
         if registry_url or manifest_obj.product == "ibm":
             cmd += construct_registry(
                 self,
@@ -294,7 +322,6 @@ class BootstrapMixin:
                 ibm_build=True if manifest_obj.product == "ibm" else False,
             )
 
-        registry_json = args.pop("registry-json", None)
         if registry_json:
             cmd += construct_registry(
                 self,
@@ -324,7 +351,12 @@ class BootstrapMixin:
         )
         if not mon_node:
             raise ResourceNotFoundError(f"Unknown {mon_node} node name.")
-        cmd += f" --mon-ip {mon_node.ip_address}"
+        # Use IPv6 for mon only when requested and available (OpenStack dual-stack)
+        use_ipv6 = getattr(self.cluster, "use_ipv6", False)
+        mon_ip = getattr(mon_node, "ipv6_address", None) if use_ipv6 else None
+        if mon_ip is None:
+            mon_ip = mon_node.ip_address
+        cmd += f" --mon-ip {mon_ip}"
 
         # Bootstrap with Ceph service specification
         specs = args.get("apply-spec")
@@ -344,6 +376,18 @@ class BootstrapMixin:
         #   should be removed for next 5.x development builds or release.
         if rhbuild.split("-")[0] in ["5.1", "5.2"]:
             cmd += " --yes-i-know"
+
+        # IBM Storage Ceph 9.1 and greater would require to accept the license
+        # There is '--automatically-accept-license' option
+        # FixMe: Unblocking RH build testing - IBMCEPH-13427
+        if LooseVersion(str(manifest_obj.release)) >= LooseVersion("9.1"):
+            if "automatically-accept-license" not in cmd:
+                cmd += " --automatically-accept-license"
+
+            # By default, call home is disabled when no call home options are
+            # are found
+            if "call-home" not in cmd:
+                cmd += " --disable-ibm-call-home"
 
         out, err = self.installer.exec_command(
             sudo=True,
@@ -382,8 +426,12 @@ class BootstrapMixin:
 
                 images_dict[key] = value
 
+        ignore_images = ["cephcsi", "nvmeof_cli", "crimson"]
+        check_ignored_images = lambda image: image in ignore_images
         for image, value in images_dict.items():
             _image = image.removesuffix("_image")
+            if check_ignored_images(_image):
+                continue
             cmd = "cephadm shell -- ceph config set mgr"
             cmd += f" mgr/cephadm/container_image_{_image} {value}"
             self.installer.exec_command(sudo=True, cmd=cmd)
@@ -400,6 +448,11 @@ class BootstrapMixin:
             public_nws = ",".join(
                 [public_nws, get_public_network(self.cluster.get_nodes())]
             )
+            # Append IPv6 public networks only when requested and available
+            if getattr(self.cluster, "use_ipv6", False):
+                ipv6_nws = get_public_network_ipv6(self.cluster.get_nodes())
+                if ipv6_nws:
+                    public_nws = ",".join([public_nws, ipv6_nws])
             public_nws = ",".join(filter(lambda x: x, list(set(public_nws.split(",")))))
 
         if public_nws:

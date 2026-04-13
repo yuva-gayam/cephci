@@ -21,6 +21,7 @@ includes:
     - Write IO should succeed
 """
 
+import datetime
 import json
 import random
 import time
@@ -32,6 +33,7 @@ from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.monitor_workflows import MonitorWorkflows
 from ceph.rados.pool_workflows import PoolFunctions
 from ceph.rados.serviceability_workflows import ServiceabilityMethods
+from ceph.rados.utils import get_cluster_timestamp
 from cli.utilities.operations import wait_for_osd_daemon_state
 from tests.rados.rados_test_util import (
     get_device_path,
@@ -159,6 +161,7 @@ def run(ceph_cluster, **kw):
         log.info(
             "Proceeding to perform Check (1) PG has 2 OSD from datacenter DC1 and 2 OSD from datacenter DC2"
         )
+        method_should_succeed(wait_for_clean_pg_sets, rados_obj)
         method_should_succeed(validate_acting_set)
 
         services_list = rados_obj.list_orch_services(service_type="osd")
@@ -199,9 +202,14 @@ def run(ceph_cluster, **kw):
         if float(rhbuild.split("-")[0]) >= 7.1 and len(dc_1_osds_to_remove) != len(
             dc_2_osds_to_remove
         ):
-            if not check_stretch_health_warning():
-                log.error("Warnings not removed on the cluster post osd addition")
-                raise Exception("Warning present on cluster")
+            endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+            while endtime > datetime.datetime.now():
+                if check_stretch_health_warning():
+                    break
+                log.error("Warnings not generated on the cluster post osd removal")
+                time.sleep(30)
+            else:
+                raise Exception("Warning not present on cluster")
 
         log.info(
             "Proceeding to perform Check (4) PGs should reach active+clean state post OSD removal"
@@ -274,19 +282,24 @@ def run(ceph_cluster, **kw):
             "Proceeding to perform Check (1) Health warning should be removed UNEVEN_WEIGHTS_STRETCH_MODE"
         )
         if float(rhbuild.split("-")[0]) >= 7.1:
-            if check_stretch_health_warning():
+            endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+            while endtime > datetime.datetime.now():
+                if not check_stretch_health_warning():
+                    break
                 log.error("Warnings not removed on the cluster post osd addition")
+                time.sleep(30)
+            else:
                 raise Exception("Warning present on cluster")
-
-        log.info(
-            "Proceeding to perform Check (1) PG has 2 OSD from datacenter DC1 and 2 OSD from datacenter DC2"
-        )
-        method_should_succeed(validate_acting_set)
 
         log.info(
             "Proceeding to perform Check (4) PGs should reach active+clean state post OSD removal and addition"
         )
         method_should_succeed(wait_for_clean_pg_sets, rados_obj, timeout=12000)
+
+        log.info(
+            "Proceeding to perform Check - PG has 2 OSD from datacenter DC1 and 2 OSD from datacenter DC2"
+        )
+        method_should_succeed(validate_acting_set)
 
         log.info(
             "Proceeding to perform Check (5) Pool sanity checks should be successful post OSD removal and addition"
@@ -375,6 +388,7 @@ def run(ceph_cluster, **kw):
         log.info(
             "Proceeding to perform Check (1) PG has 2 OSD from datacenter DC1 and 2 OSD from datacenter DC2"
         )
+        method_should_succeed(wait_for_clean_pg_sets, rados_obj)
         method_should_succeed(validate_acting_set)
 
         log.info(
@@ -420,10 +434,15 @@ def run(ceph_cluster, **kw):
         if float(rhbuild.split("-")[0]) >= 7.1 and len(dc_1_hosts_to_remove) != len(
             dc_1_hosts_to_remove
         ):
-            if not check_stretch_health_warning():
+            endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+            while endtime > datetime.datetime.now():
+                if check_stretch_health_warning():
+                    break
                 log.error(
                     "Warnings is not displayed on the cluster post osd host removal"
                 )
+                time.sleep(30)
+            else:
                 raise Exception("Warning not present on cluster")
 
         log.info(
@@ -514,11 +533,6 @@ def run(ceph_cluster, **kw):
         )
 
         log.info(
-            "Proceeding to perform Check (1) PG has 2 OSD from datacenter DC1 and 2 OSD from datacenter DC2"
-        )
-        method_should_succeed(validate_acting_set)
-
-        log.info(
             "Proceeding to perform Check (3) No inactive PGs on the pool post OSD Host addition"
         )
         # Waiting for recovery to post OSD host Addition
@@ -531,19 +545,29 @@ def run(ceph_cluster, **kw):
         method_should_succeed(wait_for_clean_pg_sets, rados_obj, timeout=12000)
 
         log.info(
+            "Proceeding to perform Check - PG has 2 OSD from datacenter DC1 and 2 OSD from datacenter DC2"
+        )
+        method_should_succeed(validate_acting_set)
+
+        log.info(
             "Proceeding to perform Check (5) Pool sanity checks should be successful post OSD addition"
         )
         method_should_succeed(rados_obj.run_pool_sanity_check)
 
         log.info(
-            "Proceeding to perform Check (6) Health warning - UNEVEN_WEIGHTS_STRETCH_MODE post OSD addition"
+            "Proceeding to perform Check (6) Health warning - UNEVEN_WEIGHTS_STRETCH_MODE post OSD host addition"
         )
         # Checking if the health warning about the different site weights is removed post addition of OSD host
         if float(rhbuild.split("-")[0]) >= 7.1:
-            if check_stretch_health_warning():
+            endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+            while endtime > datetime.datetime.now():
+                if not check_stretch_health_warning():
+                    break
                 log.error(
                     "Warnings is not removed on the cluster post OSD Host addition"
                 )
+                time.sleep(30)
+            else:
                 raise Exception("Warning present on cluster post OSD Host addition")
 
         log.info(
@@ -638,6 +662,8 @@ def run(ceph_cluster, **kw):
         log.info("All PG acting set has 2 OSD from DC1 and 2 OSD from DC2")
         return True
 
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         if not stretch_enabled_checks(rados_obj=rados_obj):
             log.error(
@@ -738,8 +764,13 @@ def run(ceph_cluster, **kw):
 
             # Checking if the expected health warning about the different site weights are seen.
             if float(rhbuild.split("-")[0]) >= 7.1:
-                if not check_stretch_health_warning():
+                endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+                while endtime > datetime.datetime.now():
+                    if check_stretch_health_warning():
+                        break
                     log.error("Warnings not generated on the cluster")
+                    time.sleep(30)
+                else:
                     raise Exception("Warning not present on cluster")
 
             # Checking cluster health after OSD removal
@@ -767,7 +798,7 @@ def run(ceph_cluster, **kw):
                 daemon_type="osd",
                 daemon_id=target_osd,
                 status="running",
-                timeout=60,
+                timeout=300,
             )
             assert service_obj.add_osds_to_managed_service(
                 osds=[target_osd], spec=target_osd_spec_name
@@ -788,8 +819,13 @@ def run(ceph_cluster, **kw):
 
             # Checking if the expected health warning about the different site weights is removed post addition of OSD.
             if float(rhbuild.split("-")[0]) >= 7.1:
-                if check_stretch_health_warning():
+                endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+                while endtime > datetime.datetime.now():
+                    if not check_stretch_health_warning():
+                        break
                     log.error("Warnings not removed on the cluster post osd addition")
+                    time.sleep(30)
+                else:
                     raise Exception("Warning present on cluster")
 
             # Checking cluster health after OSD Addition
@@ -873,10 +909,15 @@ def run(ceph_cluster, **kw):
             # Checking if the expected health warning about the different
             #  site weights is displayed post removal of OSD host
             if float(rhbuild.split("-")[0]) >= 7.1:
-                if not check_stretch_health_warning():
+                endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+                while endtime > datetime.datetime.now():
+                    if check_stretch_health_warning():
+                        break
                     log.error(
                         "Warnings is not displayed on the cluster post osd host removal"
                     )
+                    time.sleep(30)
+                else:
                     raise Exception("Warning not present on cluster")
 
             log.debug(
@@ -926,10 +967,15 @@ def run(ceph_cluster, **kw):
 
             # Checking if the health warning about the different site weights is removed post addition of OSD host
             if float(rhbuild.split("-")[0]) >= 7.1:
-                if check_stretch_health_warning():
+                endtime = datetime.datetime.now() + datetime.timedelta(seconds=300)
+                while endtime > datetime.datetime.now():
+                    if not check_stretch_health_warning():
+                        break
                     log.error(
                         "Warnings is not removed on the cluster post osd host addition"
                     )
+                    time.sleep(30)
+                else:
                     raise Exception("Warning present on cluster")
 
             # perform rados put to check if write ops is possible
@@ -1079,7 +1125,11 @@ def run(ceph_cluster, **kw):
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
 

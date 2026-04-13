@@ -20,6 +20,7 @@ class CephTestManifest:
         "https://raw.githubusercontent.com/ibmstorage/qe-ceph-manifest/refs/heads/main/"
     )
     SUPPORTED_PRODUCTS = ["community", "redhat", "ibm"]
+    RELEASE_MAP = {"reef": 7, "squid": 8, "tentacle": 9}
 
     def __init__(
         self,
@@ -69,6 +70,9 @@ class CephTestManifest:
 
     @property
     def release(self) -> str:
+        if self.product == "community":
+            return self.RELEASE_MAP[self._release]
+
         return self._release
 
     @release.setter
@@ -135,6 +139,10 @@ class CephTestManifest:
         return _image_without_dtr.split(":")[0]
 
     @property
+    def nvme_cli_image(self) -> str:
+        return self.images.get("nvmeof_cli_image", "")
+
+    @property
     def custom_images(self) -> dict[str, str]:
         """Custom images to be configured with the cluster.
 
@@ -143,7 +151,11 @@ class CephTestManifest:
             - cephcsi
             - nvmeof-cli
         """
-        remove_list = ["cephcsi", "nvmeof-cli", "crimson"]
+        remove_list = [
+            "cephcsi",
+            "nvmeof-cli",
+            "crimson",
+        ]
         rst = {}
         _images = deepcopy(self.images)
 
@@ -185,11 +197,13 @@ class CephTestManifest:
             }
             }
         """
-        _msg = f"Retreving build details of {self.product} - {self.release}. "
+        # Please ensure to use _release instead of release, since release is a
+        # property and can be overridden.
+        _msg = f"Retreving build details of {self.product} - {self._release}. "
         _msg += f"Looking up {self.build_type} section."
         logger.debug(_msg)
 
-        manifest_file: str = f"{self.release}.yaml"
+        manifest_file: str = f"{self._release}.yaml"
         manifest_url: str = self.URI
 
         if self.product.lower() == "community":
@@ -208,7 +222,16 @@ class CephTestManifest:
 
         try:
             yml_data: Dict[str, Any] = yaml.safe_load(data.text)
-            return yml_data[self.build_type]
+            build_data = yml_data[self.build_type]
+
+            # Convert image digests from '@sha256:<digest>' format to ':<digest>' format if datacenter is 'eu-de'
+            if self.datacenter == "eu-de":
+                images = build_data.get("images", {})
+                for k, v in images.items():
+                    images[k] = v.replace("@sha256:", ":")
+
+            return build_data
+
         except yaml.YAMLError:
             raise RuntimeError("Unable to process the Ceph QE manifest file")
         except KeyError:

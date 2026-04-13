@@ -51,6 +51,9 @@ class Ceph(object):
         self.__rhcs_version = None
         self.ceph_nodename = None
         self.networks = dict()
+        # When True, bootstrap/config may use IPv6 (OpenStack only);
+        #  driven by config/custom_config
+        self.use_ipv6 = False
 
     def __eq__(self, ceph_cluster):
         if hasattr(ceph_cluster, "node_list"):
@@ -205,15 +208,19 @@ class Ceph(object):
         for ceph in self.get_nodes():
             ceph.generate_id_rsa()
             keys = keys + ceph.id_rsa_pub
-            hosts = (
-                hosts
-                + ceph.ip_address
-                + "\t"
-                + ceph.hostname
-                + "\t"
-                + ceph.shortname
-                + "\n"
+            # Add IPv4 and IPv6 to /etc/hosts when available (one line per address)
+            hosts = hosts + (
+                ceph.ipv4_address + "\t" + ceph.hostname + "\t" + ceph.shortname + "\n"
             )
+            if getattr(ceph, "ipv6_address", None):
+                hosts = hosts + (
+                    ceph.ipv6_address
+                    + "\t"
+                    + ceph.hostname
+                    + "\t"
+                    + ceph.shortname
+                    + "\n"
+                )
         for ceph in self.get_nodes():
             keys_file = ceph.remote_file(
                 file_name=".ssh/authorized_keys", file_mode="a"
@@ -946,14 +953,21 @@ class Ceph(object):
         Args:
             base_url(str): rhel compose url
             repos(list): repos behind compose/ to process
-            cloud_type (str): The environment used for testing
+            cloud_type (str): The environment used for testing (DEPRECATED)
         Returns:
             str: repository file content
         """
         repo_file = ""
+        base_url = base_url.rstrip("/")
+        logger.debug(
+            "DEPRECATED: 'cloud_type' argument is unused and will be removed. Value supplied: %s",
+            cloud_type,
+        )
+
+        is_redhat_url = "redhat.com" in base_url
+
         for repo in repos:
-            base_url = base_url.rstrip("/")
-            if cloud_type == "openstack":
+            if is_redhat_url:
                 repo_to_use = f"{base_url}/compose/{repo}/x86_64/os/"
             else:
                 # The expecatation in other datacenters is Tools suffix is
@@ -1291,6 +1305,7 @@ class SSHConnectionManager(object):
         self.username = username
         self.password = password
         self.look_for_keys = look_for_keys
+        self._private_key_file_path = private_key_file_path
         self.pkey = self._get_ssh_key(private_key_file_path) if look_for_keys else None
         self.__client = paramiko.SSHClient()
         self.__client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
@@ -1388,7 +1403,20 @@ class SSHConnectionManager(object):
             del pickle_dict["_SSHConnectionManager__transport"]
         if pickle_dict.get("_SSHConnectionManager__client"):
             del pickle_dict["_SSHConnectionManager__client"]
+        # pkey (paramiko/cryptography key) is not picklable; recreated in __setstate__
+        if pickle_dict.get("pkey") is not None:
+            del pickle_dict["pkey"]
         return pickle_dict
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__client = paramiko.SSHClient()
+        self.__client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
+        self.__transport = None
+        key_path = getattr(self, "_private_key_file_path", "") or ""
+        self.pkey = (
+            self._get_ssh_key(key_path) if self.look_for_keys and key_path else None
+        )
 
 
 class CephNode(object):
@@ -1402,13 +1430,18 @@ class CephNode(object):
 
     def __init__(self, **kw):
         """
-        Initialize a CephNode in a libcloud environment
-        eg CephNode(username='cephuser', password='cephpasswd',
-                    root_password='passwd', ip_address='ip_address',
-                    subnet='subnet', hostname='hostname',
-                    role='mon|osd|client', no_of_volumes=3,
-                    ceph_vmnode='ref_to_libcloudvm')
+        Initialize a CephNode in a libcloud environment.
 
+        Network attributes (use either explicit IPv4 or legacy ip_address/subnet):
+            ipv4_address, ipv4_subnet  - IPv4 address and subnet (or pass ip_address, subnet)
+            ipv6_address, ipv6_subnet  - IPv6 when available (e.g. OpenStack dual-stack)
+            use_ipv6                    - when True, ip_address/subnet follow IPv6
+        Derived: ip_address and subnet are the active stack (IPv6 if use_ipv6 and set, else IPv4).
+
+        eg CephNode(username='cephuser', password='cephpasswd',
+                    root_password='passwd', ipv4_address='...', ipv4_subnet='...',
+                    hostname='hostname', role='mon|osd|client', no_of_volumes=3,
+                    ceph_vmnode='ref_to_libcloudvm')
         """
         self.username = kw["username"]
         self.password = kw["password"]
@@ -1417,11 +1450,31 @@ class CephNode(object):
         self.private_key_path = kw["private_key_path"]
         self.root_login = kw["root_login"]
         self.private_ip = kw["private_ip"]
-        self.ip_address = kw["ip_address"]
-        self.subnet = kw["subnet"]
+
+        # Explicit IPv4 storage (backward compat: ip_address/subnet treated as IPv4)
+        self.ipv4_address = kw.get("ipv4_address") or kw.get("ip_address")
+        self.ipv4_subnet = kw.get("ipv4_subnet") or kw.get("subnet")
+        self.ipv6_address = kw.get("ipv6_address")
+        self.ipv6_subnet = kw.get("ipv6_subnet")
+        self.use_ipv6 = kw.get("use_ipv6", False)
+
+        # Active address/subnet: IPv6 when use_ipv6 and available, else IPv4
+        self.ip_address = (
+            self.ipv6_address
+            if (self.use_ipv6 and self.ipv6_address)
+            else self.ipv4_address
+        )
+        self.subnet = (
+            self.ipv6_subnet
+            if (self.use_ipv6 and self.ipv6_subnet)
+            else self.ipv4_subnet
+        )
         self.vmname = kw["hostname"]
         self.ceph_nodename = kw["ceph_nodename"]
         self.vmshortname = self.vmname.split(".")[0]
+        # Initial values from config; updated in connect() from remote hostname
+        self.hostname = self.vmname
+        self.shortname = self.vmshortname
 
         if kw.get("ceph_vmnode"):
             self.vm_node = kw["ceph_vmnode"]
@@ -1539,6 +1592,7 @@ class CephNode(object):
             f"echo 'root:{self.root_passwd}' | chpasswd"
         )
         logger.info(stdout.readlines())
+        # TCP keepalive (applies to both IPv4 and IPv6 on Linux)
         self.rssh().exec_command("echo 120 > /proc/sys/net/ipv4/tcp_keepalive_time")
         self.rssh().exec_command("echo 60 > /proc/sys/net/ipv4/tcp_keepalive_intvl")
         self.rssh().exec_command("echo 20 > /proc/sys/net/ipv4/tcp_keepalive_probes")
@@ -1620,7 +1674,12 @@ class CephNode(object):
             channel = ssh().get_transport().open_session(timeout=timeout)
             channel.settimeout(timeout)
 
-            logger.info("Execute %s on %s", cmd, self.ip_address)
+            logger.info(
+                "Execute %s on %s [%s]",
+                cmd,
+                self.hostname,
+                self.ip_address,
+            )
             _exec_start_time = datetime.datetime.now()
             channel.exec_command(cmd)
 
@@ -1651,10 +1710,12 @@ class CephNode(object):
 
             _time = (datetime.datetime.now() - _exec_start_time).total_seconds()
             logger.info(
-                "Execution of %s on %s took %s seconds",
+                "Execution of %s took %s seconds on %s by user %s [%s]",
                 cmd,
-                self.ip_address,
                 str(_time),
+                self.hostname,
+                channel.get_transport().get_username(),
+                self.ip_address,
             )
 
             # Check for data residues in the channel streams. This is required for the following reasons
@@ -1738,14 +1799,14 @@ class CephNode(object):
         if kw.get("long_running", False):
             if kw.get("check_ec", False) and _exit != 0:
                 raise CommandFailed(
-                    f"{cmd} returned {_err} and code {_exit} on {self.ip_address}"
+                    f"{cmd} returned {_err} and code {_exit} on {self.hostname} [{self.ip_address}]"
                 )
 
             return _exit
 
         if kw.get("check_ec", True) and _exit != 0:
             raise CommandFailed(
-                f"{cmd} returned {_err} and code {_exit} on {self.ip_address}"
+                f"{cmd} returned {_err} and code {_exit} on {self.hostname} [{self.ip_address}]"
             )
 
         return _out, _err
@@ -1786,7 +1847,7 @@ class CephNode(object):
         if d.get("ssh_transport"):
             del d["ssh_transport"]
 
-        if d.get("ssh_transport"):
+        if d.get("root_connection"):
             del d["root_connection"]
 
         if d.get("connection"):

@@ -63,9 +63,9 @@ tests:
       name: configure Ceph client for NVMe tests
       polarion-id: CEPH-83573758
 
-#  Perform Data Integrity tests
+ # Perform Data Integrity tests
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         cleanup:
           - subsystems
@@ -101,7 +101,7 @@ tests:
 
 #  Run IO on NVMe Targets
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         gw_node: node6
         rbd_pool: rbd
@@ -140,7 +140,7 @@ tests:
 
 #  GW deployment collocation with Mon_MGR nodes
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         gw_node: node2
         rbd_pool: rbd
@@ -182,7 +182,7 @@ tests:
 # Run IOs using multiple-initiators against multi-subsystems based
 # NVMe-OF targets using fio tool
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         gw_node: node6
         rbd_pool: rbd
@@ -229,7 +229,7 @@ tests:
 
 #  Multiple gateways deployment in the cluster
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         gw_node: node6 # Deploying multiple gateways on the cluster
         rbd_pool: rbd
@@ -265,7 +265,7 @@ tests:
       polarion-id: CEPH-83576112
 
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         gw_node: node6
         rbd_pool: rbd
@@ -286,7 +286,7 @@ tests:
             listener_port: 4420
             allow_host: "*"
         initiators: # Configure Initiators with all pre-req
-          - subnqn: nqn.2016-06.io.spdk:negative
+          - nqn: nqn.2016-06.io.spdk:negative
             listener_port: 4420
             node: node10
         operation: CEPH-83575812
@@ -325,7 +325,7 @@ tests:
             listener_port: 4420
             allow_host: "*"
         initiators: # Configure Initiators with all pre-req
-          - subnqn: nqn.2016-06.io.spdk:ceph-83575467
+          - nqn: nqn.2016-06.io.spdk:ceph-83575467
             listener_port: 4420
             node: node10
         cleanup:
@@ -365,7 +365,7 @@ tests:
             listener_port: 4420
             allow_host: "*"
         initiators: # Configure Initiators with all pre-req
-          - subnqn: nqn.2016-06.io.spdk:ceph-83575813
+          - nqn: nqn.2016-06.io.spdk:ceph-83575813
             listener_port: 4420
             node: node10
         cleanup:
@@ -381,7 +381,7 @@ tests:
       polarion-id: CEPH-83575813
 
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         gw_node: node6
         rbd_pool: rbd
@@ -401,8 +401,10 @@ tests:
               count: 1
               size: 5G
             listener_port: 4420
+            hosts:
+              node: node10
         initiators: # Configure Initiators with all pre-req
-          - subnqn: nqn.2016-06.io.spdk:ceph-83575455
+          - nqn: nqn.2016-06.io.spdk:ceph-83575455
             listener_port: 4420
             node: node10
         cleanup:
@@ -418,9 +420,10 @@ tests:
       polarion-id: CEPH-83575455
 
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         rbd_pool: pool1
+        nvme_metadata_pool: pool1
         gw_group: gw_group1
         install: true                         # Run SPDK with all pre-requisites
         test_case: CEPH-83624617
@@ -451,14 +454,15 @@ tests:
       desc: CEPH-83624617 - Test E2E read only namespace operations
       destroy-cluster: false
       module: test_ceph_nvmeof_readonly_ns.py
-      name: Test E2E nvmeof namespace resize
+      name: Test E2E nvmeof namespace readonly operations
       polarion-id: CEPH-83624617
 
   - test:
-      abort-on-fail: true
+      abort-on-fail: false
       config:
         rbd_pool: pool1
-        gw_group: gw_group1
+        gw_group: pool1
+        nvme_metadata_pool: pool1
         install: true  # Run SPDK with all pre-requisites
         test_case: CEPH-83627178
         cleanup:
@@ -489,4 +493,5 @@ tests:
       destroy-cluster: false
       module: test_ceph_nvmeof_ns_resize.py
       name: Test E2E nvmeof namespace resize
+      comments: product bug 2420434
       polarion-id: CEPH-83627178

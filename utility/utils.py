@@ -992,6 +992,52 @@ def yaml_to_dict(file_name):
     return content
 
 
+# -----------------------------------------------------------------------------
+# Custom config helpers (--custom-config key=value)
+# Used by run.py and any caller that needs to resolve options from CLI custom_config.
+# -----------------------------------------------------------------------------
+
+
+def parse_custom_config_list(custom_config):
+    """
+    Parse a list of 'key=value' strings (from --custom-config) into a dict.
+
+    Args:
+        custom_config: List of strings like ["use_ipv6=true", "k=v"].
+
+    Returns:
+        Dict of key -> value. Empty dict if custom_config is None or empty.
+    """
+    if not custom_config:
+        return {}
+    return dict(item.split("=", 1) for item in custom_config if "=" in item)
+
+
+def resolve_use_ipv6(custom_config, cloud_type=None, osp_cred=None):
+    """
+    Resolve whether to use IPv6 from custom_config and optionally from infra credentials.
+
+    Uses --custom-config use_ipv6=true (or 1/yes). Works for any infrastructure;
+    custom_config overrides credentials when both are present.
+
+    Args:
+        custom_config: List of key=value strings from CLI (--custom-config).
+        cloud_type: Optional; e.g. "openstack". If "openstack", cred use_ipv6 is used as base.
+        osp_cred: Optional; global creds dict. For openstack, openstack-credentials.use_ipv6 is read.
+
+    Returns:
+        bool: True if IPv6 should be used, else False.
+    """
+    use_ipv6 = False
+    if cloud_type == "openstack" and osp_cred:
+        os_cred = osp_cred.get("globals", {}).get("openstack-credentials", {})
+        use_ipv6 = os_cred.get("use_ipv6", False)
+    overrides = parse_custom_config_list(custom_config)
+    if overrides.get("use_ipv6", "").lower() in ("true", "1", "yes"):
+        use_ipv6 = True
+    return use_ipv6
+
+
 def custom_ceph_config(suite_config, custom_config, custom_config_file):
     """
     Combines and returns custom configuration overrides for ceph.
@@ -1615,10 +1661,7 @@ def install_start_kafka(rgw_node, cloud_type):
 def install_kafka(rgw_node, cloud_type):
     """Install kafka package"""
     log.info("install kafka broker for bucket notification tests")
-    if cloud_type == "ibmc":
-        wget_cmd = "curl -o /tmp/kafka.tgz https://10.245.4.89/kafka_2.13-2.8.0.tgz"
-    else:
-        wget_cmd = "curl -o /tmp/kafka.tgz http://magna002.ceph.redhat.com/cephci-jenkins/kafka_2.13-2.8.0.tgz"
+    wget_cmd = "cp /home/cephuser/configs/rgw/kafka/kafka_2.13-2.8.0.tgz /tmp/kafka.tgz"
 
     tar_cmd = "tar -zxvf /tmp/kafka.tgz -C /usr/local/"
     rename_cmd = "mv /usr/local/kafka_2.13-2.8.0 /usr/local/kafka"
@@ -1704,13 +1747,7 @@ def configure_kafka_security(rgw_node, cloud_type):
 
 def setup_server_properties_security_configs(rgw_node, cloud_type):
     """append security types configuration into server.properties"""
-    if cloud_type == "ibmc":
-        curl_server_properties = "curl -o /tmp/kafka_server.properties https://10.245.4.89/kafka_server.properties"
-    else:
-        curl_server_properties = (
-            "curl -o /tmp/kafka_server.properties http://magna002.ceph.redhat.com/cephci-jenkins"
-            + "/kafka_server.properties"
-        )
+    curl_server_properties = "cp /home/cephuser/configs/rgw/kafka/kafka_server.properties /tmp/kafka_server.properties"
     rgw_node.exec_command(
         sudo=True,
         cmd=curl_server_properties,
@@ -1739,15 +1776,9 @@ def setup_server_properties_security_configs(rgw_node, cloud_type):
 
 def setup_keystore_certs(rgw_node, cloud_type):
     """download kafka_security.sh script, create certs and store them in keystore and truststore"""
-    if cloud_type == "ibmc":
-        curl_security_sh = (
-            "curl -o /tmp/kafka-security.sh https://10.245.4.89/kafka-security.sh"
-        )
-    else:
-        curl_security_sh = (
-            "curl -o /tmp/kafka-security.sh http://magna002.ceph.redhat.com/cephci-jenkins"
-            + "/kafka-security.sh"
-        )
+    curl_security_sh = (
+        "cp /home/cephuser/configs/rgw/kafka/kafka-security.sh /tmp/kafka-security.sh"
+    )
     rgw_node.exec_command(
         sudo=True,
         cmd=curl_security_sh,
@@ -1812,8 +1843,8 @@ def redeploy_rgw_service_for_kafka_security(rgw_node):
     out, _ = rgw_node.exec_command(sudo=True, cmd="cat /root/rgw_spec.yaml")
     log.info(out)
     rgw_node.exec_command(sudo=True, cmd="ceph orch apply -i /root/rgw_spec.yaml")
-    log.info("sleeping for 20 seconds")
-    time.sleep(20)
+    log.info("sleeping for 60 seconds")
+    time.sleep(60)
 
 
 def firewalld_add_public_ports_for_kafka(node):
@@ -2069,6 +2100,34 @@ def clone_the_repo(config, node, path_to_clone):
     log.info(f"repo_url: {repo_url}")
     git_clone_cmd = f"sudo git clone {repo_url} -b {branch}"
     node.exec_command(cmd=f"cd {path_to_clone} ; {git_clone_cmd}")
+
+
+def clone_configs_repo(node, repo_name=None):
+    """clone the repo on to test node.
+
+    Args:
+        node: ceph node
+        repo_name: fetches the git repo details based on this repo_name from .cephci.yaml
+
+    """
+    try:
+        repo_dict = get_cephci_config()["repos"][repo_name]
+    except KeyError:
+        raise Exception(
+            f"Repo details are missing for the key {repo_name} in ~/.cephci.yaml to clone it on the node."
+        )
+    repo_url = repo_dict["git_url"]
+    log.info(f"cloning the repo {repo_url}")
+    path_to_clone = repo_dict["dest"]
+    repo_name = repo_url.split("/")[-1][:-4]
+    final_repo_path = f"{path_to_clone}/{repo_name}"
+    oauth_token = repo_dict.get("oauth_token")
+    if oauth_token:
+        repo_url = repo_url.replace("https://", f"https://oauth2:{oauth_token}@")
+    git_clone_cmd = f"git clone --depth 1 {repo_url}"
+    node.exec_command(
+        cmd=f"test -e {final_repo_path} || (cd {path_to_clone} ; {git_clone_cmd})"
+    )
 
 
 def calculate_available_storage(node):

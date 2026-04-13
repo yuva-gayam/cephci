@@ -52,12 +52,16 @@ class CephFSCommonUtils(FsUtils):
             "Slow OSD heartbeats",
             "stray daemon(s) not managed by cephadm",
         ]
+        non_accepted_list = ["OSD_DOWN", "OSD_HOST_DOWN"]
         while ceph_healthy == 0 and (datetime.datetime.now() < end_time):
             if self.check_ceph_status(client, "HEALTH_OK"):
                 ceph_healthy = 1
             else:
                 out, _ = client.exec_command(sudo=True, cmd="ceph health detail")
-                if any(msg in str(out) for msg in accepted_list):
+                if any(msg in str(out) for msg in non_accepted_list):
+                    log.error("Non-accepted errors found in ceph health: %s", out)
+                    time.sleep(5)
+                elif any(msg in str(out) for msg in accepted_list):
                     log.info(
                         "Ignoring the known warning for Bluestore Slow ops and OSD heartbeats"
                     )
@@ -71,9 +75,15 @@ class CephFSCommonUtils(FsUtils):
                     time.sleep(5)
 
         if ceph_healthy == 0:
-            client.exec_command(
+            out, _ = client.exec_command(
                 sudo=True,
                 cmd="ceph fs status;ceph -s;ceph health detail",
+            )
+            log.error(
+                "Cluster did not reach HEALTH_OK within %d seconds. "
+                "Final cluster state:\n%s",
+                wait_time,
+                out,
             )
             return 1
         return 0
@@ -104,8 +114,10 @@ class CephFSCommonUtils(FsUtils):
         nfs_server = nfs_servers[0].node.hostname
         out, _ = client.exec_command(sudo=True, cmd="ceph nfs cluster ls")
         if nfs_name not in out:
-            client.exec_command(
-                sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+            self.create_nfs(
+                client,
+                nfs_cluster_name=nfs_name,
+                nfs_server_name=nfs_server,
             )
         if wait_for_process(client=client, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -144,7 +156,9 @@ class CephFSCommonUtils(FsUtils):
         }
         return setup_params
 
-    def test_mount(self, clients, setup_params):
+    def test_mount(
+        self, clients, setup_params, mnt_type_list=["kernel", "fuse", "nfs"]
+    ):
         """
         This method is to run mount on test subvolumes
         Params:
@@ -164,7 +178,6 @@ class CephFSCommonUtils(FsUtils):
                 for _ in list(range(4))
             )
 
-            mnt_type_list = ["kernel", "fuse", "nfs"]
             mount_details = {}
             sv_list = setup_params["sv_list"]
             fs_name = setup_params["fs_name"]
@@ -475,6 +488,8 @@ class CephFSCommonUtils(FsUtils):
         )
 
         self.create_nfs(client, cluster, nfs_server_name=server)
+
+        wait_for_process(client, process_name=cluster)
 
         subvolume_name = kwargs.get("subvolume_name")
         if subvolume_name:

@@ -110,8 +110,10 @@ tests:
       config:
         rbd_pool: rbd
         gw_group: gw_group1
+        nvme_metadata_pool: rbd
         do_not_create_image: true
         rep-pool-only: true
+        install: true
         rep_pool_config:
           pool: rbd
         cleanup:

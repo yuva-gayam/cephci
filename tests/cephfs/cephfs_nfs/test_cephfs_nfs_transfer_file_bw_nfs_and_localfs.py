@@ -49,8 +49,10 @@ def run(ceph_cluster, **kw):
         nfs_name = "cephfs-nfs"
         local_fs_path = "/tmp/"
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -236,8 +238,12 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         log.info("Cleaning Up")
-        client1.exec_command(sudo=True, cmd=f"rm -rf {nfs_mounting_dir}{nfs_dir}")
-        client1.exec_command(sudo=True, cmd=f"rm -rf {local_fs_path}{nfs_dir}")
+        client1.exec_command(
+            sudo=True, cmd=f"rm -rf {nfs_mounting_dir}{nfs_dir}", check_ec=False
+        )
+        client1.exec_command(
+            sudo=True, cmd=f"rm -rf {local_fs_path}{nfs_dir}", check_ec=False
+        )
         log.info("Unmount NFS export")
         client1.exec_command(
             sudo=True, cmd=f"umount -l {nfs_mounting_dir}", check_ec=False

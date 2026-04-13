@@ -23,17 +23,19 @@ from ceph.clients import WinNode
 from ceph.utils import (
     cleanup_ceph_nodes,
     cleanup_ibmc_ceph_nodes,
+    create_aws_ceph_nodes,
     create_baremetal_ceph_nodes,
     create_ceph_nodes,
     create_ibmc_ceph_nodes,
 )
-from cephci.cluster_info import get_ceph_var_logs
+from cephci.cluster_info import collect_ceph_coredumps, get_ceph_var_logs
 from cephci.utils.build_info import CephTestManifest
 from cli.performance.memory_and_cpu_utils import (
     start_logging_processes,
     stop_logging_process,
     upload_mem_and_cpu_logger_script,
 )
+from compute.aws_ec2 import cleanup_aws_ceph_nodes
 from utility import sosreport
 from utility.log import Log
 from utility.polarion import post_to_polarion
@@ -45,6 +47,7 @@ from utility.utils import (  # ReportPortal,
     email_results,
     generate_unique_id,
     magna_url,
+    resolve_use_ipv6,
     setup_cluster_access,
     validate_conf,
     validate_image,
@@ -59,7 +62,7 @@ A simple test suite wrapper that executes tests based on yaml test configuration
         (--platform <name>)
         (--suite <FILE>)...
         (--global-conf FILE | --cluster-conf FILE)
-        [--cloud <openstack> | <ibmc> | <baremetal>]
+        [--cloud <openstack> | <ibmc> | <aws> | <baremetal>]
         [--build <name>]
         [--inventory FILE]
         [--osp-cred <file>]
@@ -107,7 +110,7 @@ Options:
   --global-conf <file>              global cloud configuration file
   --cluster-conf <file>             cluster configuration file
   --inventory <file>                hosts inventory file
-  --cloud <cloud_type>              cloud type [default: openstack]
+  --cloud <cloud_type>              cloud type (openstack|ibmc|aws|baremetal) [default: openstack]
   --osp-cred <file>                 openstack credentials as separate file
   --rhbuild <1.3.0>                 ceph downstream version
                                     eg: 1.3.0, 2.0, 2.1 etc
@@ -204,8 +207,12 @@ def create_nodes(
 
             --custom-config ibmc_vpc=ci-vpc-01
             --custom-config ibmc_profile=bx2-2x8
+            --custom-config openstack_vm_profile=c1.standard.xl
+            --custom-config openstack_networks=provider_net_cci_1
+            --custom-config use_ipv6=true
 
         If these values are not provided then the defaults would be used.
+        openstack_networks (single or comma-separated) overrides cluster conf for all OpenStack VMs.
         The defaults are the ones used in the example.
     """
 
@@ -215,6 +222,8 @@ def create_nodes(
         cleanup_ceph_nodes(osp_cred, instances_name)
     elif cloud_type == "ibmc":
         cleanup_ibmc_ceph_nodes(osp_cred, instances_name, custom_config=None)
+    elif cloud_type == "aws":
+        cleanup_aws_ceph_nodes(osp_cred, instances_name, custom_config=None)
 
     ceph_cluster_dict = {}
     clients = []
@@ -227,9 +236,14 @@ def create_nodes(
                 run_id,
                 instances_name,
                 enable_eus=enable_eus,
+                custom_config=custom_config,
             )
         elif cloud_type == "ibmc":
             ceph_vmnodes = create_ibmc_ceph_nodes(
+                cluster, inventory, osp_cred, run_id, instances_name, custom_config
+            )
+        elif cloud_type == "aws":
+            ceph_vmnodes = create_aws_ceph_nodes(
                 cluster, inventory, osp_cred, run_id, instances_name, custom_config
             )
         elif "baremetal" in cloud_type:
@@ -237,6 +251,9 @@ def create_nodes(
         else:
             log.error(f"Unknown cloud type: {cloud_type}")
             raise AssertionError("Unsupported test environment.")
+
+        # Resolve use_ipv6 before building nodes so CephNode can use it for SSH when requested
+        use_ipv6 = resolve_use_ipv6(custom_config, cloud_type, osp_cred)
 
         ceph_nodes = []
         root_password = None
@@ -260,12 +277,22 @@ def create_nodes(
                 private_ip = node.ip_address
                 look_for_key = True
                 ceph_nodename = node.hostname
+            elif cloud_type == "aws":
+                glbs = osp_cred.get("globals")
+                aws_cfg = glbs.get("aws-credentials")
+                private_key_path = aws_cfg.get("private_key_path", "")
+                private_ip = node.ip_address
+                look_for_key = True
+                ceph_nodename = node.hostname
 
             if node.role == "win-iscsi-clients":
                 clients.append(
                     WinNode(ip_address=node.ip_address, private_ip=private_ip)
                 )
             else:
+                # IPv6 attrs only when available (OpenStack dual-stack); other envs have no ipv6_* on node
+                ipv6_address = getattr(node, "ipv6_address", None)
+                ipv6_subnet = getattr(node, "ipv6_subnet", None)
                 ceph = CephNode(
                     username="cephuser",
                     password="cephuser",
@@ -275,18 +302,24 @@ def create_nodes(
                     root_login=node.root_login,
                     role=node.role,
                     no_of_volumes=node.no_of_volumes,
-                    ip_address=node.ip_address,
-                    subnet=node.subnet,
+                    ipv4_address=node.ip_address,
+                    ipv4_subnet=node.subnet,
                     private_ip=private_ip,
                     hostname=node.hostname,
                     ceph_vmnode=node,
                     ceph_nodename=ceph_nodename,
                     id=node.id,
+                    ipv6_address=ipv6_address,
+                    ipv6_subnet=ipv6_subnet,
+                    use_ipv6=use_ipv6,
                 )
                 ceph_nodes.append(ceph)
 
         cluster_name = cluster.get("ceph-cluster").get("name", "ceph")
         ceph_cluster_dict[cluster_name] = Ceph(cluster_name, ceph_nodes)
+
+        # Drive IPv6 when requested via --custom-config use_ipv6=true (any infra)
+        ceph_cluster_dict[cluster_name].use_ipv6 = use_ipv6
 
         # Set the network attributes of the cluster
         # ToDo: Support other providers like openstack and IBM-C
@@ -456,6 +489,10 @@ def run(args):
             cleanup_ibmc_ceph_nodes(
                 osp_cred, cleanup_name, custom_config=args.get("--custom-config")
             )
+        elif cloud_type == "aws":
+            cleanup_aws_ceph_nodes(
+                osp_cred, cleanup_name, custom_config=args.get("--custom-config")
+            )
         else:
             log.warning("Unknown cloud type.")
 
@@ -464,10 +501,18 @@ def run(args):
     if glb_file is None and not reuse:
         raise Exception("Unable to gather information about cluster layout.")
 
-    if osp_cred_file is None and not reuse and cloud_type in ["openstack", "ibmc"]:
+    if (
+        osp_cred_file is None
+        and not reuse
+        and cloud_type in ["openstack", "ibmc", "aws"]
+    ):
         raise Exception("Require cloud credentials to create cluster.")
 
-    if inventory_file is None and not reuse and cloud_type in ["openstack", "ibmc"]:
+    if (
+        inventory_file is None
+        and not reuse
+        and cloud_type in ["openstack", "ibmc", "aws"]
+    ):
         raise Exception("Require system configuration information to provision.")
 
     # Required arguments to determine the test build details
@@ -481,10 +526,11 @@ def run(args):
     if upstream_build:
         product = "community"
         release = upstream_build
-        build = "nightly"
 
     # FixMe: We should be using product for differentiation.
     ibm_build = False
+    # disable coredump collection by default
+    collect_coredump = False
 
     # Custom or override configurations
     kernel_repo = args.get("--kernel-repo")
@@ -561,6 +607,8 @@ def run(args):
     enable_eus = args.get("--enable-eus")
     skip_enabling_rhel_rpms = args.get("--skip-enabling-rhel-rpms")
     skip_sos_report = args.get("--skip-sos-report")
+    if "collect-coredump" in custom_config_dict.keys():
+        collect_coredump = bool(custom_config_dict["collect-coredump"])
 
     # load config, suite and inventory yaml files
     conf = load_file(glb_file)
@@ -680,6 +728,7 @@ def run(args):
                 enable_eus=enable_eus,
                 custom_config=custom_config,
             )
+
         except Exception as err:
             log.error(err)
             tests = suite.get("tests")
@@ -860,6 +909,9 @@ def run(args):
                 if "enable-firewall" in custom_config_dict:
                     config["enable_firewall"] = custom_config_dict["enable-firewall"]
 
+                if "podman-auth-file" in custom_config_dict:
+                    config["podman_auth_file"] = custom_config_dict["podman-auth-file"]
+
             config["ceph_docker_registry"] = docker_registry
             config["ceph_docker_image"] = docker_image
             config["ceph_docker_image_tag"] = docker_tag
@@ -918,6 +970,17 @@ def run(args):
                             run_config=run_config,
                             tc=tc,
                         )
+
+                        # Convert duration string to timedelta object for updating xunit
+                        for ptc in parallel_tcs:
+                            val = ptc.get("duration", "00:00:00")
+                            if isinstance(val, str):
+                                hrs, mins, secs = val.split(":")
+                                ptc["duration"] = datetime.timedelta(
+                                    hours=int(hrs),
+                                    minutes=int(mins),
+                                    seconds=float(secs),
+                                )
                         tcs.extend(parallel_tcs)
                     else:
                         rc = test_mod.run(
@@ -1025,6 +1088,8 @@ def run(args):
                 cleanup_ceph_nodes(osp_cred, instances_name)
             elif cloud_type == "ibmc":
                 cleanup_ibmc_ceph_nodes(osp_cred, instances_name)
+            elif cloud_type == "aws":
+                cleanup_aws_ceph_nodes(osp_cred, instances_name)
 
         if test.get("recreate-cluster") is True:
             ceph_cluster_dict, clients = create_nodes(
@@ -1099,6 +1164,15 @@ def run(args):
     }
 
     email_results(test_result=test_res)
+
+    if jenkins_rc or collect_coredump:
+        log.info(
+            "\n\nPreserving core-dump directory due to failures in testcase or user instructed"
+        )
+        for cluster in ceph_cluster_dict.keys():
+            # method to collect coredumps from ceph nodes
+            collect_ceph_coredumps(ceph_cluster_dict[cluster], run_dir)
+        log.info(f"Generated coredump location : {url_base}/ceph_coredumps\n")
 
     if jenkins_rc and not skip_sos_report:
         log.info(

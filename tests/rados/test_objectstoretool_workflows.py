@@ -26,6 +26,7 @@ from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.objectstoretool_workflows import objectstoreToolWorkflows
 from ceph.rados.pool_workflows import PoolFunctions
+from ceph.rados.utils import get_cluster_timestamp
 from utility.log import Log
 
 log = Log(__name__)
@@ -738,6 +739,8 @@ def run(ceph_cluster, **kw):
             )
             log.info(out)
 
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         if config.get("bluestore-enospc"):
 
@@ -888,7 +891,7 @@ def run(ceph_cluster, **kw):
 
             # execute COT commands that are now feasible in read-only mode
             for operation in readonly_ops:
-                if operation == "list_get_attributes":
+                if operation == "list_get_attributes" and rhbuild.split(".")[0] < "9":
                     log.info(
                         "Skipping execution for 'get attribute' cmd during ENOSPC. "
                         "Bug - https://bugzilla.redhat.com/show_bug.cgi?id=2404644"
@@ -907,33 +910,60 @@ def run(ceph_cluster, **kw):
             osd_list = rados_obj.get_osd_list(status="up")
             log.info("List of OSDs: \n " + str(osd_list))
 
-            log.info("Create a data pool with default config")
-            assert rados_obj.create_pool(
-                pool_name="cot-pool", pg_num=128, pg_num_min=128
-            )
+            pool_cfg = config.get("pool_config", {})
+            pool_type = pool_cfg.get("pool_type", "replicated")
+            if pool_type == "erasure":
+                log.info("Create an EC data pool with default config")
+                _pool_name = pool_cfg.get("pool_name", "cot-ec-pool")
+                default_ec_pool_config = {
+                    "pool_name": _pool_name,
+                    "profile_name": "ec_profile_cot",
+                    "k": 4,
+                    "m": 2,
+                    "erasure_code_use_overwrites": "true",
+                    "enable_fast_ec_features": "true",
+                    "pg_num": 128,
+                    "pg_num_min": 128,
+                }
+                ec_pool_config = config.get("pool_config", default_ec_pool_config)
+                assert rados_obj.create_erasure_pool(**ec_pool_config)
+            else:
+                log.info("Create a replicated data pool with default config")
+                _pool_name = "cot-repli-pool"
+                assert rados_obj.create_pool(
+                    pool_name=_pool_name, pg_num=128, pg_num_min=128
+                )
 
             log.info("Write data to the pool using rados bench, 1000 objects")
             assert rados_obj.bench_write(
-                pool_name="cot-pool",
+                pool_name=_pool_name,
                 rados_write_duration=200,
                 max_objs=1000,
                 verify_stats=False,
             )
 
-            log.info(
-                "Write OMAP entries to the pool using librados, 200 objects with 5 omap entries each"
-            )
-            assert pool_obj.fill_omap_entries(
-                pool_name="cot-pool", obj_start=0, obj_end=200, num_keys_obj=5
-            )
+            if pool_type != "erasure":
+                log.info(
+                    "Write OMAP entries to the pool using librados, 200 objects with 5 omap entries each"
+                )
+                assert pool_obj.fill_omap_entries(
+                    pool_name=_pool_name, obj_start=0, obj_end=200, num_keys_obj=5
+                )
 
             # choose a random osd and stop it
             osd_id = pick_random_osd()
 
-            omap_pg, omap_obj = get_omap_obj(osd_id, cot_obj=objectstore_obj)
+            if pool_type != "erasure":
+                omap_pg, omap_obj = get_omap_obj(osd_id, cot_obj=objectstore_obj)
             bench_pg, bench_obj = get_bench_obj(osd_id, cot_obj=objectstore_obj)
 
             for operation in all_ops:
+                if "omap" in operation and pool_type == "erasure":
+                    log.info(
+                        "Operation %s is not valid for EC pools, moving on to next ops",
+                        operation,
+                    )
+                    continue
                 op_osd = osd_id
                 if operation in ["manipulate_object_content", "remove_object"]:
                     op_osd = pick_random_osd()
@@ -972,7 +1002,13 @@ def run(ceph_cluster, **kw):
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status() and not config.get("bluestore-enospc"):
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(
+            start_time=start_time, end_time=test_end_time
+        ) and not config.get("bluestore-enospc"):
             log.error("Test failed due to crash at the end of test")
             return 1
 

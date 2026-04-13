@@ -19,7 +19,7 @@ tests:
               service: cephadm
               args:
                 rhcs-version: 7.1
-                release: rc
+                release: released
                 mon-ip: node1
                 orphan-initial-daemons: true
                 skip-monitoring-stack: true
@@ -154,6 +154,7 @@ tests:
         run-on-rgw: true
         extra-pkgs:
           - jdk
+        git_clone_configs_repo: true
         install_start_kafka: true
         script-name: test_bucket_notifications.py
         config-file-name: test_bucket_notification_sasl_plaintext_plain_kafka_broker_persistent_multipart.yaml

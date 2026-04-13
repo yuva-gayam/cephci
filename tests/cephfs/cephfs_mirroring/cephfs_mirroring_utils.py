@@ -9,11 +9,13 @@ import json
 import random
 import secrets
 import string
+import time
 
 from looseversion import LooseVersion
 
 from ceph.ceph import CommandFailed
 from tests.cephfs.cephfs_utilsV1 import FsUtils
+from tests.cephfs.cephfs_volume_management import wait_for_process
 from utility.log import Log
 from utility.retry import retry
 from utility.utils import get_ceph_version_from_cluster
@@ -42,6 +44,100 @@ class CephfsMirroringUtils(object):
         self.source_mirrors = source_ceph_cluster.get_ceph_objects("cephfs-mirror")
         self.fs_util_ceph1 = FsUtils(source_ceph_cluster)
         self.fs_util_ceph2 = FsUtils(target_ceph_cluster)
+
+    @staticmethod
+    def verify_mount_points_responsive(client, mounting_dirs, timeout=30):
+        """Verify mount points are not hung by touching a file on each.
+
+        Uses retry to allow transient failures during daemon recovery.
+
+        Args:
+            client: Client node to run touch commands on
+            mounting_dirs: List of mount directory paths
+            timeout: Seconds to wait per mount point before giving up
+
+        Returns:
+            bool: True if all mount points are responsive, False otherwise
+        """
+        test_filename = ".daemon_health_check"
+
+        @retry(Exception, tries=3, delay=10)
+        def _touch_mount(mount_dir):
+            client.exec_command(
+                sudo=True,
+                cmd=f"touch {mount_dir}/{test_filename}",
+                timeout=timeout,
+            )
+            client.exec_command(
+                sudo=True,
+                cmd=f"rm -f {mount_dir}/{test_filename}",
+                timeout=timeout,
+            )
+
+        for mount_dir in mounting_dirs:
+            try:
+                _touch_mount(mount_dir)
+                log.info("Mount point %s is responsive", mount_dir)
+            except Exception:
+                log.error("Mount point %s is hung or unresponsive", mount_dir)
+                return False
+        return True
+
+    @staticmethod
+    def wait_for_mds_active(
+        fs_util_v1, client, filesystem_name, timeout=60, interval=10
+    ):
+        """Wait until at least one MDS is active for the given filesystem.
+
+        Args:
+            fs_util_v1: FsUtilsV1 object for the cluster
+            client: Client node to check MDS status on
+            filesystem_name: Name of the filesystem (e.g., "cephfs" or "cephfs-ec")
+            timeout: Maximum seconds to wait for an active MDS
+            interval: Seconds between status checks
+
+        Returns:
+            int: 0 if active MDS found, 1 if timed out
+        """
+        import time as _time
+
+        end_time = _time.time() + timeout
+        while _time.time() < end_time:
+            active = fs_util_v1.get_active_mdss(client, filesystem_name)
+            if active:
+                log.info("Active MDS daemons for %s: %s", filesystem_name, active)
+                return 0
+            log.info(
+                "No active MDS for %s yet, retrying in %ss", filesystem_name, interval
+            )
+            _time.sleep(interval)
+        log.error("No active MDS found for %s within %ss", filesystem_name, timeout)
+        return 1
+
+    @staticmethod
+    def wait_for_daemon_recovery(client, daemon_name, context, timeout=60, interval=5):
+        """Wait for a daemon to recover after a disruptive operation.
+
+        Args:
+            client: Client node to check daemon status on
+            daemon_name: Name of the daemon process (e.g., "cephfs-mirror", "mds")
+            context: Description of the operation that triggered recovery
+            timeout: Maximum seconds to wait for recovery
+            interval: Seconds between status checks
+
+        Returns:
+            int: 0 if daemon recovered, 1 if timed out
+        """
+        log.info("Waiting for %s to recover after %s", daemon_name, context)
+        if not wait_for_process(
+            client=client,
+            process_name=daemon_name,
+            timeout=timeout,
+            interval=interval,
+        ):
+            log.error("%s daemon did not recover after %s", daemon_name, context)
+            return 1
+        return 0
 
     def enable_mirroring_module(self, client):
         """
@@ -488,6 +584,83 @@ class CephfsMirroringUtils(object):
                 log.info(asok_file)
         return asok_files
 
+    def get_asok_file_with_connectivity_check(
+        self, cephfs_mirror_node, fsid, daemon_names
+    ):
+        """
+        Fetches the asok file of the cephfs-mirror daemon with connectivity testing.
+        Tests connectivity to each asok file and retries with remaining files if connection refused.
+        This function is useful when connection refused errors occur with the first asok file.
+
+        Args:
+            cephfs_mirror_node (CephNode or list): The CephFS mirror node(s) used to execute the command.
+            fsid (str): The FSID (File System ID) of the Ceph cluster.
+            daemon_name (str or list): The name(s) of the cephfs-mirror daemon.
+        Returns:
+            dict: Dictionary mapping hostname to [node, asok_file_path] for accessible asok files.
+        """
+        log.info(
+            "Fetch all asok files of the cephfs-mirror daemon with connectivity check."
+        )
+        accessible_asok_files = {}
+
+        for daemon_name in daemon_names:
+            # Get all asok files, not just the first one
+            cmd = f"cd /var/run/ceph/{fsid}/ ; ls -1tr ceph-client.{daemon_name}* 2>/dev/null"
+            # cephfs_mirror_node is always a list from get_ceph_objects("cephfs-mirror")
+            for node in cephfs_mirror_node:
+                # Get all asok files for this node
+                file_output, _ = node.exec_command(sudo=True, cmd=cmd, check_ec=False)
+                asok_file_list = [
+                    f.strip() for f in file_output.split("\n") if f.strip()
+                ]
+                log.info(
+                    f"Found {len(asok_file_list)} asok file(s) for {node.node.hostname}: {asok_file_list}"
+                )
+
+                # Test each asok file until we find an accessible one for this hostname
+                for asok_file_path in asok_file_list:
+                    if not asok_file_path:
+                        continue
+                    if node.node.hostname in accessible_asok_files:
+                        break  # Already found accessible file for this hostname
+
+                    log.info(
+                        f"Testing connectivity to asok file on {node.node.hostname}: {asok_file_path}"
+                    )
+                    # test_cmd = f"cd /var/run/ceph ; ceph --admin-daemon {asok_file_path} help"
+                    test_cmd = (
+                        f"cephadm shell -- bash -c "
+                        f'"cd /var/run/ceph && ceph --admin-daemon {asok_file_path} help"'
+                    )
+
+                    out, err = node.exec_command(
+                        sudo=True, cmd=test_cmd, check_ec=False
+                    )
+
+                    # Check if "fs mirror peer status" is in the output
+                    if out and "fs mirror peer status" in out:
+                        accessible_asok_files[node.node.hostname] = [
+                            node,
+                            asok_file_path,
+                        ]
+                        log.info(
+                            f"Successfully connected to asok file on {node.node.hostname}: {asok_file_path}"
+                        )
+                        break  # Found accessible file, move to next hostname
+                    else:
+                        log.warning(
+                            f"Connection refused or error accessing asok file on {node.node.hostname}: "
+                            f"'fs mirror peer status' not found. stderr: {err}, output: {out[:200] if out else 'empty'}"
+                        )
+
+        if accessible_asok_files:
+            log.info(f"Found {len(accessible_asok_files)} accessible asok file(s)")
+            return accessible_asok_files
+        else:
+            log.warning("No accessible asok files found, returning empty dict")
+            return {}
+
     @retry(CommandFailed, tries=5, delay=30)
     def validate_synchronization(
         self, cephfs_mirror_node, source_clients, fs_name, snap_count
@@ -636,7 +809,7 @@ class CephfsMirroringUtils(object):
         log.error("last synced Snapshot not found or not synced")
         raise CommandFailed("last synced Snapshot not found or not synced")
 
-    @retry(CommandFailed, tries=5, delay=30)
+    @retry(CommandFailed, tries=10, delay=60)
     def validate_snapshot_sync_status(
         self,
         cephfs_mirror_node,
@@ -646,9 +819,12 @@ class CephfsMirroringUtils(object):
         asok_file,
         filesystem_id,
         peer_uuid,
+        retry_count=10,
+        retry_delay=30,
     ):
         """
         Validate the synchronization status of a specific snapshot in the target cluster.
+        Retries up to retry_count times with retry_delay seconds between attempts.
         Args:
             cephfs_mirror_node (CephNode): The CephNode representing the CephFS mirror node.
             fs_name (str): The name of the Ceph filesystem being synchronized.
@@ -657,16 +833,14 @@ class CephfsMirroringUtils(object):
             asok_file (str): The admin socket file for the CephFS mirror.
             filesystem_id (str): The ID of the filesystem being synchronized.
             peer_uuid (str): The UUID of the peer cluster.
-
-        This function validates the synchronization status of a specific snapshot by checking the
-        last synchronized snapshot and its details in the target cluster.
+            retry_count (int): Number of retry attempts (default 10).
+            retry_delay (int): Seconds to wait between retries (default 30).
 
         Returns:
             dict: A dictionary with details of the synchronized snapshot, including snapshot name, sync duration,
             sync timestamp, and the number of snaps synced.
-        Note:
-            If the specified snapshot is not found or not synchronized, the function returns None.
         Raises:
+            CommandFailed: If the snapshot is not synced after all retry attempts.
             json.JSONDecodeError: If there's an error decoding JSON from the Ceph mirror status response.
         """
         log.info("Get peer mirror status")
@@ -678,34 +852,46 @@ class CephfsMirroringUtils(object):
         log.info(f"filesystem id of {fs_name} is : {filesystem_id}")
         peer_uuid = self.get_peer_uuid_by_name(self.source_clients[0], fs_name)
         log.info(f"peer uuid of {fs_name} is : {peer_uuid}")
-        for node, asok in asok_file.items():
-            asok[0].exec_command(
-                sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
-            )
-            cmd = (
-                f"cd /var/run/ceph/{fsid}/ ; ceph --admin-daemon {asok[1]} fs mirror peer status "
-                f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
-            )
-            out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
-            data = json.loads(out)
-            for path, status in data.items():
-                last_synced_snap = status.get("last_synced_snap")
-                if last_synced_snap:
-                    if last_synced_snap.get("name") == snapshot_name:
-                        sync_duration = last_synced_snap.get("sync_duration")
-                        sync_time_stamp = last_synced_snap.get("sync_time_stamp")
-                        snaps_synced = status.get("snaps_synced")
-                        log.info("ALl snapshots are synced")
-                        return {
-                            "snapshot_name": snapshot_name,
-                            "sync_duration": sync_duration,
-                            "sync_time_stamp": sync_time_stamp,
-                            "snaps_synced": snaps_synced,
-                        }
+        for attempt in range(1, retry_count + 1):
+            still_syncing = False
+            for node, asok in asok_file.items():
+                asok[0].exec_command(
+                    sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
+                )
+                cmd = (
+                    f"cd /var/run/ceph/{fsid}/ ; ceph --admin-daemon {asok[1]} fs mirror peer status "
+                    f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
+                )
+                out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
+                data = json.loads(out)
+                for path, status in data.items():
+                    last_synced_snap = status.get("last_synced_snap")
+                    if last_synced_snap:
+                        if last_synced_snap.get("name") == snapshot_name:
+                            sync_duration = last_synced_snap.get("sync_duration")
+                            sync_time_stamp = last_synced_snap.get("sync_time_stamp")
+                            snaps_synced = status.get("snaps_synced")
+                            log.info("All snapshots are synced")
+                            return {
+                                "snapshot_name": snapshot_name,
+                                "sync_duration": sync_duration,
+                                "sync_time_stamp": sync_time_stamp,
+                                "snaps_synced": snaps_synced,
+                            }
+                    if status.get("state") == "syncing":
+                        still_syncing = True
 
-        else:
-            log.error(f"{snapshot_name} not synced, last synced data is {data}")
-            raise CommandFailed("One or more snapshots are not synced")
+            if still_syncing and attempt < retry_count:
+                log.warning(
+                    f"{snapshot_name} not synced yet, sync in progress "
+                    f"(attempt {attempt}/{retry_count}). Retrying in {retry_delay}s..."
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+
+        log.error(f"{snapshot_name} not synced, last synced data is {data}")
+        raise CommandFailed("One or more snapshots are not synced")
 
     def remove_snapshot_mirror_peer(self, source_clients, fs_name, peer_uuid):
         """
@@ -822,11 +1008,11 @@ class CephfsMirroringUtils(object):
         List and verify remote snapshots and data in a target Ceph cluster.
         Args:
             target_clients: Ceph client on the target cluster.
-            target_mount_path (str): The mount path on the target cluster.
             target_client_user (str): The user for the target client.
             source_path (str): The source path where snapshots and data are located.
-            snapshot_name (str): The name of the snapshot to verify.
-            expected_files (list): List of expected files in the snapshot.
+            source_client: Ceph client on the source cluster.
+            source_mount_path (str): The mount path on the source cluster.
+            target_fs_name (str): The target filesystem name.
         Returns:
             tuple: A tuple containing a boolean indicating success or failure, and a message.
         """
@@ -979,6 +1165,128 @@ class CephfsMirroringUtils(object):
         except Exception as e:
             log.error(f"Error deploying CephFS mirroring setup: {e}")
 
+    def deploy_cephfs_mirroring_peer_add(
+        self,
+        source_fs,
+        source_client,
+        target_fs,
+        target_client,
+        target_user,
+        target_site_name,
+        target_mon_host,
+        build,
+    ):
+        """
+        Deploy CephFS mirroring setup between source and target filesystems using peer_add.
+
+        NOTE: The 'peer_add' command is deprecated and will be removed in a future release.
+        Use 'deploy_cephfs_mirroring' with peer_bootstrap instead for production use.
+        This method is provided for testing/validation purposes.
+
+        Args:
+        - source_fs (str): Name of the source filesystem.
+        - source_client: Client object for the source.
+        - target_fs (str): Name of the target filesystem.
+        - target_client: Client object for the target.
+        - target_user (str): User to be authorized for the target filesystem.
+        - target_site_name (str): Name of the target site.
+        - target_mon_host (str): Monitor host IP address of the target cluster.
+        Raises:
+        - Exception: If any step fails during the setup process.
+
+        Returns:
+            dict: Dictionary containing peer information including UUID if successful.
+        """
+        try:
+            log.info("Enable mirroring module on source")
+            if self.enable_mirroring_module(source_client) != 0:
+                raise Exception("Failed to enable mirroring module on Source.")
+
+            log.info("Enable mirroring module on target")
+            if self.enable_mirroring_module(target_client) != 0:
+                raise Exception("Failed to enable mirroring module on Target.")
+
+            log.info("Create and authorize user for the target filesystem")
+            if self.create_authorize_user(target_fs, target_user, target_client) != 0:
+                raise Exception(
+                    "Failed to create/authorize user for the target filesystem."
+                )
+
+            log.info("Enable snapshot mirroring on the source filesystem")
+            self.enable_snapshot_mirroring(source_fs, source_client)
+
+            log.info("Adding peer using peer_add command (DEPRECATED)")
+            log.warning(
+                "The 'peer_add' command is deprecated and will be removed in a future release. "
+                "Use 'peer_bootstrap' instead."
+            )
+            target_key, _ = target_client.exec_command(
+                sudo=True, cmd=f"ceph auth get-key client.{target_user}"
+            )
+            target_key = target_key.rstrip("\n")
+
+            # Format: ceph fs snapshot mirror peer_add <fs_name> <remote_cluster_spec> <target_fs> <mon_host> <key>
+            remote_cluster_spec = f"client.{target_user}@{target_site_name}"
+            command = (
+                f"ceph fs snapshot mirror peer_add {source_fs} "
+                f"{remote_cluster_spec} {target_fs} {target_mon_host} {target_key}"
+            )
+            log.info(f"Executing peer_add command: {command}")
+
+            # Execute command and capture both stdout and stderr to check for warning
+            out, err = source_client.exec_command(
+                sudo=True, cmd=command, check_ec=False
+            )
+
+            # Validate that the deprecation warning is present
+            warning_message = (
+                "The 'peer_add' command is deprecated and will be removed in a future release. "
+                "Use 'peer_bootstrap' instead."
+            )
+            if warning_message in out or warning_message in err:
+                log.warning(
+                    "Deprecation warning detected as expected: %s", warning_message
+                )
+            elif LooseVersion(build) >= LooseVersion("9.1"):
+                log.warning(
+                    "Deprecation warning not found in output. "
+                    "Command output: %s, stderr: %s",
+                    out,
+                    err,
+                )
+                return 1
+            else:
+                log.info("LooseVersion(build) %s", LooseVersion(build))
+                log.warning(
+                    "Deprecation warning not found in output. "
+                    "Command output: %s, stderr: %s",
+                    out,
+                    err,
+                )
+            # Check if command succeeded (return code 0)
+            if err and "error" in err.lower():
+                log.error(f"peer_add command failed with error: {err}")
+                raise Exception(f"Failed to add peer using peer_add: {err}")
+
+            log.info("Peer added successfully using peer_add command")
+
+            # Wait a moment for peer to be registered
+            time.sleep(5)
+
+            log.info("Validate peer connection")
+            if (
+                self.validate_peer_connection(
+                    source_client, source_fs, target_site_name, target_user, target_fs
+                )
+                != 0
+            ):
+                raise Exception("Peer connection validation failed.")
+
+            return 0
+        except Exception as e:
+            log.error(f"Error deploying CephFS mirroring setup with peer_add: {e}")
+            raise
+
     def destroy_cephfs_mirroring(
         self, source_fs, source_client, target_fs, target_client, target_user, peer_uuid
     ):
@@ -1019,10 +1327,35 @@ class CephfsMirroringUtils(object):
             if self.disable_mirroring_module(target_client) != 0:
                 raise Exception("Failed to disable mirroring module on Target.")
 
+            log.info(
+                "Waiting for mgr to stabilize and volumes module to be available "
+                "after disabling mirroring modules"
+            )
+            self._ensure_volumes_module(source_client)
+
             log.info("CephFS mirroring setup destroyed successfully.")
 
         except Exception as e:
             log.error(f"Error destroying CephFS mirroring setup: {e}")
+
+    @retry(Exception, tries=10, delay=15)
+    def _ensure_volumes_module(self, client):
+        """
+        Ensure the 'volumes' mgr module is loaded after a mgr restart.
+
+        Disabling mgr modules (like mirroring) triggers a mgr restart, which
+        temporarily unloads all modules including 'volumes'. Subsequent commands
+        such as 'ceph fs subvolume rm' will fail with ENOTSUP until the module
+        is re-loaded. This polls using the same pattern as enable_mirroring_module
+        / disable_mirroring_module until the volumes module is available.
+        """
+        out, _ = client.exec_command(
+            sudo=True, cmd="ceph mgr module ls --format json-pretty"
+        )
+        module_status = json.loads(out)
+        if "volumes" not in module_status.get("enabled_modules", []):
+            raise Exception("volumes mgr module is not yet available")
+        log.info("volumes mgr module is available")
 
     def add_files_and_validate(
         self,
@@ -1812,3 +2145,109 @@ class CephfsMirroringUtils(object):
                     snap_info,
                     csv_file,
                 )
+
+    def get_rsync_command(
+        self, source_path, target_path, target_ip, target_user="root"
+    ):
+        source_path = source_path.strip()
+        target_path = target_path.strip()
+
+        cmd = (
+            f"time rsync -av "
+            f'-e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" '
+            f'"{source_path}" {target_user}@{target_ip}:"{target_path}"'
+        )
+        return cmd
+
+    def get_snaps_synced(
+        self, fs_name, fsid, asok_file, filesystem_id, peer_uuid, path
+    ):
+        """
+        Captures the 'snaps_synced' value for a given path in CephFS mirroring status.
+
+        Args:
+            fs_name (str): The CephFS volume name and rank (e.g., cephfs@5).
+            fsid (str): The unique CephFS file system ID.
+            asok_file (dict): A dictionary containing the node and its corresponding admin socket.
+                            (e.g., {"node1": [client_object, "ceph-client.cephfs-mirror.<host>.asok"]})
+            filesystem_id (int): The ID for the CephFS filesystem (e.g., 2).
+            peer_uuid (str): The UUID of the peer to check mirror status.
+            path (str): The absolute path for which to capture the 'snaps_synced' value
+                        (e.g., /volumes/subvolgroup_1/subvol_1).
+
+        Returns:
+            int: The 'snaps_synced' value for the specified path if found, or 1 if the path is not found.
+        """
+        log.info("Get peer mirror status")
+        for node, asok in asok_file.items():
+            asok[0].exec_command(
+                sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
+            )
+        cmd = (
+            f"cd /var/run/ceph/{fsid}/ ; ceph --admin-daemon {asok[1]} fs mirror peer status "
+            f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
+        )
+        out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
+        data = json.loads(out)
+        log.info(f"Paths found in mirror status: {list(data.keys())}")
+        absolute_path = path.rstrip("/")
+
+        if absolute_path in data:
+            snaps_synced = data[absolute_path].get("snaps_synced")
+            log.info("snaps synced: %s", snaps_synced)
+            return snaps_synced
+        else:
+            log.error(f"Path '{absolute_path}' not found in the mirror status.")
+            return 1
+
+    def get_last_synced_snap_id(
+        self, fs_name, fsid, asok_file, filesystem_id, peer_uuid, path
+    ):
+        """
+        Captures the 'id' of the last synced snapshot for a given path in CephFS mirroring status.
+
+        Args:
+            fs_name (str): The CephFS volume name (e.g., cephfs).
+            fsid (str): The unique CephFS file system ID.
+            asok_file (dict): A dictionary containing the node and its corresponding admin socket.
+                            (e.g., {"node1": [client_object, "ceph-client.cephfs-mirror.<host>.asok"]})
+            filesystem_id (int): The ID for the CephFS filesystem (e.g., 2).
+            peer_uuid (str): The UUID of the peer to check mirror status.
+            path (str): The absolute path for which to capture the last synced snapshot ID
+                        (e.g., /volumes/subvolgroup_1/subvol_1).
+
+        Returns:
+            int or None: The 'id' of the last synced snapshot for the specified path if found,
+                        or None if the path is not found or no snapshot has been synced yet.
+        """
+        log.info("Get peer mirror status to retrieve last synced snapshot ID")
+        for node, asok in asok_file.items():
+            asok[0].exec_command(
+                sudo=True, cmd="dnf install -y ceph-common --nogpgcheck"
+            )
+        cmd = (
+            f"cd /var/run/ceph/{fsid}/ ; ceph --admin-daemon {asok[1]} fs mirror peer status "
+            f"{fs_name}@{filesystem_id} {peer_uuid} -f json"
+        )
+        out, _ = asok[0].exec_command(sudo=True, cmd=cmd)
+        data = json.loads(out)
+        log.info(f"Paths found in mirror status: {list(data.keys())}")
+        absolute_path = path.rstrip("/")
+
+        if absolute_path in data:
+            status = data[absolute_path]
+            last_synced_snap = status.get("last_synced_snap")
+            if last_synced_snap:
+                snap_id = last_synced_snap.get("id")
+                log.info("Last synced snapshot ID for %s: %s", absolute_path, snap_id)
+                return snap_id
+            else:
+                log.warning(
+                    "No last_synced_snap found for path '%s'. "
+                    "This may indicate no snapshots have been synced yet.",
+                    absolute_path,
+                )
+                return None
+        else:
+            log.error(f"Path '{absolute_path}' not found in the mirror status.")
+            return None

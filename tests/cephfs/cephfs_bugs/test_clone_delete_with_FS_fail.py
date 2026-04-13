@@ -1,10 +1,13 @@
+import json
 import random
 import string
+import time
 import traceback
 
 from ceph.ceph import CommandFailed
 from ceph.parallel import parallel
 from tests.cephfs.cephfs_utilsV1 import FsUtils
+from tests.cephfs.lib.cephfs_common_lib import CephFSCommonUtils
 from utility.log import Log
 from utility.retry import retry
 
@@ -49,6 +52,10 @@ def run(ceph_cluster, **kw):
     2. ceph fs subvolume rm <vol_name> <subvol_name> [--group_name <subvol_group_name>]
     3. ceph fs subvolumegroup rm <vol_name> <group_name>
     """
+    snapshot = None
+    subvolume = None
+    subvolumegroup_list = []
+    default_fs = None
     try:
         test_data = kw.get("test_data")
         fs_util = FsUtils(ceph_cluster, test_data=test_data)
@@ -57,6 +64,7 @@ def run(ceph_cluster, **kw):
         build = config.get("build", config.get("rhbuild"))
         fs_util.prepare_clients(clients, build)
         fs_util.auth_list(clients)
+        cephfs_common_utils = CephFSCommonUtils(ceph_cluster)
         log.info("checking Pre-requisites")
         if len(clients) < 1:
             log.info(
@@ -64,19 +72,29 @@ def run(ceph_cluster, **kw):
             )
             return 1
         log.info("setting 'snapshot_clone_no_wait' to false")
-        clients[0].exec_command(
+        client1 = clients[0]
+        client1.exec_command(
             sudo=True,
             cmd="ceph config set mgr mgr/volumes/snapshot_clone_no_wait false",
         )
+        log.info("Simulate clone create delay")
+        client1.exec_command(
+            sudo=True,
+            cmd="ceph config set mgr mgr/volumes/snapshot_clone_delay 2",
+        )
+        log.info("Check ceph Health before starting the test")
+        if cephfs_common_utils.wait_for_healthy_ceph(client1):
+            log.error("Cluster health is not OK before starting the test")
+            return 1
         default_fs = "cephfs_clone"
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
-        client1 = clients[0]
         fs_details = fs_util.get_fs_info(client1, fs_name=default_fs)
         if not fs_details:
             fs_util.create_fs(client1, default_fs)
+        fs_util.wait_for_mds_process(client1, default_fs)
         subvolumegroup_list = [
             {"vol_name": default_fs, "group_name": "subvolgroup_clone_cancel_1"}
         ]
@@ -97,7 +115,7 @@ def run(ceph_cluster, **kw):
         kernel_mounting_dir_1 = f"/mnt/cephfs_kernel{mounting_dir}_1/"
         mon_node_ips = fs_util.get_mon_node_ips()
         fs_util.kernel_mount(
-            [clients[0]],
+            [client1],
             kernel_mounting_dir_1,
             ",".join(mon_node_ips),
             sub_dir=f"{subvol_path.strip()}",
@@ -144,18 +162,34 @@ def run(ceph_cluster, **kw):
         log.error(traceback.format_exc())
         return 1
     finally:
+        wait_time_secs = 300
+        test_fail = 0
         log.info("Clean Up in progess")
         log.info("setting 'snapshot_clone_no_wait' to true")
-        clients[0].exec_command(
+        client1.exec_command(
             sudo=True, cmd="ceph config set mgr mgr/volumes/snapshot_clone_no_wait true"
         )
-        fs_util.remove_snapshot(client1, **snapshot)
-        fs_util.remove_subvolume(client1, **subvolume)
+        client1.exec_command(
+            sudo=True,
+            cmd="ceph config set mgr mgr/volumes/snapshot_clone_delay 0",
+        )
+        if snapshot:
+            fs_util.remove_snapshot(client1, **snapshot)
+        if subvolume:
+            fs_util.remove_subvolume(client1, **subvolume)
+        if cephfs_common_utils.wait_for_healthy_ceph(client1):
+            test_fail = 1
         for subvolumegroup in subvolumegroup_list:
             fs_util.remove_subvolumegroup(client1, **subvolumegroup, force=True)
-        client1.exec_command(
-            sudo=True, cmd=f"ceph fs volume rm {default_fs} --yes-i-really-mean-it"
-        )
+        if default_fs:
+            log.info(f"Cleaning up the Filesystem {default_fs}")
+            fs_util.remove_fs(clients[0], default_fs, validate=True)
+        if test_fail == 1:
+            log.error(
+                "Cluster health is not OK even after waiting for %s secs ",
+                wait_time_secs,
+            )
+            return 1
 
 
 def fail_mds(client, fs_util, default_fs):
@@ -172,29 +206,32 @@ def fail_mds(client, fs_util, default_fs):
     )
 
 
-def get_clone_status(client, cmd):
-    out, rc = client.exec_command(sudo=True, cmd=cmd)
-    log.info(out)
-
-
 def clone_ops(clone_list, fs_util, client1, default_fs, rmclone_list):
     for clone in clone_list:
         fs_util.create_clone(client1, **clone, validate=False)
 
     for clone in clone_list:
-        get_clone_status(
-            client1,
-            cmd=f"ceph fs clone status {default_fs} {clone['target_subvol_name']}",
-        )
-    for clone in clone_list:
-        get_clone_status(
-            client1,
-            cmd=f"ceph fs clone cancel {default_fs} {clone['target_subvol_name']}",
-        )
-        get_clone_status(
-            client1,
-            cmd=f"ceph fs clone status {default_fs} {clone['target_subvol_name']}",
-        )
+        clone_name = clone["target_subvol_name"]
+        state = ""
+        for attempt in range(3):
+            out, rc = fs_util.get_clone_status(client1, default_fs, clone_name)
+            if out and out.strip():
+                status = json.loads(out)
+                state = status.get("status", {}).get("state", "")
+                break
+            log.info(f"Empty clone status for {clone_name}, retrying ({attempt + 1}/3)")
+            time.sleep(2)
+        if state in ("pending", "in-progress"):
+            try:
+                fs_util.clone_cancel(client1, default_fs, clone_name)
+            except CommandFailed:
+                log.info(
+                    f"Clone cancel failed for {clone_name}, clone may have completed"
+                )
+        else:
+            log.info(f"Skipping cancel for {clone_name} - already in state: {state}")
+        out, rc = fs_util.get_clone_status(client1, default_fs, clone_name)
+        log.info(out)
 
     for clonevolume in rmclone_list:
         fs_util.remove_subvolume(

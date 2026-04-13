@@ -4,7 +4,7 @@ import re
 import time
 
 from ceph.parallel import parallel
-from ceph.utils import config_ntp, is_client, update_ca_cert
+from ceph.utils import config_ntp, enable_coredump, is_client, update_ca_cert
 from ceph.waiter import WaitUntil
 from cli.exceptions import ConfigError
 from cli.utilities.packages import Package
@@ -84,6 +84,18 @@ def run(**kw):
     # Extract test_data from kw
     test_data = kw.get("test_data", None)
 
+    # Validate podman auth file once before parallel execution
+    podman_auth_file = config.get("podman_auth_file")
+    if podman_auth_file:
+        from utility.registry_auth import validate_podman_auth_file
+
+        try:
+            validate_podman_auth_file(podman_auth_file)
+            log.info(f"Successfully validated podman auth file: {podman_auth_file}")
+        except Exception as e:
+            log.error(f"Failed to validate podman auth file: {e}")
+            raise
+
     with parallel() as p:
         for ceph in ceph_nodes:
             p.spawn(
@@ -97,6 +109,7 @@ def run(**kw):
                 cloud_type,
                 fips_mode,
                 firewall,
+                config,
             )
             time.sleep(20)
 
@@ -128,6 +141,7 @@ def install_prereq(
     cloud_type="openstack",
     fips_mode=False,
     firewall=False,
+    config=None,
 ):
     log.info("Waiting for cloud config to complete on " + ceph.hostname)
     ceph.exec_command(cmd="while [ ! -f /ceph-qa-ready ]; do sleep 15; done")
@@ -205,9 +219,8 @@ def install_prereq(
         if distro_ver.startswith("7"):
             rpm_all_packages = " ".join(rpm_packages.get("7"))
 
-        ceph.exec_command(
-            cmd=f"sudo yum install -y {rpm_all_packages}", long_running=True
-        )
+        cmd = f"sudo dnf install --setopt install_weak_deps=False -y {rpm_all_packages}"
+        ceph.exec_command(cmd=cmd, long_running=True)
 
         # Restarting the node for qdisc filter to be loaded. This is required for
         # RHEL-8
@@ -278,6 +291,25 @@ def install_prereq(
         if get_service_state(ceph, "firewalld").strip() != "active":
             raise ConfigError("Firewall not active")
         log.info("Firewall is active")
+
+    # Enable coredump collection
+    enable_coredump(ceph)
+    # Distribute podman auth file if specified in config
+    # Note: File is validated once before parallel execution in run()
+    if config:
+        podman_auth_file = config.get("podman_auth_file")
+        if podman_auth_file:
+            from utility.registry_auth import distribute_podman_auth_file
+
+            try:
+                distribute_podman_auth_file(ceph, podman_auth_file)
+                log.info(
+                    f"Successfully distributed podman auth file to {ceph.hostname}"
+                )
+            except Exception as e:
+                log.error(
+                    f"Failed to distribute podman auth file to {ceph.hostname}: {e}"
+                )
 
 
 def setup_addition_repo(ceph, repo):

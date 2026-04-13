@@ -92,6 +92,7 @@ class ServiceabilityMethods:
 
             ncount_pre = self.get_host_count()
             deploy_host(ceph_cluster=self.cluster, config=add_args)
+            time.sleep(30)
             if crush_bucket_name:
                 cmd = f"ceph osd crush move {crush_bucket_name} {crush_bucket_type}={crush_bucket_val}"
                 self.rados_obj.run_ceph_command(cmd=cmd)
@@ -129,8 +130,34 @@ class ServiceabilityMethods:
                 osd_args.update(self.config)
                 osdcount_pre = self.get_osd_count()
                 test_cephadm.run(ceph_cluster=self.cluster, config=osd_args)
-                if not osdcount_pre < self.get_osd_count():
-                    log.error("New OSDs were not added into the cluster")
+
+                # Wait for new OSDs to register in ceph osd ls (may take time after
+                # orchestrator shows them as running)
+                max_wait = 120  # seconds
+                wait_interval = 10
+                waited = 0
+                osd_registered = False
+
+                while waited < max_wait:
+                    current_count = self.get_osd_count()
+                    if osdcount_pre < current_count:
+                        log.info(
+                            f"New OSDs registered: {osdcount_pre} -> {current_count}"
+                        )
+                        osd_registered = True
+                        break
+                    log.info(
+                        f"Waiting for OSDs to register in OSD map... "
+                        f"({waited}/{max_wait}s, current: {current_count})"
+                    )
+                    time.sleep(wait_interval)
+                    waited += wait_interval
+
+                if not osd_registered:
+                    log.error(
+                        f"New OSDs were not added into the cluster after {max_wait}s. "
+                        f"Pre-count: {osdcount_pre}, Current: {self.get_osd_count()}"
+                    )
                     raise Exception("Execution error")
 
                 log.info("Deployed OSDs on new hosts")
@@ -140,7 +167,7 @@ class ServiceabilityMethods:
             log.exception(e)
             raise
 
-    def remove_offline_host(self, host_node_name: str):
+    def remove_offline_host(self, host_node_name: str, rm_crush_entry=True):
         """
         Method to remove a specific offline host from the cluster
         Args:
@@ -168,7 +195,17 @@ class ServiceabilityMethods:
                 raise Exception(err_msg)
 
             log.info("Removing offline host %s from the cluster" % rm_host.hostname)
-            self.remove_custom_host(host_node_name=host_node_name, offline=True)
+            self.remove_custom_host(
+                host_node_name=host_node_name,
+                offline=True,
+                rm_crush_entry=rm_crush_entry,
+            )
+
+            # removing empty spec definition for OSD post host removal
+            # will not fail if there were no empty specs present
+            if self.rados_obj.remove_empty_service_spec(service_type="osd") is False:
+                log.info("Could not remove empty service spec")
+                return False
         except Exception as e:
             log.error(f"Failed with exception: {e.__doc__}")
             log.exception(e)
@@ -178,7 +215,13 @@ class ServiceabilityMethods:
             + rm_host.hostname
         )
 
-    def remove_custom_host(self, host_node_name: str, offline=False):
+    def remove_custom_host(
+        self,
+        host_node_name: str,
+        offline=False,
+        rm_crush_entry=True,
+        print_osd_list=True,
+    ):
         """
         Method to remove a specific online host from the cluster
         Args:
@@ -197,11 +240,12 @@ class ServiceabilityMethods:
             )
 
             # get list of osd_id on the host to be removed
-            rm_osd_list = self.rados_obj.collect_osd_daemon_ids(osd_node=rm_host)
-            log.info(
-                "The OSD list to be removed from the host %s is %s"
-                % (rm_host.hostname, rm_osd_list)
-            )
+            if print_osd_list:
+                rm_osd_list = self.rados_obj.collect_osd_daemon_ids(osd_node=rm_host)
+                log.info(
+                    "The OSD list to be removed from the host %s is %s"
+                    % (rm_host.hostname, rm_osd_list)
+                )
 
             if not offline:
                 daemon_check = self.rados_obj.check_daemon_exists_on_host(
@@ -230,6 +274,8 @@ class ServiceabilityMethods:
             rm_cmd = f"ceph orch host rm {rm_host.hostname} --force"
             if offline:
                 rm_cmd += " --offline"
+            if rm_crush_entry:
+                rm_cmd += " --rm-crush-entry"
             self.cephadm.shell([rm_cmd])
 
             # wait for 120 secs for host to be removed from the cluster
@@ -252,6 +298,11 @@ class ServiceabilityMethods:
                 raise Exception(
                     "Could not remove host %s within timeout" % rm_host.hostname
                 )
+            # removing empty spec definition for OSD post host removal
+            # will not fail if there were no empty specs present
+            if self.rados_obj.remove_empty_service_spec(service_type="osd") is False:
+                log.info("Could not remove empty service spec")
+                return False
         except Exception as e:
             log.error(f"Failed with exception: {e.__doc__}")
             log.exception(e)
@@ -308,6 +359,11 @@ class ServiceabilityMethods:
             log.exception(e)
             raise
         finally:
+            # removing empty specs from cluster post OSD removal
+            # won't fail if there were no empty specs
+            if self.rados_obj.remove_empty_service_spec(service_type="osd") is False:
+                log.info("Could not remove empty service spec")
+                return False
             # set osd services to managed
             osd_services = self.rados_obj.list_orch_services(service_type="osd")
             for service in osd_services:

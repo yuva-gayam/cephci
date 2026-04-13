@@ -5,28 +5,45 @@ Test suite that verifies the deployment of Ceph NVMeoF Gateway
 """
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from time import sleep
+
+from looseversion import LooseVersion
 
 from ceph.ceph import Ceph, SocketTimeoutException
 from ceph.ceph_admin import CephAdmin
 from ceph.ceph_admin.helper import check_service_exists
+from ceph.ceph_admin.orch import Orch
 from ceph.parallel import parallel
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.monitor_workflows import MonitorWorkflows
 from ceph.rbd.workflows.cluster_operations import operation, osd_remove_and_add_back
-from ceph.utils import get_node_by_id
-from cli.utilities.utils import reboot_node
-from tests.cephadm import test_orch
-from tests.nvmeof.test_ceph_nvmeof_gateway import initiators
-from tests.nvmeof.workflows.gateway_entities import configure_gw_entities, teardown
+from ceph.utils import get_node_by_id, get_nodes_by_ids
+from cli.cephadm.cephadm import CephAdm
+from cli.utilities.utils import get_running_containers, reboot_node
+from tests.cephadm import test_nvmeof, test_orch
+from tests.nvmeof.workflows.constants import DEFAULT_NVME_METADATA_POOL
+from tests.nvmeof.workflows.gateway_entities import (
+    configure_gw_entities,
+    configure_hosts,
+    configure_listeners,
+    configure_subsystems,
+    teardown,
+)
 from tests.nvmeof.workflows.initiator import NVMeInitiator
+from tests.nvmeof.workflows.nvme_gateway import create_gateway
 from tests.nvmeof.workflows.nvme_service import NVMeService
-from tests.nvmeof.workflows.nvme_utils import check_and_set_nvme_cli_image
+from tests.nvmeof.workflows.nvme_utils import (
+    check_and_set_nvme_cli_image,
+    nvme_gw_cli_version_adapter,
+    setup_firewalld,
+)
 from tests.rbd.rbd_utils import initial_rbd_config
 from utility.log import Log
 from utility.retry import retry
-from utility.utils import generate_unique_id
+from utility.utils import generate_unique_id, get_ceph_version_from_cluster
 
 LOG = Log(__name__)
 cli_image = str()
@@ -60,7 +77,11 @@ def test_ceph_83575812(ceph_cluster, rbd, nvme_service, pool, config):
         if config.get("initiators"):
             with parallel() as p:
                 for initiator in config["initiators"]:
-                    p.spawn(initiators, ceph_cluster, nvmegwcli, initiator)
+                    client = get_node_by_id(ceph_cluster, initiator["node"])
+                    initiator_obj = NVMeInitiator(client)
+                    initiator_obj.connect_targets(nvmegwcli, initiator)
+                    paths = initiator_obj.list_devices()
+                    p.spawn(lambda: initiator_obj.start_fio(paths=paths, **initiator))
                     sleep(20)
                     out, err = rbd.remove_image(
                         pool, rbd_image_name, **{"all": True, "check_ec": False}
@@ -100,7 +121,13 @@ def test_ceph_83575467(ceph_cluster, rbd, nvme_service, pool, config):
 
         sub_args = {"base_cmd_args": {"format": "json"}}
         for initiator in config["initiators"]:
-            initiators(ceph_cluster, nvmegwcli, initiator)
+            client = get_node_by_id(ceph_cluster, initiator["node"])
+            initiator_obj = NVMeInitiator(client)
+            initiator_obj.connect_targets(nvmegwcli, initiator)
+            paths = initiator_obj.list_devices()
+            i = initiator_obj.start_fio(paths=paths, **initiator)
+            LOG.info(f"FIO Result: {i}")
+
         gw_info_bkp = list_subsystems(**sub_args)
         gw_info_bkp = json.loads(gw_info_bkp.strip())["subsystems"]
 
@@ -119,6 +146,9 @@ def test_ceph_83575467(ceph_cluster, rbd, nvme_service, pool, config):
             },
         }
         test_orch.run(ceph_cluster, **restart_cfg)
+        # Once restart is completed, wait for 30 seconds to ensure the service is restarted
+        # We are observing issues while cleanup constantly failed to connect to all addresses
+        sleep(30)
 
         gw_info = list_subsystems(**sub_args)
         gw_info = json.loads(gw_info.strip())["subsystems"]
@@ -153,7 +183,12 @@ def test_ceph_83575813(ceph_cluster, rbd, nvme_service, pool, config):
         # Run IOS on nvme namespaces
         initiator.disconnect_all()
         for i in config["initiators"]:
-            initiators(ceph_cluster, nvmegwcli, i)
+            client = get_node_by_id(ceph_cluster, i["node"])
+            initiator_obj = NVMeInitiator(client)
+            initiator_obj.connect_targets(nvmegwcli, i)
+            paths = initiator_obj.list_devices()
+            result = initiator_obj.start_fio(paths=paths, **i)
+            LOG.info(f"FIO Result: {result}")
 
         def check(_node, _size):
             out, _ = _node.exec_command(sudo=True, cmd="lsblk -bJ")
@@ -209,7 +244,12 @@ def test_ceph_83575813(ceph_cluster, rbd, nvme_service, pool, config):
             check(client, img["provisioned_size"])
         initiator.disconnect_all()
         for i in config["initiators"]:
-            initiators(ceph_cluster, nvmegwcli, i)
+            client = get_node_by_id(ceph_cluster, i["node"])
+            initiator_obj = NVMeInitiator(client)
+            initiator_obj.connect_targets(nvmegwcli, i)
+            paths = initiator_obj.list_devices()
+            result = initiator_obj.start_fio(paths=paths, **i)
+            LOG.info(f"FIO Result: {result}")
         LOG.info("Validation of CEPH-83575813 is successful.")
 
     except Exception as err:
@@ -232,10 +272,15 @@ def test_ceph_83575455(ceph_cluster, rbd, nvme_service, pool, config):
 
         # Configure Subsystem, listeners, host, namespaces
         if config.get("subsystems"):
-            configure_gw_entities(nvme_service, rbd_obj=rbd)
+            configure_gw_entities(nvme_service, rbd_obj=rbd, cluster=ceph_cluster)
 
         for i in config["initiators"]:
-            initiators(ceph_cluster, nvmegwcli, i)
+            client = get_node_by_id(ceph_cluster, i["node"])
+            initiator_obj = NVMeInitiator(client)
+            initiator_obj.connect_targets(nvmegwcli, i)
+            paths = initiator_obj.list_devices()
+            result = initiator_obj.start_fio(paths=paths, **i)
+            LOG.info(f"FIO Result: {result}")
 
         targets = initiator.list_devices()
 
@@ -254,10 +299,11 @@ def test_ceph_83575455(ceph_cluster, rbd, nvme_service, pool, config):
         try:
             host_args = {
                 "args": {
-                    "subsystem": config["initiators"][0]["subnqn"],
+                    "subsystem": config["initiators"][0]["nqn"],
                     "host": initiator_nqn,
                 }
             }
+            time.sleep(20)
             nvmegwcli.host.delete(**host_args)
         except Exception as host_del_err:
             if (
@@ -287,6 +333,12 @@ def test_ceph_83575455(ceph_cluster, rbd, nvme_service, pool, config):
                 f"Command execution failure as expected with timeout"
                 f" as IO fails on inaccessible mount point : {timeout}"
             )
+        except Exception as io_err:
+            if "Command exceed the allocated execution time" in str(io_err):
+                LOG.info(
+                    f"Command execution failure as expected with timeout"
+                    f" as IO fails on inaccessible mount point : {str(io_err)}"
+                )
 
         # Add client host access
         # Check the existence of the NVMe namespaces
@@ -296,7 +348,9 @@ def test_ceph_83575455(ceph_cluster, rbd, nvme_service, pool, config):
         if not targets:
             raise Exception(f"NVMe Targets not found on {client.hostname}")
         client.exec_command(
-            sudo=True, cmd=f"dd if=/dev/zero of={_file}_test bs=1M count=1000"
+            sudo=True,
+            cmd=f"dd if=/dev/zero of={_file}_test bs=1M count=1000",
+            timeout=30,
         )
         client.exec_command(sudo=True, cmd=f"ls -ltrh {_file}_test")
         LOG.info("Validation of CEPH-83575455 is successful.")
@@ -572,7 +626,20 @@ def test_ceph_83576093(ceph_cluster, rbd, nvme_service, pool, config):
         if not reboot_node(gw_node):
             raise Exception("Host did not started post reboot!!!!!")
 
-        service_name = f"nvmeof.{pool}"
+        # check the ceph version and if it is >= 20.2.1 and if the nvme_metadata_pool is DEFAULT_NVME_METADATA_POOL,
+        # then the service name should be "nvmeof.nvmeof"
+        # else the service name should be "nvmeof.{nvme_metadata_pool}"
+        ceph_version = get_ceph_version_from_cluster(
+            ceph_cluster.get_nodes(role="client")[0]
+        )
+        service_name = ""
+        if LooseVersion(ceph_version) >= LooseVersion("20.2.1"):
+            if nvme_service.nvme_metadata_pool == DEFAULT_NVME_METADATA_POOL:
+                service_name = f"nvmeof{DEFAULT_NVME_METADATA_POOL}"
+            else:
+                service_name = f"nvmeof.{nvme_service.nvme_metadata_pool}"
+        else:
+            service_name = f"nvmeof.{nvme_service.nvme_metadata_pool}"
         gw_group = config.get("gw_group")
         service_name = f"{service_name}.{gw_group}" if gw_group else service_name
         check_service_exists(
@@ -623,7 +690,11 @@ def test_ceph_83575814(ceph_cluster, rbd, nvme_service, pool, config):
         mon_host = ceph_cluster.get_nodes(role="mon")[0]
         with parallel() as p:
             for initiator in config["initiators"]:
-                p.spawn(initiators, ceph_cluster, nvmegwcli, initiator)
+                client = get_node_by_id(ceph_cluster, initiator["node"])
+                initiator_obj = NVMeInitiator(client)
+                initiator_obj.connect_targets(nvmegwcli, initiator)
+                paths = initiator_obj.list_devices()
+                p.spawn(lambda: initiator_obj.start_fio(paths=paths, **initiator))
 
             LOG.info("Removing mon service from the cluster")
             p.spawn(operation, mon_obj, "remove_mon_service", host=mon_host.hostname)
@@ -854,12 +925,291 @@ def test_ceph_83581755(ceph_cluster, rbd, nvme_service, pool, config):
         )
         _ = nvmegwcli.namespace.set_qos(**qos_args_without_mandatory_args)
     except Exception as err:
-        if "argument --nsid: invalid int value:" not in str(err):
+        if "invalid literal for int() with base 10: '1,2" in str(
+            err
+        ) or "argument --nsid: invalid int value:" in str(err):
+            LOG.info("Set QoS was failed as expected due to invalid namespace value.")
+        else:
             raise Exception(
-                "Set QoS was failed as expected due to invalid namespace value."
+                "Set QoS was failed with an exception which is not expected: "
+                + str(err)
             )
             return 1
-        LOG.info("Set QoS was failed as expected due to invalid namespace value....")
+
+
+def test_ceph_83608266(
+    ceph_cluster, rbd, pool, config, placement_cfg, nvme_service, executor, io_tasks
+):
+    """CEPH-83608266: Deploy same GW node in different GWgroup.
+    Returns:
+        int: 0 on success, 1 on failure.
+    """
+    admin_node = ceph_cluster.get_nodes(role="installer")[0]
+    conf = {}
+    clients = []
+
+    def string_to_dict(string):
+        """Parse ANA states from the string."""
+        states = string.replace(" ", "").split(",")
+        dict = {}
+        for state in states:
+            if not state:
+                continue
+            _id, _state = state.split(":")
+            dict[int(_id)] = _state
+        return dict
+
+    def deploy_nvme_service(conf, gw_node, nvmegwcli, nvme_service, redeploy=False):
+        states = {}
+        container_ids = []
+        subsystem_list = []
+        subsys_nqn = conf["nqn"]
+        gw_nodes = get_nodes_by_ids(ceph_cluster, config.get("gw_nodes"))
+        setup_firewalld(gw_nodes)
+        if conf["placement"] == "apply_spec":
+            cfg = {
+                "no_cluster_state": False,
+                "config": {
+                    "command": "apply_spec",
+                    "service": "nvmeof",
+                    "validate-spec-services": False,
+                    "specs": [
+                        {
+                            "service_type": "nvmeof",
+                            "service_id": "rbd",
+                            "placement": {"nodes": [i.hostname for i in gw_nodes]},
+                            "spec": {
+                                "pool": "rbd",
+                                "enable_auth": False,
+                            },
+                        }
+                    ],
+                },
+            }
+            gw_group = conf["pos_args"][-1]
+            cfg["config"]["specs"][0]["service_id"] = f"rbd.{gw_group}"
+            cfg["config"]["specs"][0]["spec"]["group"] = gw_group
+            test_nvmeof.run(ceph_cluster, **cfg)
+        else:
+            del conf["nqn"]
+            # Apply NVMe service using args format for Ceph >= 20.2.1
+            ceph_version = get_ceph_version_from_cluster(
+                ceph_cluster.get_nodes(role="client")[0]
+            )
+            if LooseVersion(ceph_version) >= LooseVersion("20.2.1"):
+                nvme_service.group = conf["pos_args"][-1]
+                if nvme_service.group == "gw_group1":
+                    nvme_service.deploy()
+                elif nvme_service.group == "gw_group2":
+                    # While deploying same gw nodes in different gw groups, we need to use args format
+                    # and we won't get service is up and running after deployment, so we need to use
+                    # orch apply to deploy the service again.
+                    pos_args = conf.pop("pos_args")
+                    conf["pool"] = pos_args[0]
+                    conf["group"] = pos_args[1]
+                    conf["pos_args"] = " "
+                    CephAdm(admin_node).ceph.orch.apply(service_name="nvmeof", **conf)
+            else:
+                CephAdm(admin_node).ceph.orch.apply(service_name="nvmeof", **conf)
+        out = CephAdm(admin_node).ceph.orch.ls(service_type="nvmeof", format="json")
+        service_details = json.loads(out)[0]
+
+        if "service was created" not in service_details.get("events", [""])[-1]:
+            raise RuntimeError("NVMe service deployment failed.")
+
+        time.sleep(60)
+
+        if not redeploy:
+            running_containers, _ = get_running_containers(
+                gw_node, format="json", expr="name=nvmeof", sudo=True
+            )
+            container_ids = [
+                item.get("Names")[0] for item in json.loads(running_containers)
+            ]
+
+            subsystem = {
+                "nqn": subsys_nqn,
+                "serial": 83581755,
+                "listener_port": 5003,
+                "allow_host": "*",
+            }
+
+            nvme_service.group = "gw_group1"
+            nvmegwcli.gateway_group = "gw_group1"
+            nvme_service.init_gateways()
+
+            # Configure Subsystem, listeners, host, namespaces
+            if config.get("subsystems"):
+                configure_subsystems(nvme_service)
+                configure_listeners(nvme_service.gateways, nvme_service.config)
+                configure_hosts(
+                    nvme_service.gateways[0],
+                    nvme_service.config,
+                )
+
+            for _ in range(2):
+                name = generate_unique_id(length=4)
+                img = f"{name}-image"
+                rbd.create_image(pool, img, "5G")
+                ns_args = {
+                    "args": {
+                        "subsystem": subsystem["nqn"],
+                        "rbd-pool": pool,
+                        "rbd-image": img,
+                    }
+                }
+                nvmegwcli.namespace.add(**ns_args)
+
+            subsystem_list_bkp, _ = nvmegwcli.subsystem.list(
+                base_cmd_args={"format": "json"}
+            )
+            subsystem_list = json.loads(subsystem_list_bkp.strip())["subsystems"]
+            states = collect_nvme_gateway_states(pool, {})
+
+            return subsystem_list, states, container_ids
+
+    def validate_redeployment_effects(
+        initial_subsystems, initial_states, initial_containers, gw_node, nvmegwcli, pool
+    ):
+        updated_subsystems_raw, _ = nvmegwcli.subsystem.list(
+            base_cmd_args={"format": "json"}
+        )
+        updated_subsystems = json.loads(updated_subsystems_raw.strip())["subsystems"]
+
+        updated_states = collect_nvme_gateway_states(pool, {})
+        running_containers, _ = get_running_containers(
+            gw_node, format="json", expr="name=nvmeof", sudo=True
+        )
+        updated_container_ids = [
+            item.get("Names")[0] for item in json.loads(running_containers)
+        ]
+
+        if not validate_subsystems(
+            {"subsystems": initial_subsystems}, {"subsystems": updated_subsystems}
+        ):
+            raise Exception("Subsystems changed after redeployment.")
+
+        if initial_states != updated_states:
+            raise Exception("ANA states changed after redeployment.")
+
+        if initial_containers != updated_container_ids:
+            raise Exception("Container IDs changed after redeployment.")
+
+        LOG.info("Redeployment validation successful.")
+
+    def validate_subsystems(initial_output: dict, updated_output: dict):
+        def get_subsystem_map(subsystems):
+            return {
+                s["nqn"]: set(ns["nsid"] for ns in s.get("namespaces", []))
+                for s in subsystems.get("subsystems", [])
+            }
+
+        initial_map = get_subsystem_map(initial_output)
+        updated_map = get_subsystem_map(updated_output)
+
+        for nqn, nsids in initial_map.items():
+            if nqn not in updated_map:
+                return False
+            if updated_map[nqn] != nsids:
+                return False
+
+        LOG.info("All subsystems and namespaces verified intact after redeployment.")
+        return True
+
+    def collect_nvme_gateway_states(pool, states):
+        out = CephAdmin(cluster=ceph_cluster, **config).shell(
+            args=["ceph", "nvme-gw", "show", pool, "gw_group1"]
+        )
+        out = json.loads(out[0])
+        if out.get("Created Gateways:"):
+            for gateway in out["Created Gateways:"]:
+                gw = gateway["gw-id"]
+                states[gw] = gateway
+                states[gw].update((string_to_dict(gateway["ana states"])))
+        return states
+
+    def resolve_placement(ceph_cluster, placement_cfg):
+        nodes = placement_cfg.get("nodes", ["node5", "node6"])
+        node_ids = get_nodes_by_ids(ceph_cluster, nodes)
+        placement = repr(" ".join([node.hostname for node in node_ids]))
+        node = get_node_by_id(ceph_cluster, nodes[0])
+        if "label" in placement_cfg:
+            label = placement_cfg["label"]
+            placement = f"label:{label}"
+        if "apply_spec" in placement_cfg:
+            placement = "apply_spec"
+        return placement, node
+
+    try:
+        LOG.info(f"Deploying NVMe service via placement {placement_cfg}")
+
+        conf["placement"], gw_node = resolve_placement(ceph_cluster, placement_cfg)
+
+        if conf.get("pos_args"):
+            conf["pos_args"].clear()
+
+        conf["pos_args"] = list(config.get("pos_args", []))
+        conf["pos_args"].append("gw_group1")
+        conf["nqn"] = config["subsystems"][0]["nqn"]
+        LOG.info("Deploying NVMe service in gw_group1")
+        _cls = nvme_gw_cli_version_adapter(ceph_cluster)
+        ceph = Orch(ceph_cluster, **{})
+
+        args = {
+            "shell": getattr(ceph, "shell"),
+            "port": config.get("port", 5500),
+        }
+        nvmegwcli = _cls(gw_node, **args)
+        initial_subsystems, initial_states, initial_containers = deploy_nvme_service(
+            conf, gw_node, nvmegwcli, nvme_service, False
+        )
+
+        # Start IO Execution
+
+        for io_client in config["initiators"]:
+            node = get_node_by_id(ceph_cluster, io_client["node"])
+            gateway = create_gateway(
+                _cls,
+                gw_node,
+                shell=getattr(ceph, "shell"),
+                port=config.get("port", 5500),
+                gw_group=config.get("gw_group"),
+            )
+            client = NVMeInitiator(node)
+            client.connect_targets(gateway, io_client)
+            clients.append(client)
+
+        for initiator in clients:
+            io_tasks.append(executor.submit(initiator.start_fio))
+        time.sleep(20)
+
+        LOG.info(f"Deploying NVMe service using {placement_cfg} in gw_group2")
+        conf["pos_args"][-1] = "gw_group2"
+        conf["nqn"] = config["subsystems"][0]["nqn"]
+        deploy_nvme_service(conf, gw_node, nvmegwcli, nvme_service, True)
+        validate_redeployment_effects(
+            initial_subsystems,
+            initial_states,
+            initial_containers,
+            gw_node,
+            nvmegwcli,
+            pool,
+        )
+        LOG.info("Test completed successfully, which is a failure condition.")
+    except Exception as e:
+        LOG.info(
+            f"Deployment failed as you are trying to have same GW node in different GWgroups: {e}"
+        )
+    finally:
+        # Delete the NVME service for gw_group2
+        CephAdm(admin_node).ceph.orch.rm(
+            service_name="nvmeof.rbd.gw_group2", force=True
+        )
+        nvme_service.config["gw_node"] = gw_node.id
+        nvme_service.group = "gw_group1"
+        if nvme_service.gateways:
+            teardown(nvme_service, rbd)
+        return 0
 
 
 def run(ceph_cluster: Ceph, **kwargs) -> int:
@@ -890,7 +1240,8 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
     config = kwargs["config"]
     rbd_pool = config["rbd_pool"]
     custom_config = kwargs.get("test_data", {}).get("custom-config")
-
+    executor = ThreadPoolExecutor()
+    io_tasks = []
     check_and_set_nvme_cli_image(ceph_cluster, config=custom_config)
     try:
         nvme_service = NVMeService(config, ceph_cluster)
@@ -915,6 +1266,22 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
             operation_mapping[operation](
                 ceph_cluster, rbd_obj, nvme_service, rbd_pool, config
             )
+        else:
+            if operation == "CEPH-83608266":
+                placements = config["args"]["placement_options"]
+                for placement_cfg in placements:
+                    nvme_service = NVMeService(config, ceph_cluster)
+                    rbd_obj = initial_rbd_config(**kwargs)["rbd_reppool"]
+                    test_ceph_83608266(
+                        ceph_cluster,
+                        rbd_obj,
+                        rbd_pool,
+                        config,
+                        placement_cfg,
+                        nvme_service,
+                        executor,
+                        io_tasks,
+                    )
 
         return 0
 
@@ -922,6 +1289,9 @@ def run(ceph_cluster: Ceph, **kwargs) -> int:
         LOG.error(err)
 
     finally:
-        if config.get("cleanup"):
+        if io_tasks:
+            LOG.info("Waiting for completion of IOs.")
+            executor.shutdown(wait=False, cancel_futures=True)
+        if config.get("cleanup") and operation != "CEPH-83608266":
             teardown(nvme_service, rbd_obj)
     return 1

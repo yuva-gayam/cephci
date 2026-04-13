@@ -59,8 +59,10 @@ def run(ceph_cluster, **kw):
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
         nfs_server = nfs_servers[0].node.hostname
         nfs_name = "cephfs-nfs"
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             raise CommandFailed("Cluster has not been created")
@@ -99,7 +101,7 @@ def run(ceph_cluster, **kw):
             f"ceph fs subvolume create {fs_name} {subvol_2} {subvol_grp}",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command, long_running=True)
+            client1.exec_command(sudo=True, cmd=command, timeout=60)
         subvol_1_path, rc = client1.exec_command(
             sudo=True, cmd=f"ceph fs subvolume getpath {fs_name} {subvol_1}"
         )

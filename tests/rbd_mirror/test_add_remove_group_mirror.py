@@ -75,7 +75,7 @@ def test_add_remove_group_mirroring(
     primary_cluster,
     secondary_cluster,
     pool_types,
-    **kw
+    **kw,
 ):
     """
     Test user can successfully add/remove images only in a disabled mirror rbd group
@@ -150,16 +150,21 @@ def test_add_remove_group_mirroring(
             io_config["rbd_obj"] = rbd_primary
             io_config["client"] = client_primary
             io_config["config"]["image_spec"] = image_spec_copy
-            (io, err) = krbd_io_handler(**io_config)
+            io, err = krbd_io_handler(**io_config)
             if err:
                 raise Exception("Map, mount and run IOs failed for " + str(image_spec))
             else:
                 log.info("Map, mount and IOs successful for " + str(image_spec))
 
             # Get Group Mirroring Status
-            (group_mirror_status, err) = rbd_primary.mirror.group.status(**group_config)
+            group_mirror_status, err = rbd_primary.mirror.group.status(**group_config)
             if err:
-                if "mirroring not enabled on the group" in err:
+                # 8.x and 9.x has differnt mirror status ouput
+                known_messages = [
+                    "mirroring disabled",
+                    "mirroring not enabled on the group",
+                ]
+                if any(msg in err for msg in known_messages):
                     mirror_state = "Disabled"
                 else:
                     raise Exception("Getting group mirror status failed : " + str(err))
@@ -176,7 +181,7 @@ def test_add_remove_group_mirroring(
             image_size = kw.get("config", {}).get(pool_type, {}).get("size")
             image_name = "image_standalone"
             standalone_image_spec = pool_spec + "/" + image_name
-            (image_create_status, err) = rbd_primary.create(
+            image_create_status, err = rbd_primary.create(
                 **{"image-spec": standalone_image_spec, "size": image_size}
             )
             if err:
@@ -195,7 +200,7 @@ def test_add_remove_group_mirroring(
             io_config["rbd_obj"] = rbd_primary
             io_config["client"] = client_primary
 
-            (io, err) = krbd_io_handler(**io_config)
+            io, err = krbd_io_handler(**io_config)
             if err:
                 raise Exception(
                     "Map, mount and run IOs failed for " + standalone_image_spec
@@ -204,7 +209,7 @@ def test_add_remove_group_mirroring(
                 log.info("Map, mount and IOs successful for " + standalone_image_spec)
 
             # Enable mirroring on Image
-            (image_mirror_status, err) = rbd_primary.mirror.image.enable(
+            image_mirror_status, err = rbd_primary.mirror.image.enable(
                 **{"image-spec": standalone_image_spec, "mode": "snapshot"}
             )
             if err:
@@ -219,7 +224,7 @@ def test_add_remove_group_mirroring(
             # Verify if Image mirroring state is achieved
             retry = 0
             while retry < 10:
-                (image_mirror_status, err) = rbd_primary.mirror.image.status(
+                image_mirror_status, err = rbd_primary.mirror.image.status(
                     **{"image-spec": standalone_image_spec, "format": "json"}
                 )
                 if err:
@@ -332,24 +337,32 @@ def test_add_remove_group_mirroring(
                 "Successfully verified image is removed from group when group mirroring is disabled"
             )
 
-            # Enable Mirroring
             if mirror_state == "Disabled":
                 enable_group_mirroring_and_verify_state(rbd_primary, **group_config)
                 mirror_state = "Enabled"
 
-            # Add rbd image 'image1' to group # Should FAIL
             try:
                 add_group_image_and_verify(rbd_primary, **group_image_kw)
-                raise Exception(
-                    "Image should not have been added successfully when group mirroring is enabled"
+                log.info(
+                    "Image add succeeded on mirror-enabled group. "
+                    "This cluster supports dynamic image addition."
                 )
+
             except Exception as e:
-                if "cannot add image to mirror enabled group" in str(e):
+                err = str(e).lower()
+
+                known_old_behavior = [
+                    "cannot add image to mirror enabled group",
+                ]
+
+                if any(msg in err for msg in known_old_behavior):
                     log.info(
-                        "Successfully verified image is not added to the group when group mirroring is enabled"
+                        "Image add failed as expected on cluster without dynamic image addition support"
                     )
                 else:
-                    raise Exception("Add group image failed with " + e)
+                    raise Exception(
+                        f"Add group image failed with unexpected error: {str(e)}"
+                    )
 
             # Disable Mirroring
             if mirror_state == "Enabled":
@@ -373,7 +386,7 @@ def test_add_remove_group_mirroring(
             log.info("Successfully completed group mirroring sync to secondary")
 
             # Validate size of each image should be same on site-a and site-b
-            (group_image_list, err) = rbd_primary.group.image.list(
+            group_image_list, err = rbd_primary.group.image.list(
                 **group_config, format="json"
             )
             if err:
@@ -384,7 +397,7 @@ def test_add_remove_group_mirroring(
             log.info("Successfully verified image size matches across both clusters")
 
             # Check group is replicated on site-b using group info
-            (group_info_status, err) = rbd_secondary.group.info(
+            group_info_status, err = rbd_secondary.group.info(
                 **group_config, format="json"
             )
             if err:
@@ -399,7 +412,7 @@ def test_add_remove_group_mirroring(
             log.info("Successfully verified group is present on secondary site")
 
             # Check whether images are part of correct group on site-b using group image-list
-            (group_image_list_secondary, err) = rbd_secondary.group.image.list(
+            group_image_list_secondary, err = rbd_secondary.group.image.list(
                 **group_config, format="json"
             )
             if err:

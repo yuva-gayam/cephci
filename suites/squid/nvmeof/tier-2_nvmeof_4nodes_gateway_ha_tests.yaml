@@ -130,6 +130,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -178,6 +179,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         do_not_create_image: true
         rep-pool-only: true
         gw_group: gw_group1
@@ -227,6 +229,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -274,6 +277,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -303,7 +307,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode2
-            serial: 1
+            serial: 2
             bdevs:
             - count: 2
               size: 5G
@@ -315,7 +319,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode3
-            serial: 1
+            serial: 3
             bdevs:
             - count: 2
               size: 5G
@@ -327,7 +331,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode4
-            serial: 1
+            serial: 4
             bdevs:
             - count: 2
               size: 5G
@@ -358,6 +362,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -410,6 +415,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -462,6 +468,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -491,7 +498,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode2
-            serial: 1
+            serial: 2
             bdevs:
             - count: 4
               size: 5G
@@ -526,6 +533,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -555,7 +563,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode2
-            serial: 1
+            serial: 2
             bdevs:
             - count: 2
               size: 5G
@@ -567,7 +575,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode3
-            serial: 1
+            serial: 3
             bdevs:
             - count: 2
               size: 5G
@@ -579,7 +587,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode4
-            serial: 1
+            serial: 4
             bdevs:
             - count: 2
               size: 5G
@@ -614,6 +622,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -643,7 +652,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode2
-            serial: 1
+            serial: 2
             bdevs:
             - count: 2
               size: 5G
@@ -655,7 +664,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode3
-            serial: 1
+            serial: 3
             bdevs:
             - count: 2
               size: 5G
@@ -667,7 +676,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode4
-            serial: 1
+            serial: 4
             bdevs:
             - count: 2
               size: 5G
@@ -704,6 +713,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -733,7 +743,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode2
-            serial: 1
+            serial: 2
             bdevs:
             - count: 2
               size: 5G
@@ -745,7 +755,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode3
-            serial: 1
+            serial: 3
             bdevs:
             - count: 2
               size: 5G
@@ -757,7 +767,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode4
-            serial: 1
+            serial: 4
             bdevs:
             - count: 2
               size: 5G
@@ -790,6 +800,7 @@ tests:
       abort-on-fail: false
       config:
         rbd_pool: rbd
+        nvme_metadata_pool: rbd
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -819,7 +830,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode2
-            serial: 1
+            serial: 2
             bdevs:
             - count: 2
               size: 5G
@@ -831,7 +842,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode3
-            serial: 1
+            serial: 3
             bdevs:
             - count: 2
               size: 5G
@@ -843,7 +854,7 @@ tests:
               - node9
             allow_host: "*"
           - nqn: nqn.2016-06.io.spdk:cnode4
-            serial: 1
+            serial: 4
             bdevs:
             - count: 2
               size: 5G

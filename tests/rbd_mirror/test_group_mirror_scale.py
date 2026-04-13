@@ -158,16 +158,21 @@ def test_scale_options(
                     file_path_list.append("/mnt/mnt_" + random_string(len=5) + "/file")
                 io_config["config"]["image_spec"] = image_spec_copy
                 io_config["config"]["file_path"] = file_path_list
-                (io, err) = krbd_io_handler(**io_config)
+                io, err = krbd_io_handler(**io_config)
                 if err:
                     raise Exception("Map, mount and run IOs failed for " + image_spec)
                 else:
                     log.info("Map, mount and IOs successful for " + image_spec)
 
             # Get Group Mirroring Status
-            (group_mirror_status, err) = rbd_primary.mirror.group.status(**group_config)
+            group_mirror_status, err = rbd_primary.mirror.group.status(**group_config)
             if err:
-                if "mirroring not enabled on the group" in err:
+                # 8.x and 9.x has different mirror status output
+                known_messages = [
+                    "mirroring disabled",
+                    "mirroring not enabled on the group",
+                ]
+                if any(msg in err for msg in known_messages):
                     mirror_state = "Disabled"
                 else:
                     raise Exception("Getting group mirror status failed : " + str(err))
@@ -192,7 +197,7 @@ def test_scale_options(
             )
 
             # Validate size of each image should be same on site-a and site-b
-            (group_image_list, err) = rbd_primary.group.image.list(
+            group_image_list, err = rbd_primary.group.image.list(
                 **group_config, format="json"
             )
             if err:
@@ -206,7 +211,7 @@ def test_scale_options(
             )
 
             # Check group is replicated on site-b using group info
-            (group_info_status, err) = rbd_secondary.group.info(
+            group_info_status, err = rbd_secondary.group.info(
                 **group_config, format="json"
             )
             if err:

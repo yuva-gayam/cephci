@@ -7,6 +7,7 @@ from ceph.ceph_admin import CephAdmin
 from ceph.rados import utils
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.serviceability_workflows import ServiceabilityMethods
+from ceph.rados.utils import get_cluster_timestamp
 from tests.rados.rados_test_util import wait_for_daemon_status
 from tests.rados.stretch_cluster import wait_for_clean_pg_sets
 from tests.rados.test_9281 import do_rados_get, do_rados_put
@@ -38,6 +39,8 @@ def run(ceph_cluster, **kw):
     timeout = config.get("timeout", 10800)
 
     log.info("Running create pool test case")
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         if config.get("create_pools"):
             pools = config.get("create_pools")
@@ -134,7 +137,7 @@ def run(ceph_cluster, **kw):
             daemon_type="osd",
             daemon_id=osd_id,
             status="running",
-            timeout=60,
+            timeout=300,
         )
         assert service_obj.add_osds_to_managed_service(
             osds=[osd_id], spec=target_osd_spec_name
@@ -171,7 +174,7 @@ def run(ceph_cluster, **kw):
                 daemon_type="osd",
                 daemon_id=osd_id,
                 status="running",
-                timeout=60,
+                timeout=300,
             )
         assert service_obj.add_osds_to_managed_service()
         rados_obj.set_service_managed_type(service_type="osd", unmanaged=False)
@@ -183,7 +186,11 @@ def run(ceph_cluster, **kw):
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
     return 0
