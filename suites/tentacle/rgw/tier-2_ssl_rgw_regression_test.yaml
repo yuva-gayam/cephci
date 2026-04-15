@@ -101,6 +101,7 @@ tests:
   #               - service_type: crash
   #                 placement:
   #                   host_pattern: "*"
+
   - test:
       abort-on-fail: true
       config:
