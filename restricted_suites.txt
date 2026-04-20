@@ -1,0 +1,17 @@
+# Restricted RGW test suites
+
+suites/squid/rgw/sanity_rgw.yaml
+suites/squid/rgw/sanity_rgw_multisite.yaml
+suites/squid/rgw/test_granular_s3test.yaml
+suites/squid/rgw/tests_rest_sanity_rgw.yaml
+suites/squid/rgw/tier-1-extn_rgw_multisite-secondary-to-primary.yaml
+suites/squid/rgw/tier-1_rgw.yaml
+suites/squid/rgw/tier-1_rgw_and_lc.yaml
+suites/squid/rgw/tier-1_rgw_archive_ms_upgrade_71GA_to_8x_latest.yaml
+suites/squid/rgw/tier-1_rgw_ibm.yaml
+suites/squid/rgw/tier-1_rgw_ibm_ssl_ms_upgrade_71GA_to_8x_latest.yaml
+suites/squid/rgw/tier-1_rgw_ms_datalog_and_crash.yaml
+suites/squid/rgw/tier-1_rgw_ms_ecpool_regression_test.yaml
+suites/squid/rgw/tier-1_rgw_ms_upgrade_61GA_to_8x_latest.yaml
+suites/squid/rgw/tier-1_rgw_ms_upgrade_71GA_to_8x_latest.yaml
+suites/squid/rgw/tier-1_rgw_ms_upgrade_multirealm_71GA_to_8x_latest.yaml
