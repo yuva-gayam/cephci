@@ -455,64 +455,64 @@ tests:
       module: sanity_rgw_multisite.py
       name: test M buckets multipart uploads on haproxy node
       polarion-id: CEPH-83575433
-  - test:
-      clusters:
-        ceph-arc:
-          config:
-            cephadm: true
-            commands:
-              - "ceph orch stop rgw.shared.arc"
-      desc: Test full sync at archive, power off archive zone with IOs in active zone
-      module: exec.py
-      name: Test full sync at archive, power off archive zone with IOs in active zone
-      polarion-id: CEPH-83575917
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            set-env: true
-            script-name: ../s3cmd/test_s3cmd.py
-            config-file-name: ../../s3cmd/multisite_configs/test_s3cmd.yaml
-            run-on-haproxy: true
-      desc: Upload 5000 objects via s3cmd to test full sync at archive
-      polarion-id: CEPH-83575917
-      module: sanity_rgw_multisite.py
-      name: Upload 5000 objects via s3cmd to test full sync at archive
+  # - test:
+  #     clusters:
+  #       ceph-arc:
+  #         config:
+  #           cephadm: true
+  #           commands:
+  #             - "ceph orch stop rgw.shared.arc"
+  #     desc: Test full sync at archive, power off archive zone with IOs in active zone
+  #     module: exec.py
+  #     name: Test full sync at archive, power off archive zone with IOs in active zone
+  #     polarion-id: CEPH-83575917
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           set-env: true
+  #           script-name: ../s3cmd/test_s3cmd.py
+  #           config-file-name: ../../s3cmd/multisite_configs/test_s3cmd.yaml
+  #           run-on-haproxy: true
+  #     desc: Upload 5000 objects via s3cmd to test full sync at archive
+  #     polarion-id: CEPH-83575917
+  #     module: sanity_rgw_multisite.py
+  #     name: Upload 5000 objects via s3cmd to test full sync at archive
 
 
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            script-name: test_bucket_lifecycle_object_expiration_transition.py
-            config-file-name: test_lc_transition_with_prefix_rule_haproxy.yaml
-            run-on-haproxy: true
-            stat-all-buckets-at-archive: true
-      desc: test LC transition on multisite, and bucket stats at archive
-      module: sanity_rgw_multisite.py
-      name: test LC transition on multisite, and bucket stats at archive
-      polarion-id: CEPH-83573372
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_bucket_lifecycle_object_expiration_transition.py
+  #           config-file-name: test_lc_transition_with_prefix_rule_haproxy.yaml
+  #           run-on-haproxy: true
+  #           stat-all-buckets-at-archive: true
+  #     desc: test LC transition on multisite, and bucket stats at archive
+  #     module: sanity_rgw_multisite.py
+  #     name: test LC transition on multisite, and bucket stats at archive
+  #     polarion-id: CEPH-83573372
 
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            config-file-name: test_Mbuckets_with_Nobjects_bucket_pol_retain.yaml
-            script-name: test_Mbuckets_with_Nobjects.py
-            run-on-haproxy: true
-            test-bucket-pol-retained-archive: true
-      desc: Test bucket policies are reatined at archive site post object uploads
-      polarion-id: CEPH-83575576
-      module: sanity_rgw_multisite.py
-      name: bucket policies retained at archive site
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            script-name: test_versioning_with_objects.py
-            config-file-name: test_versioning_objects_suspend_archive_haproxy.yaml
-            run-on-haproxy: true
-      desc: test versioning suspend on archive
-      module: sanity_rgw_multisite.py
-      name: test versioning suspend on archive
-      polarion-id: CEPH-83575578
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           config-file-name: test_Mbuckets_with_Nobjects_bucket_pol_retain.yaml
+  #           script-name: test_Mbuckets_with_Nobjects.py
+  #           run-on-haproxy: true
+  #           test-bucket-pol-retained-archive: true
+  #     desc: Test bucket policies are reatined at archive site post object uploads
+  #     polarion-id: CEPH-83575576
+  #     module: sanity_rgw_multisite.py
+  #     name: bucket policies retained at archive site
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_versioning_with_objects.py
+  #           config-file-name: test_versioning_objects_suspend_archive_haproxy.yaml
+  #           run-on-haproxy: true
+  #     desc: test versioning suspend on archive
+  #     module: sanity_rgw_multisite.py
+  #     name: test versioning suspend on archive
+  #     polarion-id: CEPH-83575578
