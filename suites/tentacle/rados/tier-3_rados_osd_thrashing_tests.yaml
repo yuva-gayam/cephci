@@ -163,7 +163,6 @@ tests:
         install_packages:
           - ceph-common
           - rbd-nbd
-          - fio
           - ceph-fuse
         copy_admin_keyring: true
         caps:
@@ -171,6 +170,15 @@ tests:
           osd: "allow *"
           mds: "allow *"
           mgr: "allow *"
+
+  - test:
+      desc: Install fio
+      module: exec.py
+      name: Install FIO
+      config:
+        sudo: true
+        commands:
+          - "dnf install fio -y"
 
   - test:
       name: Enable logging to file
