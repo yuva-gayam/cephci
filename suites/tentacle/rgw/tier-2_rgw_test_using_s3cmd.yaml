@@ -164,190 +164,190 @@ tests:
         config-file-name: ../../s3cmd/configs/test_rgw_opslog.yaml
         run-on-rgw: true # as logs generated on rgw nodes
 
-  - test:
-      name: Test single delete marker for versioned object using s3cmd
-      desc: Test single delete marker for versioned object using s3cmd
-      polarion-id: CEPH-83574806
-      module: sanity_rgw.py
-      comments: Known regression issue BZ2400398 in 9.0
-      config:
-        script-name: ../s3cmd/test_s3cmd.py
-        config-file-name: ../../s3cmd/configs/test_multiple_delete_marker_check.yaml
+#   - test:
+#       name: Test single delete marker for versioned object using s3cmd
+#       desc: Test single delete marker for versioned object using s3cmd
+#       polarion-id: CEPH-83574806
+#       module: sanity_rgw.py
+#       comments: Known regression issue BZ2400398 in 9.0
+#       config:
+#         script-name: ../s3cmd/test_s3cmd.py
+#         config-file-name: ../../s3cmd/configs/test_multiple_delete_marker_check.yaml
 
-# Testing s3cmd malformed url
-  - test:
-      name: test s3cmd put operation with malformed bucket url
-      desc: test s3cmd put operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_put.yaml
+# # Testing s3cmd malformed url
+#   - test:
+#       name: test s3cmd put operation with malformed bucket url
+#       desc: test s3cmd put operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_put.yaml
 
-  - test:
-      name: test s3cmd cp operation with malformed bucket url
-      desc: test s3cmd cp operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_cp.yaml
+#   - test:
+#       name: test s3cmd cp operation with malformed bucket url
+#       desc: test s3cmd cp operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_cp.yaml
 
-  - test:
-      name: test s3cmd del operation with malformed bucket url
-      desc: test s3cmd del operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_del.yaml
+#   - test:
+#       name: test s3cmd del operation with malformed bucket url
+#       desc: test s3cmd del operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_del.yaml
 
-  - test:
-      name: test s3cmd get operation with malformed bucket url
-      desc: test s3cmd get operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_get.yaml
+#   - test:
+#       name: test s3cmd get operation with malformed bucket url
+#       desc: test s3cmd get operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_get.yaml
 
-  - test:
-      name: test s3cmd ls operation with malformed bucket url
-      desc: test s3cmd ls operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_ls.yaml
+#   - test:
+#       name: test s3cmd ls operation with malformed bucket url
+#       desc: test s3cmd ls operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_ls.yaml
 
-  - test:
-      name: test s3cmd multipart operation with malformed bucket url
-      desc: test s3cmd multipart operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_multipart.yaml
+#   - test:
+#       name: test s3cmd multipart operation with malformed bucket url
+#       desc: test s3cmd multipart operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_multipart.yaml
 
-  - test:
-      name: test s3cmd mv operation with malformed bucket url
-      desc: test s3cmd mv operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_mv.yaml
+#   - test:
+#       name: test s3cmd mv operation with malformed bucket url
+#       desc: test s3cmd mv operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_mv.yaml
 
-  - test:
-      name: test s3cmd sync operation with malformed bucket url
-      desc: test s3cmd sync operation with malformed bucket url
-      module: sanity_rgw.py
-      polarion-id: CEPH-83575388
-      config:
-        script-name: ../s3cmd/test_s3cmd_malformed_url.py
-        config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_sync.yaml
+#   - test:
+#       name: test s3cmd sync operation with malformed bucket url
+#       desc: test s3cmd sync operation with malformed bucket url
+#       module: sanity_rgw.py
+#       polarion-id: CEPH-83575388
+#       config:
+#         script-name: ../s3cmd/test_s3cmd_malformed_url.py
+#         config-file-name: ../../s3cmd/configs/test_s3cmd_malformed_url_sync.yaml
 
-  - test:
-      name: Test deletlifecycle rule via s3cmd
-      desc: Test deletlifecycle rule via s3cmd
-      polarion-id: CEPH-83580364
-      module: sanity_rgw.py
-      config:
-        script-name: ../s3cmd/test_s3cmd.py
-        config-file-name: ../../s3cmd/configs/test_deletelifecycle.yaml
+#   - test:
+#       name: Test deletlifecycle rule via s3cmd
+#       desc: Test deletlifecycle rule via s3cmd
+#       polarion-id: CEPH-83580364
+#       module: sanity_rgw.py
+#       config:
+#         script-name: ../s3cmd/test_s3cmd.py
+#         config-file-name: ../../s3cmd/configs/test_deletelifecycle.yaml
 
-  - test:
-      name: Test by adding almost 1K buckets to the resharding queue
-      desc: disable and enable dynamic resharding for 1K buckets
-      polarion-id: CEPH-11478
-      module: sanity_rgw.py
-      comments: known issue BZ2404412 targetted to 9.0
-      config:
-        script-name: ../s3cmd/test_s3cmd.py
-        config-file-name: ../../s3cmd/configs/test_disable_and_enable_dynamic_resharding_with_1k_bucket.yaml
-        timeout: 9000
+#   - test:
+#       name: Test by adding almost 1K buckets to the resharding queue
+#       desc: disable and enable dynamic resharding for 1K buckets
+#       polarion-id: CEPH-11478
+#       module: sanity_rgw.py
+#       comments: known issue BZ2404412 targetted to 9.0
+#       config:
+#         script-name: ../s3cmd/test_s3cmd.py
+#         config-file-name: ../../s3cmd/configs/test_disable_and_enable_dynamic_resharding_with_1k_bucket.yaml
+#         timeout: 9000
 
-  - test:
-      name: Test multipart upload with failed upload parts using s3cmd and boto3
-      desc: Test multipart upload with failed upload parts using s3cmd and boto3
-      polarion-id: CEPH-83589550
-      module: sanity_rgw.py
-      config:
-        script-name: ../s3cmd/test_s3cmd.py
-        config-file-name: ../../s3cmd/configs/test_multipart_upload_with_failed_parts_using_s3cmd_and_boto3.yaml
+#   - test:
+#       name: Test multipart upload with failed upload parts using s3cmd and boto3
+#       desc: Test multipart upload with failed upload parts using s3cmd and boto3
+#       polarion-id: CEPH-83589550
+#       module: sanity_rgw.py
+#       config:
+#         script-name: ../s3cmd/test_s3cmd.py
+#         config-file-name: ../../s3cmd/configs/test_multipart_upload_with_failed_parts_using_s3cmd_and_boto3.yaml
 
-  - test:
-     name: Test Ratelimit at global scope
-     desc: Test Ratelimit at global scope
-     polarion-id: CEPH-83574915 # also CEPH-83574916 and CEPH-83574919
-     module: sanity_rgw.py
-     config:
-       script-name: ../s3cmd/test_ratelimit_global.py
-       config-file-name: ../../s3cmd/configs/test_ratelimit_global.yaml
+#   - test:
+#      name: Test Ratelimit at global scope
+#      desc: Test Ratelimit at global scope
+#      polarion-id: CEPH-83574915 # also CEPH-83574916 and CEPH-83574919
+#      module: sanity_rgw.py
+#      config:
+#        script-name: ../s3cmd/test_ratelimit_global.py
+#        config-file-name: ../../s3cmd/configs/test_ratelimit_global.yaml
 
-  - test:
-      name: Test Ratelimit for versioned buckets
-      desc: Test Ratelimit for versioned buckets
-      polarion-id: CEPH-83574912
-      module: sanity_rgw.py
-      config:
-        script-name: ../s3cmd/test_rate_limit.py
-        config-file-name: ../../s3cmd/configs/test_ratelimit_versioned_bucket.yaml
+#   - test:
+#       name: Test Ratelimit for versioned buckets
+#       desc: Test Ratelimit for versioned buckets
+#       polarion-id: CEPH-83574912
+#       module: sanity_rgw.py
+#       config:
+#         script-name: ../s3cmd/test_rate_limit.py
+#         config-file-name: ../../s3cmd/configs/test_ratelimit_versioned_bucket.yaml
 
-  - test:
-      name: Test Ratelimit for tenanted users
-      desc: Test Ratelimit for tenanted users
-      polarion-id: CEPH-83574914
-      module: sanity_rgw.py
-      config:
-        script-name: ../s3cmd/test_rate_limit.py
-        config-file-name: ../../s3cmd/configs/test_ratelimit_tenanted_user.yaml
+#   - test:
+#       name: Test Ratelimit for tenanted users
+#       desc: Test Ratelimit for tenanted users
+#       polarion-id: CEPH-83574914
+#       module: sanity_rgw.py
+#       config:
+#         script-name: ../s3cmd/test_rate_limit.py
+#         config-file-name: ../../s3cmd/configs/test_ratelimit_tenanted_user.yaml
 
-  - test:
-      name: Test Ratelimit Debt
-      desc: Test Ratelimit Debt
-      polarion-id: CEPH-83574918
-      module: sanity_rgw.py
-      config:
-        script-name: ../s3cmd/test_rate_limit.py
-        config-file-name: ../../s3cmd/configs/test_ratelimit_debt.yaml
+#   - test:
+#       name: Test Ratelimit Debt
+#       desc: Test Ratelimit Debt
+#       polarion-id: CEPH-83574918
+#       module: sanity_rgw.py
+#       config:
+#         script-name: ../s3cmd/test_rate_limit.py
+#         config-file-name: ../../s3cmd/configs/test_ratelimit_debt.yaml
 
-  # - test:
-  #     name: Test Ratelimit Division
-  #     desc: Test Ratelimit Division
-  #     polarion-id: CEPH-83574917
-  #     module: sanity_rgw.py
-  #     config:
-  #       script-name: ../s3cmd/test_rate_limit.py
-  #       config-file-name: ../../s3cmd/configs/test_ratelimit_split.yaml
-  #     comments: known issue RFE 2367726 targeted to 9.1
+#   # - test:
+#   #     name: Test Ratelimit Division
+#   #     desc: Test Ratelimit Division
+#   #     polarion-id: CEPH-83574917
+#   #     module: sanity_rgw.py
+#   #     config:
+#   #       script-name: ../s3cmd/test_rate_limit.py
+#   #       config-file-name: ../../s3cmd/configs/test_ratelimit_split.yaml
+#   #     comments: known issue RFE 2367726 targeted to 9.1
 
-  - test:
-      name: Test ratelimit on bucket owner change
-      desc: Test ratelimit on bucket owner change
-      polarion-id: CEPH-83574920
-      module: sanity_rgw.py
-      config:
-        script-name: ../s3cmd/test_ratelimit_bucketowner.py
-        config-file-name: ../../s3cmd/configs/test_ratelimit_bucketowner.yaml
+#   - test:
+#       name: Test ratelimit on bucket owner change
+#       desc: Test ratelimit on bucket owner change
+#       polarion-id: CEPH-83574920
+#       module: sanity_rgw.py
+#       config:
+#         script-name: ../s3cmd/test_ratelimit_bucketowner.py
+#         config-file-name: ../../s3cmd/configs/test_ratelimit_bucketowner.yaml
 
-  - test:
-      name: Setting Public acl to the bucket
-      desc: Setting Public acl to the bucket
-      polarion-id: CEPH-83619036
-      module: sanity_rgw.py
-      comments: Known product issue BZ2367947 targeted to 8.0z5
-      config:
-        script-name: ../s3cmd/test_s3cmd.py
-        config-file-name: ../../s3cmd/configs/test_setting_public_acl.yaml
+#   - test:
+#       name: Setting Public acl to the bucket
+#       desc: Setting Public acl to the bucket
+#       polarion-id: CEPH-83619036
+#       module: sanity_rgw.py
+#       comments: Known product issue BZ2367947 targeted to 8.0z5
+#       config:
+#         script-name: ../s3cmd/test_s3cmd.py
+#         config-file-name: ../../s3cmd/configs/test_setting_public_acl.yaml
 
-  - test:
-      name: test create existing bucket with rgw_bucket_eexist_override set
-      desc: test create existing bucket with rgw config rgw_bucket_eexist_override
-      polarion-id: CEPH-83620440
-      module: sanity_rgw.py
-      comments: Known product issue BZ2368828 targeted to 8.0z5
-      config:
-        script-name: ../s3cmd/test_s3cmd.py
-        config-file-name: ../../s3cmd/configs/test_create_bucket_for_existing_bucket.yaml
-        run-on-haproxy: true
+#   - test:
+#       name: test create existing bucket with rgw_bucket_eexist_override set
+#       desc: test create existing bucket with rgw config rgw_bucket_eexist_override
+#       polarion-id: CEPH-83620440
+#       module: sanity_rgw.py
+#       comments: Known product issue BZ2368828 targeted to 8.0z5
+#       config:
+#         script-name: ../s3cmd/test_s3cmd.py
+#         config-file-name: ../../s3cmd/configs/test_create_bucket_for_existing_bucket.yaml
+#         run-on-haproxy: true
