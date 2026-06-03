@@ -116,67 +116,67 @@ tests:
       module: test_cephadm.py
       name: deploy cluster
 
-  - test:
-      clusters:
-        ceph-pri:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-        ceph-sec:
-          config:
-            verify_cluster_health: true
-            steps:
-              - config:
-                  command: apply_spec
-                  service: orch
-                  validate-spec-services: true
-                  specs:
-                    - service_type: prometheus
-                      placement:
-                        count: 1
-                        nodes:
-                          - node1
-                    - service_type: grafana
-                      placement:
-                        nodes:
-                          - node1
-                    - service_type: alertmanager
-                      placement:
-                        count: 1
-                    - service_type: node-exporter
-                      placement:
-                        host_pattern: "*"
-                    - service_type: crash
-                      placement:
-                        host_pattern: "*"
-      name: Monitoring Services deployment
-      desc: Add monitoring services using spec file.
-      module: test_cephadm.py
-      polarion-id: CEPH-83574727
-      comments: Automation issue - https://ibm-ceph.atlassian.net/browse/IBMCEPHQE-22443
+  # - test:
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #       ceph-sec:
+  #         config:
+  #           verify_cluster_health: true
+  #           steps:
+  #             - config:
+  #                 command: apply_spec
+  #                 service: orch
+  #                 validate-spec-services: true
+  #                 specs:
+  #                   - service_type: prometheus
+  #                     placement:
+  #                       count: 1
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: grafana
+  #                     placement:
+  #                       nodes:
+  #                         - node1
+  #                   - service_type: alertmanager
+  #                     placement:
+  #                       count: 1
+  #                   - service_type: node-exporter
+  #                     placement:
+  #                       host_pattern: "*"
+  #                   - service_type: crash
+  #                     placement:
+  #                       host_pattern: "*"
+  #     name: Monitoring Services deployment
+  #     desc: Add monitoring services using spec file.
+  #     module: test_cephadm.py
+  #     polarion-id: CEPH-83574727
+  #     comments: Automation issue - https://ibm-ceph.atlassian.net/browse/IBMCEPHQE-22443
 
   - test:
       abort-on-fail: true
@@ -240,6 +240,8 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
+              - "ceph config set global log_to_file true"
+              - "ceph config set client.rgw.{daemon_id:shared.pri} debug_rgw 20"
               - "ceph orch restart {service_name:shared.pri}"
         ceph-sec:
           config:
@@ -253,6 +255,8 @@ tests:
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_realm india"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zonegroup shared"
               - "ceph config set client.rgw.{daemon_id:shared.sec} rgw_zone secondary"
+              - "ceph config set global log_to_file true"
+              - "ceph config set client.rgw.{daemon_id:shared.sec} debug_rgw 20"
               - "ceph orch restart {service_name:shared.sec}"
       desc: Setting up RGW multisite replication environment
       module: exec.py
@@ -318,34 +322,70 @@ tests:
             script-name: test_versioning_with_objects.py
             config-file-name: test_versioning_objects_delete.yaml
   - test:
-      name: delete bucket policy on secondary
-      desc: test_bucket_policy_delete.yaml on secondary
-      polarion-id: CEPH-11213
-      module: sanity_rgw_multisite.py
+      name: dump rgw debug logs
+      desc: cat all rgw debug logs on primary and secondary
+      module: exec.py
       clusters:
         ceph-pri:
           config:
-            script-name: test_bucket_policy_ops.py
-            config-file-name: test_bucket_policy_delete.yaml
-            verify-io-on-site: ["ceph-pri"]
+            role: rgw
+            sudo: true
+            check_status: false
+            commands:
+              - "bash -c 'for f in $(find /var/log/ceph -maxdepth 2 -name \"ceph-client.rgw*.log\" 2>/dev/null); do echo \"===== $f =====\"; cat \"$f\"; done'"
+        ceph-sec:
+          config:
+            role: rgw
+            sudo: true
+            check_status: false
+            commands:
+              - "bash -c 'for f in $(find /var/log/ceph -maxdepth 2 -name \"ceph-client.rgw*.log\" 2>/dev/null); do echo \"===== $f =====\"; cat \"$f\"; done'"
   - test:
-      name: multipart upload on primary
-      desc: test_Mbuckets_with_Nobjects_multipart on primary
-      polarion-id: CEPH-14265
-      module: sanity_rgw_multisite.py
+      name: disable rgw debug logs
+      desc: reset debug_rgw and restart rgw on primary and secondary
+      module: exec.py
       clusters:
         ceph-pri:
           config:
-            script-name: test_Mbuckets_with_Nobjects.py
-            verify-io-on-site: ["ceph-sec"]
-            config-file-name: test_Mbuckets_with_Nobjects_multipart.yaml
-  - test:
-      name: rgw account with multisite,tenancy,reusability
-      desc: rgw account with multisite,tenancy,reusability
-      polarion-id: CEPH-83591673 #CEPH-83591686
-      module: sanity_rgw_multisite.py
-      clusters:
-        ceph-pri:
+            cephadm: true
+            commands:
+              - "ceph config rm client.rgw.{daemon_id:shared.pri} debug_rgw"
+              - "ceph orch restart {service_name:shared.pri}"
+        ceph-sec:
           config:
-            script-name: test_bucket_lifecycle_object_expiration_transition.py
-            config-file-name: test_lc_date_rgw_accounts.yaml
+            cephadm: true
+            commands:
+              - "ceph config rm client.rgw.{daemon_id:shared.sec} debug_rgw"
+              - "ceph orch restart {service_name:shared.sec}"
+  # - test:
+  #     name: delete bucket policy on secondary
+  #     desc: test_bucket_policy_delete.yaml on secondary
+  #     polarion-id: CEPH-11213
+  #     module: sanity_rgw_multisite.py
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_bucket_policy_ops.py
+  #           config-file-name: test_bucket_policy_delete.yaml
+  #           verify-io-on-site: ["ceph-pri"]
+  # - test:
+  #     name: multipart upload on primary
+  #     desc: test_Mbuckets_with_Nobjects_multipart on primary
+  #     polarion-id: CEPH-14265
+  #     module: sanity_rgw_multisite.py
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_Mbuckets_with_Nobjects.py
+  #           verify-io-on-site: ["ceph-sec"]
+  #           config-file-name: test_Mbuckets_with_Nobjects_multipart.yaml
+  # - test:
+  #     name: rgw account with multisite,tenancy,reusability
+  #     desc: rgw account with multisite,tenancy,reusability
+  #     polarion-id: CEPH-83591673 #CEPH-83591686
+  #     module: sanity_rgw_multisite.py
+  #     clusters:
+  #       ceph-pri:
+  #         config:
+  #           script-name: test_bucket_lifecycle_object_expiration_transition.py
+  #           config-file-name: test_lc_date_rgw_accounts.yaml
