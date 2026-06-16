@@ -30,11 +30,11 @@ instance:
 
     chpasswd:
       expire: false
+      list: |
+        root:passwd
       users:
         - name: cephuser
           password: $y$j9T$PxJ09a3yVNnPj0Veb8QDT.$bdWoyLq1IdGwlimyJC98P5OsSFE2w7.9ac68z4eoa01
-        - name: root
-          password: $y$j9T$L0/xJyxgqCPIezC0dp/0/0$KawKfTR2FhliH9YrG4/30wot90M3xtF03K1XwGnYz2A
 
     runcmd:
       - timedatectl set-timezone Etc/UTC
@@ -43,4 +43,6 @@ instance:
       - dnf clean all
       - dnf install -yq lvm2 chrony yum-utils podman net-snmp-utils net-snmp python3-devel wget
       - dnf update -y
+      - printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/50-ceph-qe.conf
+      - systemctl restart sshd
       - touch /ceph-qa-ready
