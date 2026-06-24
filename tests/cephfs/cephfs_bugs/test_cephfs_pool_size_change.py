@@ -14,7 +14,7 @@ from utility.log import Log
 log = Log(__name__)
 
 
-def check_clean_pgs(client, timeout=300):
+def check_clean_pgs(client, timeout=600):
     """
     Verify all pgs are active+clean
     :param client: client node
@@ -72,7 +72,6 @@ def run(ceph_cluster, **kw):
         log.info(f"Running cephfs {tc} test case")
 
         config = kw["config"]
-        rhbuild = config.get("rhbuild")
         build = config.get("build", config.get("rhbuild"))
         mdss = ceph_cluster.get_ceph_objects("mds")
 
@@ -91,6 +90,7 @@ def run(ceph_cluster, **kw):
         fs_details = fs_util.get_fs_info(clients[0], fs_name)
         if not fs_details:
             fs_util.create_fs(clients[0], fs_name)
+            fs_util.wait_for_mds_process(clients[0], fs_name)
         fs_pool_details = fs_util.get_fs_info(clients[0], fs_name)
         mon_node_ip = fs_util.get_mon_node_ips()
         mon_node_ip = ",".join(mon_node_ip)
@@ -125,13 +125,17 @@ def run(ceph_cluster, **kw):
         ]
         for command in commands:
             clients[0].exec_command(sudo=True, cmd=command, timeout=3600)
+
+        time.sleep(5)
         data_pool_pg_num, rc = clients[0].exec_command(
             sudo=True, cmd=f"ceph osd pool get {data_pool} pg_num | awk '{{print $2}}'"
         )
+        log.debug("data_pool_pg_num : {}".format(data_pool_pg_num))
         metadata_pool_pg_num, rc = clients[0].exec_command(
             sudo=True,
             cmd=f"ceph osd pool get {metadata_pool} pg_num | awk '{{print $2}}'",
         )
+        log.debug("metadata_pool_pg_num : {}".format(metadata_pool_pg_num))
         for num in range(1, 7):
             log.info("Creating Directories")
             out, rc = clients[0].exec_command(
@@ -210,22 +214,9 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         log.info("Cleaning up the system")
-        out, rc = clients[0].exec_command(sudo=True, cmd=f"rm -rf {mount_points[1]}/*")
         for mount_point in mount_points:
-            clients[0].exec_command(sudo=True, cmd=f"umount {mount_point}")
-            if "4." in rhbuild:
-                commands = [
-                    f"ceph osd pool set {data_pool} pg_autoscale_mode warn",
-                    f"ceph osd pool set {metadata_pool} pg_autoscale_mode warn",
-                ]
-                for command in commands:
-                    clients[0].exec_command(sudo=True, cmd=command, timeout=3600)
-            else:
-                commands = [
-                    f"ceph osd pool set {data_pool} pg_autoscale_mode on",
-                    f"ceph osd pool set {metadata_pool} pg_autoscale_mode on",
-                ]
-                for command in commands:
-                    clients[0].exec_command(sudo=True, cmd=command, timeout=3600)
-        for mount_point in mount_points:
-            clients[0].exec_command(sudo=True, cmd=f"rm -rf {mount_point}")
+            fs_util.client_clean_up(
+                "umount", kernel_clients=[clients[0]], mounting_dir=mount_point
+            )
+        log.info("Removing the test filesystem to avoid leftover health warnings")
+        fs_util.remove_fs(clients[0], fs_name, validate=True, check_ec=False)

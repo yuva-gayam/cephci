@@ -7,16 +7,20 @@ includes:
 2. Try changing the CRUSH rule to a non default rule. Should Fail.
 3. Try addition of a new DC in stretch mode. Health warning generated.
 4. Try making the Datacenter weights uneven. Health warning generated
-
+NOTE:- UNEVEN_WEIGHTS_STRETCH_MODE warning is updated to
+STRETCH_MODE_BUCKET_WEIGHT_IMBALANCE in 9.1 https://github.com/ceph/ceph/pull/66580
 """
 
 import random
 import time
 from collections import namedtuple
 
+from looseversion import LooseVersion
+
 from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.monitor_workflows import MonitorWorkflows
+from ceph.rados.utils import get_cluster_timestamp
 from tests.rados.test_stretch_site_down import (
     get_stretch_site_hosts,
     stretch_enabled_checks,
@@ -44,7 +48,8 @@ def run(ceph_cluster, **kw):
     mon_obj = MonitorWorkflows(node=cephadm)
     stretch_bucket = config.get("stretch_bucket", "datacenter")
     tiebreaker_mon_site_name = config.get("tiebreaker_mon_site_name", "tiebreaker")
-
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         if not stretch_enabled_checks(rados_obj=rados_obj):
             log.error(
@@ -166,6 +171,11 @@ def run(ceph_cluster, **kw):
             f"Chose host : {bucket_name} from {dc_2_name} to move to trigger weight imbalance"
         )
         warning = "UNEVEN_WEIGHTS_STRETCH_MODE"
+        if LooseVersion(str(config.get("release"))) >= LooseVersion("9.1"):
+            # UNEVEN_WEIGHTS_STRETCH_MODE warning is updated to
+            # STRETCH_MODE_BUCKET_WEIGHT_IMBALANCE in 9.1
+            # - https://github.com/ceph/ceph/pull/66580
+            warning = "STRETCH_MODE_BUCKET_WEIGHT_IMBALANCE"
         cmd1 = f"ceph osd crush move {bucket_name} {stretch_bucket}={dc_1_name}"
         rados_obj.run_ceph_command(cmd=cmd1)
         log.info(
@@ -267,7 +277,11 @@ def run(ceph_cluster, **kw):
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
     log.info("All the tests completed on the cluster, Pass!!!")

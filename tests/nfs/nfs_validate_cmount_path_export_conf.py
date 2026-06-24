@@ -27,6 +27,7 @@ def run(ceph_cluster, **kw):
     nfs_server_name = nfs_nodes[0].hostname
     fs_name = "cephfs"
     export_name = "/export_1"
+    Ceph(clients[0]).fs.sub_volume_group.create(group="ganeshagroup", volume=fs_name)
 
     if no_clients > len(clients):
         raise ConfigError("The test requires more clients than available")
@@ -43,6 +44,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs_name,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Fetch the export info
@@ -55,6 +58,7 @@ def run(ceph_cluster, **kw):
             log.info("Test Passed: 'cmount_path': '/' is present.")
         else:
             log.info("Test Failed: 'cmount_path': '/' is not present.")
+        return 0
 
     except Exception as e:
         log.error(f"Failed to validate the cmount_param in export file : {e}")
@@ -64,7 +68,7 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successful")
-
-    return 0

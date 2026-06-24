@@ -50,13 +50,19 @@ class CephFSCommonUtils(FsUtils):
         accepted_list = [
             "experiencing slow operations in BlueStore",
             "Slow OSD heartbeats",
+            "stray daemon(s) not managed by cephadm",
+            "CALL_HOME_ENABLED_AUTOMATICALLY",
         ]
+        non_accepted_list = ["OSD_DOWN", "OSD_HOST_DOWN"]
         while ceph_healthy == 0 and (datetime.datetime.now() < end_time):
             if self.check_ceph_status(client, "HEALTH_OK"):
                 ceph_healthy = 1
             else:
                 out, _ = client.exec_command(sudo=True, cmd="ceph health detail")
-                if any(msg in str(out) for msg in accepted_list):
+                if any(msg in str(out) for msg in non_accepted_list):
+                    log.error("Non-accepted errors found in ceph health: %s", out)
+                    time.sleep(5)
+                elif any(msg in str(out) for msg in accepted_list):
                     log.info(
                         "Ignoring the known warning for Bluestore Slow ops and OSD heartbeats"
                     )
@@ -70,9 +76,15 @@ class CephFSCommonUtils(FsUtils):
                     time.sleep(5)
 
         if ceph_healthy == 0:
-            client.exec_command(
+            out, _ = client.exec_command(
                 sudo=True,
                 cmd="ceph fs status;ceph -s;ceph health detail",
+            )
+            log.error(
+                "Cluster did not reach HEALTH_OK within %d seconds. "
+                "Final cluster state:\n%s",
+                wait_time,
+                out,
             )
             return 1
         return 0
@@ -103,8 +115,10 @@ class CephFSCommonUtils(FsUtils):
         nfs_server = nfs_servers[0].node.hostname
         out, _ = client.exec_command(sudo=True, cmd="ceph nfs cluster ls")
         if nfs_name not in out:
-            client.exec_command(
-                sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+            self.create_nfs(
+                client,
+                nfs_cluster_name=nfs_name,
+                nfs_server_name=nfs_server,
             )
         if wait_for_process(client=client, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -143,7 +157,9 @@ class CephFSCommonUtils(FsUtils):
         }
         return setup_params
 
-    def test_mount(self, clients, setup_params):
+    def test_mount(
+        self, clients, setup_params, mnt_type_list=["kernel", "fuse", "nfs"]
+    ):
         """
         This method is to run mount on test subvolumes
         Params:
@@ -163,7 +179,6 @@ class CephFSCommonUtils(FsUtils):
                 for _ in list(range(4))
             )
 
-            mnt_type_list = ["kernel", "fuse", "nfs"]
             mount_details = {}
             sv_list = setup_params["sv_list"]
             fs_name = setup_params["fs_name"]
@@ -244,7 +259,6 @@ class CephFSCommonUtils(FsUtils):
             )
             sv_list = setup_params["sv_list"]
             fs_name = setup_params["fs_name"]
-            group_name = setup_params["subvolumegroup"]["group_name"]
             for i in range(len(sv_list)):
                 subvol_name = sv_list[i]["subvol_name"]
                 fs_name = sv_list[i]["vol_name"]
@@ -274,7 +288,13 @@ class CephFSCommonUtils(FsUtils):
                     validate=True,
                     group_name=sv_list[i].get("group_name", None),
                 )
-            self.remove_subvolumegroup(client, fs_name, group_name, validate=True)
+            if setup_params.get("subvolumegroup"):
+                self.remove_subvolumegroup(
+                    client,
+                    fs_name,
+                    setup_params["subvolumegroup"]["group_name"],
+                    validate=True,
+                )
         except CommandFailed as ex:
             log.error("Cleanup failed with error : %s", ex)
             return 1
@@ -470,6 +490,8 @@ class CephFSCommonUtils(FsUtils):
 
         self.create_nfs(client, cluster, nfs_server_name=server)
 
+        wait_for_process(client, process_name=cluster)
+
         subvolume_name = kwargs.get("subvolume_name")
         if subvolume_name:
             self.create_nfs_export(
@@ -491,7 +513,6 @@ class CephFSCommonUtils(FsUtils):
         op_type,
         subvol,
         enc_tag="cephfs_enctag",
-        add_suffix=True,
         validate=True,
         **kwargs,
     ):
@@ -507,18 +528,18 @@ class CephFSCommonUtils(FsUtils):
 
         Returns: Upon sucess - 0 for op_type set/rm, enc_tag string if op_type is get,1 upon failure
         """
-        rand_str = "".join(
-            random.choice(string.ascii_lowercase + string.digits)
-            for _ in list(range(4))
-        )
 
+        enc_tag = kwargs.get(enc_tag, enc_tag)
+        if enc_tag == "cephfs_enctag":
+            rand_str = "".join(
+                random.choice(string.ascii_lowercase + string.digits)
+                for _ in list(range(4))
+            )
+            enc_tag = f"cephfs_enctag_{rand_str}"
         cmd = f"ceph fs subvolume enctag {op_type} {kwargs['fs_name']} {subvol}"
         if kwargs.get("group_name"):
             cmd += f" --group_name {kwargs['group_name']}"
         if op_type == "set":
-            enc_tag = kwargs.get(enc_tag, enc_tag)
-            if kwargs.get(add_suffix, add_suffix):
-                enc_tag = f"{enc_tag}_{rand_str}"
             cmd += f" --enctag {enc_tag}"
         out, _ = client.exec_command(
             sudo=True,
@@ -646,3 +667,81 @@ class CephFSCommonUtils(FsUtils):
                 time.sleep(retry_interval)  # Retry after the specified interval
 
         return 1
+
+    def is_subscription_registered(self, client):
+        """Identify if the system is subscribed or not"""
+        try:
+            cmd = (
+                "subscription-manager status | grep 'Overall Status' | awk '{print $3}'"
+            )
+            out, _ = client.exec_command(sudo=True, cmd=cmd)
+            status = out.strip()
+            log.info("Subscription status output: {}".format(status))
+            # In RHEL-9, "Disabled" means registered
+            # In RHEL-10, "Registered" means registered
+            is_subscribed = status.lower() in ["registered", "disabled"]
+            log.info(
+                "System is {}".format(
+                    "subscribed" if is_subscribed else "not subscribed"
+                )
+            )
+            return is_subscribed
+        except Exception as e:
+            raise CommandFailed(
+                "Failed to identify subscription status \n error: {0}".format(e)
+            )
+
+    def cleanup_cephfs(self, clients):
+        """
+        This method will cleanup the cephfs resources
+        Args:
+            clients: List of client nodes
+        Returns:
+            0 on success, 1 on failure
+        """
+        log.info("Unmount Ceph-related mounts on all client nodes")
+        for client in clients:
+            log.info(
+                "Checking and unmounting Ceph-related mounts on %s",
+                client.node.hostname,
+            )
+            mount_types = {
+                "ceph-fuse": "grep -E 'fuse\\.ceph-fuse|fuse\\.ceph' || true",
+                "kernel-ceph": "grep ' type ceph ' || true",
+                "nfs": "grep -E ' type nfs| type nfs4' || true",
+            }
+            for label, grep_cmd in mount_types.items():
+                try:
+                    out, _ = client.exec_command(
+                        sudo=True, cmd=f"mount | {grep_cmd}", check_ec=False
+                    )
+                    mount_points = [
+                        line.split()[2] for line in out.splitlines() if line.strip()
+                    ]
+                    for mp in mount_points:
+                        log.info("Unmounting %s mount: %s", label, mp)
+                        client.exec_command(
+                            sudo=True, cmd=f"umount -f {mp}", check_ec=False
+                        )
+                except Exception as ex:
+                    log.warning(
+                        "Error while processing %s mounts on %s: %s",
+                        label,
+                        client.node.hostname,
+                        ex,
+                    )
+
+        log.info("Remove existing CephFS volumes")
+        try:
+            out, _ = clients[0].exec_command(
+                sudo=True, cmd="ceph fs ls --format json", check_ec=False
+            )
+            for fs_entry in json.loads(out or "[]"):
+                vol = fs_entry["name"]
+                log.info("Removing filesystem volume: %s", vol)
+                self.remove_fs(clients[0], vol, validate=False, check_ec=False)
+            time.sleep(5)
+        except Exception as ex:
+            log.warning("Filesystem volume cleanup skipped or partial: %s", ex)
+            return 1
+        return 0

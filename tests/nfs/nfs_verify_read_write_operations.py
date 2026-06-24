@@ -45,6 +45,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         if operation == "verify_permission":
@@ -171,11 +173,10 @@ def run(ceph_cluster, **kw):
                     "Mv operation doesn't overwrite the content of existing file"
                 )
             log.info("Expected: mv operation has overwritten the file")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to validate read write operations : {e}")
         return 1
     finally:
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

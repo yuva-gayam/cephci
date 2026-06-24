@@ -67,8 +67,10 @@ def run(ceph_cluster, **kw):
         nfs_mounting_dir = "/mnt/nfs_" + "".join(
             secrets.choice(string.ascii_uppercase + string.digits) for i in range(5)
         )
-        out, rc = client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             raise CommandFailed("Cluster has not been created")
@@ -115,7 +117,7 @@ def run(ceph_cluster, **kw):
         log.info("Make export as Readonly")
         client1.exec_command(
             sudo=True,
-            cmd="sed -i 's/RW/RO/g' export.conf",
+            cmd="sed -i 's/rw/ro/gI' export.conf",
         )
         out, rc = client1.exec_command(
             sudo=True,
@@ -143,7 +145,7 @@ def run(ceph_cluster, **kw):
         log.info("Make export as ReadWrite")
         client1.exec_command(
             sudo=True,
-            cmd="sed -i 's/RO/RW/g' export.conf",
+            cmd="sed -i 's/ro/rw/gI' export.conf",
         )
         out, rc = client1.exec_command(
             sudo=True,

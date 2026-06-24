@@ -50,6 +50,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create a file on Mount point
@@ -108,7 +110,7 @@ def run(ceph_cluster, **kw):
         # Fetch the extended attribute of the file
         out = getfattr(client=clients[0], file_path=f"{nfs_mount}/{filename}")
         log.info("Listing all the attributes on {filename} ")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to validate multiple xttars on file : {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -117,6 +119,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

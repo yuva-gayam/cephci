@@ -46,6 +46,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create files from dd on client 1
@@ -75,12 +77,11 @@ def run(ceph_cluster, **kw):
                     break
                 if w.expired:
                     raise ValueError("The file created is not truncated")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to perform truncate operations : {e}")
         return 1
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

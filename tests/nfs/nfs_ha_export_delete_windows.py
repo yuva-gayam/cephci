@@ -72,6 +72,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create exports
@@ -132,6 +134,7 @@ def run(ceph_cluster, **kw):
         # Wait for the ops to complete
         for op in operations:
             op.join()
+        return 0
 
     except Exception as e:
         log.error(
@@ -153,5 +156,6 @@ def run(ceph_cluster, **kw):
             windows_client.exec_command(cmd=cmd)
             cmd = f"umount {window_nfs_mount}"
             windows_client.exec_command(cmd=cmd)
-        cleanup_cluster(linux_clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(
+            linux_clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers
+        )

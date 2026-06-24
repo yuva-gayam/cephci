@@ -43,6 +43,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         log.info(f"Run SPECstorage with {benchmark} benchmark")
@@ -57,12 +59,12 @@ def run(ceph_cluster, **kw):
         ):
             raise OperationFailedError("SPECstorage run failed")
         log.info("SPECstorage run completed")
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
         return 1
     finally:
         sleep(30)
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successfull")
-    return 0

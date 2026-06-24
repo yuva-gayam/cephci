@@ -112,6 +112,19 @@ tests:
       name: configure client
       polarion-id: CEPH-83573758
   - test:
+      abort-on-fail: true
+      config:
+        haproxy_clients:
+          - node6
+        rgw_endpoints:
+          - node3:80
+          - node4:80
+          - node5:80
+      desc: "Configure HAproxy"
+      module: haproxy.py
+      name: "Configure HAproxy"
+
+  - test:
       name: Test LC transition with rule by lc process
       desc: Test LC transition with rule by lc process
       polarion-id: CEPH-83574044
@@ -201,6 +214,33 @@ tests:
         config-file-name: ../../curl/configs/test_cors_presigned_put_url_using_curl.yaml
 
   - test:
+      name: Greater test coverage for bucket CORS
+      desc: Enhanced test coverage for bucket CORS
+      polarion-id: CEPH-83604475
+      module: sanity_rgw.py
+      config:
+        script-name: test_cors.py
+        config-file-name: test_cors.yaml
+
+  - test:
+      name: Greater test coverage for bucket CORS with wildcards
+      desc: Enhanced test coverage for bucket CORS with wildcards
+      polarion-id: CEPH-83604475
+      module: sanity_rgw.py
+      config:
+        script-name: test_cors.py
+        config-file-name: test_cors_wildcard.yaml
+
+  - test:
+      name: Greater test coverage for bucket CORS with multiple rules
+      desc: Enhanced test coverage for bucket CORS with multiple rules
+      polarion-id: CEPH-83604475
+      module: sanity_rgw.py
+      config:
+        script-name: test_cors.py
+        config-file-name: test_cors_multiple_rules.yaml
+
+  - test:
       name: Test Tags added during multipart upload are retrievable
       desc: Test Tags added during multipart upload are retrievable
       polarion-id: CEPH-83604857
@@ -217,6 +257,15 @@ tests:
       config:
         script-name: ../aws/test_tail_deletion_during_copy_object.py
         config-file-name: ../../aws/configs/test_aws_rgw_crash_with_part_copy_with_object_name_%_init.yaml
+
+  - test:
+      name: Test No crash with empty copy source
+      desc: Test No crash with empty copy source
+      polarion-id: CEPH-83622325
+      module: sanity_rgw.py
+      config:
+        script-name: ../aws/test_tail_deletion_during_copy_object.py
+        config-file-name: ../../aws/configs/test_crash_with_empty_copy_source.yaml
 
   # test customer RFE: Public access block
 
@@ -244,7 +293,7 @@ tests:
       config:
         script-name: test_bucket_policy_ops.py
         config-file-name: test_public_access_block_acl.yaml
-      comments: known issue - Bug 2344639 targetted to 9.0
+      comments: known issue - Bug 2413969 targeted to 8.1z5
   - test:
       name: test public access block IgnorePublicAcls
       desc: test public access block IgnorePublicAcls
@@ -262,6 +311,16 @@ tests:
         script-name: test_bucket_policy_ops.py
         config-file-name: test_public_access_block_restricted_public_buckets.yaml
       comments: known issue - Bug 2344730 targetted to 9.0
+
+  - test:
+      name: verify parquet object access after bucket reshard
+      desc: verify objects with parquet files uploaded are accessible post reshard of the bucket
+      polarion-id: CEPH-83575183
+      module: sanity_rgw.py
+      config:
+        script-name: test_s3select_resharding.py
+        config-file-name: test_s3select_parquet_resharding.yaml
+        run-on-haproxy: true
 
   - test:
       name: Dynamic Resharding tests without bucket delete
@@ -283,40 +342,32 @@ tests:
         config-file-name: test_manual_resharding_without_bucket_delete.yaml
         run-on-haproxy: true
 
-  # server-access-logging tests
+  # test checksum with awscli v1 and v2
 
   - test:
-      name: test bucket logging with Journal mode, SimplePrefix, rgw_admin_flush
-      desc: test bucket logging with Journal mode, SimplePrefix, rgw_admin_flush
-      polarion-id: CEPH-83623532
+      name: test checksum with awscli_v1_v2 small objects
+      desc: test checksum with awscli_v1_v2 small objects
+      polarion-id: CEPH-83591699
       module: sanity_rgw.py
       config:
-        script-name: test_server_access_logging.py
-        config-file-name: test_bucket_logging_journal_mode.yaml
+        script-name: ../aws/test_checksum_with_awscli_v1_and_v2.py
+        config-file-name: ../../aws/configs/test_checksum_awscli_v1_v2_small_objects.yaml
   - test:
-      name: test bucket logging with Journal mode, multipart_objects, PartitionedPrefix, rest_api_flush
-      desc: test bucket logging with Journal mode, multipart_objects, PartitionedPrefix, rest_api_flush
-      polarion-id: CEPH-83623532
+      name: test checksum with awscli_v1_v2 non-multipart objects
+      desc: test checksum with awscli_v1_v2 non-multipart objects
+      polarion-id: CEPH-83591699
       module: sanity_rgw.py
       config:
-        script-name: test_server_access_logging.py
-        config-file-name: test_bucket_logging_journal_mode_multipart.yaml
+        script-name: ../aws/test_checksum_with_awscli_v1_and_v2.py
+        config-file-name: ../../aws/configs/test_checksum_awscli_v1_v2_non_multipart.yaml
   - test:
-      name: test bucket logging with Standard mode, PartitionedPrefix, rgw_admin_flush
-      desc: test bucket logging with Standard mode, PartitionedPrefix, rgw_admin_flush
-      polarion-id: CEPH-83623532
+      name: test checksum with awscli_v1_v2 multipart objects
+      desc: test checksum with awscli_v1_v2 multipart objects
+      polarion-id: CEPH-83591699
       module: sanity_rgw.py
       config:
-        script-name: test_server_access_logging.py
-        config-file-name: test_bucket_logging_standard_mode.yaml
-  - test:
-      name: test bucket logging with Standard mode, multipart_objects, SimplePrefix, rest_api_flush
-      desc: test bucket logging with Standard mode, multipart_objects, SimplePrefix, rest_api_flush
-      polarion-id: CEPH-83623532
-      module: sanity_rgw.py
-      config:
-        script-name: test_server_access_logging.py
-        config-file-name: test_bucket_logging_standard_mode_multipart.yaml
+        script-name: ../aws/test_checksum_with_awscli_v1_and_v2.py
+        config-file-name: ../../aws/configs/test_checksum_awscli_v1_v2_multipart.yaml
 
   - test:
       name: Test large omap creation and clearance
@@ -338,3 +389,22 @@ tests:
       config:
         script-name: test_Mbuckets_with_Nobjects.py
         config-file-name: test_bucket_instance_delete.yaml
+
+  - test:
+      name: Test scenario of object deletion with version id
+      desc: Test scenario of object deletion with version id
+      polarion-id: CEPH-83576431
+      module: sanity_rgw.py
+      config:
+        script-name: ../aws/test_delete_version_id_null.py
+        config-file-name: ../../aws/configs/test_no_crash_while_ver_deletion.yaml
+
+  - test:
+      name: Object Unlink
+      desc: RGW Object unlink BZ 2401174
+      polarion-id: CEPH-83572908
+      module: sanity_rgw.py
+      config:
+        test-version: v2
+        script-name: test_user_bucket_rename.py
+        config-file-name: test_object_unlink.yaml

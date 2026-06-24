@@ -1,6 +1,6 @@
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster, open_mandatory_v3_ports, setup_nfs_cluster
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
@@ -96,6 +96,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create export
@@ -116,6 +118,20 @@ def run(ceph_cluster, **kw):
             new_clients_values,
         )
         sleep(10)
+
+        nfs_version = None
+        if version:
+            # Check if version contains "3" (e.g., "3", "3.0", or list containing 3)
+            if isinstance(version, (list, tuple)):
+                nfs_version = 3 if 3 in version else None
+            elif isinstance(version, (int, str)):
+                # Convert to string and check if it starts with "3"
+                version_str = str(version)
+                if version_str.startswith("3") or version_str == "3":
+                    nfs_version = 3
+
+        if nfs_version == 3:
+            open_mandatory_v3_ports(nfs_node, ["portmapper", "mountd"])
 
         # Mount the export on client1 which is unauthorized.Mount should fail
         clients[1].create_dirs(dir_path=nfs_client_mount, sudo=True)
@@ -158,7 +174,7 @@ def run(ceph_cluster, **kw):
                     f"Failed to mount nfs on {clients[0].hostname}"
                 )
         log.info("Mount succeeded on client0")
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
         return 1
@@ -181,6 +197,5 @@ def run(ceph_cluster, **kw):
         Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_client)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)
         log.info("Cleaning up successfull")
-    return 0

@@ -68,11 +68,17 @@ def run(ceph_cluster, **kw):
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
         log.info("Creating NFS HA cluster with --ingress flag")
 
-        client1.exec_command(
-            sudo=True,
-            cmd=f'ceph nfs cluster create {nfs_name} "2 {nfs_servers[0].node.hostname} '
-            f'{nfs_servers[1].node.hostname} {nfs_servers[2].node.hostname}" '
-            f"--ingress --virtual-ip {virtual_ip}/{subnet}",
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=[
+                "2",
+                nfs_servers[0].node.hostname,
+                nfs_servers[1].node.hostname,
+                nfs_servers[2].node.hostname,
+            ],
+            ha=True,
+            vip=f"{virtual_ip}/{subnet}",
         )
 
         log.info("Validate that the HA services have started")
@@ -130,8 +136,12 @@ def run(ceph_cluster, **kw):
                 secrets.choice(string.ascii_uppercase + string.digits) for i in range(3)
             )
             client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-            command = f"mount -t nfs -o port=2049 {virtual_ip}:{nfs_export_name} {nfs_mounting_dir}"
-            client1.exec_command(sudo=True, cmd=command, check_ec=False)
+            rc = fs_util.cephfs_nfs_mount(
+                client1, virtual_ip, nfs_export_name, nfs_mounting_dir
+            )
+            if not rc:
+                log.error("cephfs nfs export mount failed")
+                return 1
             nfs_mount_list.append(nfs_mounting_dir)
 
         log.info("Run IOs on both subvolumes")

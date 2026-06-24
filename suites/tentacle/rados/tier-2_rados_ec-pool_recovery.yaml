@@ -28,9 +28,9 @@ tests:
                 verbose: true
               args:
                 rhcs-version: 7.1
-                release: rc
+                release: released
+                platform: rhel-9
                 orphan-initial-daemons: true
-                skip-monitoring-stack: true
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 allow-fqdn-hostname: true
@@ -98,7 +98,10 @@ tests:
       config:
         command: add
         id: client.1                      # client Id (<type>.<Id>)
-        node: node7                       # client node
+        nodes:                            # client node
+          - node7:
+              release: 7.1
+              tag: released
         install_packages:
           - ceph-common
           - ceph-base

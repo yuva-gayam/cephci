@@ -1,17 +1,21 @@
 import json
-import tempfile
+import os
+import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Thread
 from time import sleep
 
 import yaml
+from looseversion import LooseVersion
 
+from ceph.ceph import CommandFailed
 from ceph.waiter import WaitUntil
 from cli.ceph.ceph import Ceph
 from cli.cephadm.cephadm import CephAdm
 from cli.exceptions import OperationFailedError
-from cli.utilities.filesys import FuseMount, Mount, Unmount
+from cli.utilities.filesys import FuseMount, Mount, MountFailedError, Unmount
 from cli.utilities.utils import check_coredump_generated, get_ip_from_node, reboot_node
 from utility.log import Log
 from utility.retry import retry
@@ -20,6 +24,19 @@ log = Log(__name__)
 
 ceph_cluster_obj = None
 setup_start_time = None
+
+
+class _LiteralPemDumper(yaml.SafeDumper):
+    """Serialize multiline PEM strings as YAML literal blocks (``|``), not folded quotes."""
+
+
+def _multiline_str_representer(dumper, data):
+    if isinstance(data, str) and "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+_LiteralPemDumper.add_representer(str, _multiline_str_representer)
 
 
 class NfsCleanupFailed(Exception):
@@ -40,16 +57,60 @@ def setup_nfs_cluster(
     vip=None,
     ceph_cluster=None,
     active_standby=False,
+    round_robin=False,
+    single_export=False,
+    enable_rdma=False,
+    rdma_port=None,
 ):
+    """Set up an NFS-Ganesha cluster with exports and client mounts.
+
+    End-to-end helper used by most NFS test modules.  It enables the
+    NFS manager module, creates an NFS-Ganesha cluster, creates one
+    export per client (or a single shared export), and mounts the
+    export(s) on each client.
+
+    Args:
+        clients (list): Client CephNode objects to mount on.
+        nfs_server (str | list): NFS server hostname(s) for the
+            cluster placement.
+        port (str): TCP NFS port (e.g. ``"2049"``).
+        version: NFS version(s) to use for mounts.  May be a single
+            value (``"4.2"``) or a dict mapping versions to client
+            lists for multi-version mounts.
+        nfs_name (str): NFS cluster name.
+        nfs_mount (str): Local mount-point path on clients.
+        fs_name (str): CephFS filesystem name (e.g. ``"cephfs"``).
+        export (str): Base export pseudo-path prefix.
+        fs (str): Filesystem backend identifier.
+        ha (bool): Enable HA with ingress (requires *vip*).
+        vip (str | None): Virtual IP for HA ingress.
+        ceph_cluster: CephCluster object for node lookups.
+        active_standby (bool): Use active-standby HA placement.
+        round_robin (bool): Distribute mounts across all servers
+            in round-robin fashion.
+        single_export (bool): Create only one export shared by
+            all clients instead of one per client.
+        enable_rdma (bool): Create the cluster with ``--enable-rdma``
+            and mount clients using ``proto=rdma``.
+        rdma_port (str | int | None): RDMA listener port passed to
+            ``--rdma_port`` on cluster create and used as the mount
+            port when *enable_rdma* is True.  Falls back to *port*
+            if not specified.
+    """
     # Get ceph cluter object and setup start time
     global ceph_cluster_obj
     global setup_start_time
     ceph_cluster_obj = ceph_cluster
-    setup_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    installer_node = ceph_cluster.get_nodes("installer")[0]
+    log.info("Logged into installer Node...")
+
+    setup_start_time, err = installer_node.exec_command(
+        sudo=True, cmd="date +'%Y-%m-%d %H:%M:%S'"
+    )
+    setup_start_time = setup_start_time.strip()
     setup_start_time = datetime.strptime(setup_start_time, "%Y-%m-%d %H:%M:%S")
 
     # Step 1: Enable nfs
-    installer_node = ceph_cluster.get_nodes("installer")[0]
     version_info = installer_node.exec_command(
         sudo=True, cmd="cephadm shell -- rpm -qa | grep nfs"
     )
@@ -57,56 +118,164 @@ def setup_nfs_cluster(
     Ceph(clients[0]).mgr.module.enable(module="nfs", force=True)
     sleep(3)
 
+    nfs_nodes = ceph_cluster.get_nodes("nfs")
+
+    # Get the mount versions specific to clients
+    mount_versions = _get_client_specific_mount_versions(version, clients)
+
     # Step 2: Create an NFS cluster
+    # Extract NFS version from version parameter (could be "3", "4", "4.2", etc.)
+    nfs_version = None
+    if version and _nfs_version_spec_includes_v3(version):
+        nfs_version = 3
+        # for NFSv3, We need to run cephadm prepare-host on the nfs nodes
+        # prepare the host and check if rpcbin service is running
+
+        # on older version we do not have the support for
+        # --install-service-dependencies. Instead of verion check
+        # we are getting it from command help.
+        prepare_host_help_output, _ = nfs_nodes[0].exec_command(
+            sudo=True, cmd="cephadm prepare-host --help"
+        )
+        cmd = "cephadm prepare-host"
+        if "install-service-dependencies" in prepare_host_help_output:
+            cmd += " --install-service-dependencies"
+        for nfs_node in nfs_nodes:
+            nfs_node.exec_command(sudo=True, cmd=cmd)
+
+    create_kwargs = {"nfs_version": nfs_version}
+
     Ceph(clients[0]).nfs.cluster.create(
         name=nfs_name,
         nfs_server=nfs_server,
         ha=ha,
         vip=vip,
         active_standby=active_standby,
+        nfs_nodes_obj=nfs_nodes,
+        enable_rdma=enable_rdma,
+        rdma_port=rdma_port,
+        **create_kwargs,
     )
     sleep(3)
 
     # Step 3: Perform Export on clients
     export_list = []
+
+    # If single_export is True, we only create one export but still populate export_list
+    # so the mounting logic can reference it.
+    loop_clients = [clients[0]] if single_export else clients
+
     i = 0
-    for client in clients:
+    for client in loop_clients:
         export_name = "{export}_{i}".format(export=export, i=i)
         Ceph(client).nfs.export.create(
             fs_name=fs_name, nfs_name=nfs_name, nfs_export=export_name, fs=fs
         )
         i += 1
+        all_exports = Ceph(client).nfs.export.ls(nfs_name)
+        if isinstance(all_exports, str):
+            try:
+                all_exports = json.loads(all_exports)
+            except Exception:
+                pass
+        if export_name not in all_exports:
+            raise OperationFailedError(
+                f"Export {export_name} not found in the list of exports {all_exports}"
+            )
         export_list.append(export_name)
         sleep(1)
 
-    # Get the mount versions specific to clients
-    mount_versions = _get_client_specific_mount_versions(version, clients)
-
     # Step 4: Perform nfs mount
     # If there are multiple nfs servers provided, only one is required for mounting
-
-    nfs_nodes = ceph_cluster.get_nodes("nfs")
-
     # Check if the mount version v3 is included in the list of versions and
     # if the mount version is v3, make necessary changes
     if 3 in mount_versions.keys():
         ports_to_open = ["portmapper", "mountd"]
         for nfs_node in nfs_nodes:
-            open_mandatory_v3_ports(nfs_node, ports_to_open)
-    if isinstance(nfs_server, list):
-        nfs_server = nfs_server[0]
+            if nfs_node.hostname in nfs_server:
+                open_mandatory_v3_ports(nfs_node, ports_to_open)
+
+    mount_servers = []
     if ha:
-        nfs_server = vip.split("/")[0]  # Remove the port
+        mount_servers = [vip.split("/")[0]]  # Remove the port
+    else:
+        # Normalize nfs_server to a list
+        if isinstance(nfs_server, list):
+            servers = nfs_server
+        elif isinstance(nfs_server, str):
+            # Split by space if multiple servers are provided in one string
+            servers = nfs_server.split()
+        else:
+            servers = [nfs_server]
+
+        if round_robin:
+            mount_servers = servers
+        else:
+            mount_servers = [servers[0]]
+
+    mount_kwargs = {}
+    if enable_rdma:
+        mount_kwargs["proto"] = "rdma"
+        mount_port = rdma_port or port
+        log.info("RDMA enabled: mounts will use proto=rdma, port=%s", mount_port)
+    else:
+        mount_port = port
 
     i = 0
+    server_idx = 0
     for version, clients in mount_versions.items():
         for client in clients:
+            current_server = mount_servers[server_idx % len(mount_servers)]
+
+            # Determine export to mount
+            if single_export:
+                current_export = export_list[0]
+            elif i < len(export_list):
+                current_export = export_list[i]
+            else:
+                current_export = export_name  # Fallback
+
+            # Clear any stale mount left by a previous test before mkdir
+            try:
+                client.exec_command(sudo=True, cmd=f"stat {nfs_mount}")
+            except CommandFailed:
+                try:
+                    client.exec_command(
+                        sudo=True, cmd=f"umount -l {nfs_mount}", check_ec=False
+                    )
+                    client.exec_command(
+                        sudo=True, cmd=f"rm -rf {nfs_mount}", check_ec=False
+                    )
+                except Exception:
+                    pass
+                log.info(
+                    "Cleared stale/leftover mount at %s on %s",
+                    nfs_mount,
+                    client.hostname,
+                )
+
             client.create_dirs(dir_path=nfs_mount, sudo=True)
             if mount_retry(
-                clients, i, nfs_mount, version, port, nfs_server, export_name
+                client,
+                nfs_mount,
+                version,
+                mount_port,
+                current_server,
+                current_export,
+                **mount_kwargs,
             ):
-                log.info("Mount succeeded on %s" % client.hostname)
+                log.info(
+                    "Mount succeeded on %s using server %s and export %s"
+                    % (client.hostname, current_server, current_export)
+                )
+                # Transfer ownership of the mount directory to cephuser so that
+                # non-root test operations can write to the mount without sudo
+                client.exec_command(
+                    sudo=True, cmd=f"chown cephuser:cephuser {nfs_mount}"
+                )
+                log.info("Transferred ownership of %s to cephuser" % nfs_mount)
             i += 1
+            server_idx += 1
             sleep(1)
     log.info("Mount succeeded on all clients")
 
@@ -140,7 +309,7 @@ def setup_nfs_cluster(
     Enable_nfs_coredump(nfs_nodes)
 
 
-def cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export):
+def cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=None):
     """
     Clean up the cluster post nfs operation
     Steps:
@@ -167,22 +336,13 @@ def cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export):
                 raise NfsCleanupFailed(
                     "Coredump generated post execution of the current test case"
                 )
+    nfs_log_parser(client=clients[0], nfs_node=nfs_nodes, nfs_name=nfs_name)
 
-    # Wait until the rm operation is complete
-    timeout, interval = 600, 10
     for client in clients:
         # Clear the nfs_mount, at times rm operation can fail
         # as the dir is not empty, this being an expected behaviour,
         # the solution is to repeat the rm operation.
-        for w in WaitUntil(timeout=timeout, interval=interval):
-            try:
-                client.exec_command(
-                    sudo=True, cmd=f"rm -rf {nfs_mount}/*", long_running=True
-                )
-                break
-            except Exception as e:
-                log.warning(f"rm operation failed, repeating!. Error {e}")
-        if w.expired:
+        if not mount_cleanup_retry(client, nfs_mount):
             raise NfsCleanupFailed(
                 "Failed to cleanup nfs mount dir even after multiple iterations. Timed out!"
             )
@@ -233,6 +393,8 @@ def setup_custom_nfs_cluster_multi_export_client(
     vip=None,
     export_num=None,
     ceph_cluster=None,
+    active_standby=None,
+    **kwargs,
 ):
     # Get ceph cluter object and setup start time
     global ceph_cluster_obj
@@ -243,6 +405,7 @@ def setup_custom_nfs_cluster_multi_export_client(
 
     # Step 1: Enable nfs
     installer_node = ceph_cluster.get_nodes("installer")[0]
+    nfs_nodes = ceph_cluster.get_nodes("nfs")
     version_info = installer_node.exec_command(
         sudo=True, cmd="cephadm shell -- rpm -qa | grep nfs"
     )
@@ -251,8 +414,23 @@ def setup_custom_nfs_cluster_multi_export_client(
     sleep(3)
 
     # Step 2: Create an NFS cluster
+    # Extract NFS version from version parameter (could be "3", "4", "4.2", etc.)
+    nfs_version = None
+    if version and _nfs_version_spec_includes_v3(version):
+        nfs_version = 3
+
+    create_kwargs = {"nfs_version": nfs_version}
+    if "in-file" in kwargs:
+        create_kwargs["in-file"] = kwargs["in-file"]
+
     Ceph(clients[0]).nfs.cluster.create(
-        name=nfs_name, nfs_server=nfs_server, ha=ha, vip=vip
+        name=nfs_name,
+        nfs_server=nfs_server,
+        ha=ha,
+        vip=vip,
+        active_standby=active_standby,
+        nfs_nodes_obj=nfs_nodes,
+        **create_kwargs,
     )
     sleep(3)
 
@@ -277,7 +455,13 @@ def setup_custom_nfs_cluster_multi_export_client(
                 nfs_name=nfs_name,
                 nfs_export=export_name,
                 fs=fs,
+                **({"enctag": kwargs["enctag"]} if "enctag" in kwargs else {}),
             )
+            all_exports = Ceph(clients[0]).nfs.export.ls(nfs_name)
+            if export_name not in all_exports:
+                raise OperationFailedError(
+                    f"Export {export_name} not found in the list of exports {all_exports}"
+                )
             sleep(1)
             # Get the mount versions specific to clients
             mount_versions = _get_client_specific_mount_versions(version, clients)
@@ -299,6 +483,12 @@ def setup_custom_nfs_cluster_multi_export_client(
                     raise OperationFailedError(
                         "Failed to mount nfs on %s" % clients[client_num].hostname
                     )
+                # Transfer ownership of the mount directory to cephuser so that
+                # non-root test operations can write to the mount without sudo
+                clients[client_num].exec_command(
+                    sudo=True, cmd=f"chown cephuser:cephuser {mount_name}"
+                )
+                log.info("Transferred ownership of %s to cephuser" % mount_name)
                 sleep(1)
         log.info("Mount succeeded on all clients")
 
@@ -375,7 +565,7 @@ def exports_mounts_perclient(clients, nfs_export, nfs_mount, export_num) -> dict
 
 
 def cleanup_custom_nfs_cluster_multi_export_client(
-    clients, nfs_mount, nfs_name, nfs_export, export_num
+    clients, nfs_mount, nfs_name, nfs_export, export_num, nfs_nodes=None
 ):
     """
     Clean up the cluster post nfs operation
@@ -407,8 +597,7 @@ def cleanup_custom_nfs_cluster_multi_export_client(
                     "Coredump generated post execution of the current test case"
                 )
 
-    # Wait until the rm operation is complete
-    timeout, interval = 600, 10
+    nfs_log_parser(client=clients[0], nfs_node=nfs_nodes, nfs_name=nfs_name)
 
     client_export_mount_dict = exports_mounts_perclient(
         clients, nfs_export, nfs_mount, export_num
@@ -428,18 +617,11 @@ def cleanup_custom_nfs_cluster_multi_export_client(
             # Clear the nfs_mount, at times rm operation can fail
             # as the dir is not empty, this being an expected behaviour,
             # the solution is to repeat the rm operation.
-            for w in WaitUntil(timeout=timeout, interval=interval):
-                try:
-                    client.exec_command(
-                        sudo=True, cmd=f"rm -rf {mount_name}/*", long_running=True
-                    )
-                    break
-                except Exception as e:
-                    log.warning(f"rm operation failed, repeating!. Error {e}")
-            if w.expired:
+            if not mount_cleanup_retry(client, mount_name):
                 raise NfsCleanupFailed(
                     "Failed to cleanup nfs mount dir even after multiple iterations. Timed out!"
                 )
+
             log.info("Unmounting nfs-ganesha mount on client:")
             sleep(3)
             if Unmount(client).unmount(mount_name):
@@ -472,6 +654,31 @@ def cleanup_custom_nfs_cluster_multi_export_client(
     # Delete the subvolume group
     cmd = "ceph fs subvolumegroup rm cephfs ganeshagroup --force"
     client.exec_command(sudo=True, cmd=cmd)
+
+
+def _nfs_mount_version_key_is_v3(key):
+    """True if a mount-version key from config denotes NFSv3 (e.g. 3, 3.0, \"3\")."""
+    if isinstance(key, bool):
+        return False
+    if isinstance(key, (int, float)):
+        return float(key) >= 3 and float(key) < 4
+    parts = str(key).strip().split(".", 1)
+    return parts[0] == "3"
+
+
+def _nfs_version_spec_includes_v3(version):
+    """True if any client uses NFSv3, so the cluster must be created with nfs_version=3."""
+    if version is None or isinstance(version, bool):
+        return False
+    if isinstance(version, (list, tuple)):
+        if not version:
+            return False
+        if all(isinstance(e, dict) for e in version):
+            return any(
+                _nfs_mount_version_key_is_v3(k) for entry in version for k in entry
+            )
+        return 3 in version or "3" in version
+    return _nfs_mount_version_key_is_v3(version)
 
 
 def _get_client_specific_mount_versions(versions, clients):
@@ -583,24 +790,55 @@ def permission(client, nfs_name, nfs_export, old_permission, new_permission):
 
 
 def enable_v3_locking(installer, nfs_name, nfs_node, nfs_server_name):
-    # Enable the NLM support for v3 Locking
+    """
+    Enable NLM (Network Lock Manager) support for NFSv3 locking.
+
+    Args:
+        installer: Ceph installer node
+        nfs_name: Name of the NFS cluster
+        nfs_node: NFS server node
+        nfs_server_name: Hostname of the NFS server
+    """
+    log.info(f"Enabling v3 locking for NFS cluster: {nfs_name}")
+
+    # Get Ceph version to determine which flags to add
+    ceph_version = get_ceph_version(installer, prefix_cephadm=True)
+    log.info(f"Detected Ceph version: {ceph_version}")
+
+    # Build spec lines - enable_nlm is always required for v3 locking
+    spec_lines = ["    enable_nlm: true"]
+    log.info("Adding enable_nlm: true to NFS spec")
+
+    # --enable-nfsv3 flag was introduced after 8.1z4 (19.2.1-292); only add for newer
+    if LooseVersion(ceph_version) > LooseVersion("19.2.1-292"):
+        log.info(
+            f"Ceph version {ceph_version} is above 19.2.1-292, adding enable_nfsv3: true"
+        )
+        spec_lines.append("    enable_nfsv3: true")
+
+    spec_block = "\n".join(spec_lines)
     content = f"""service_type: nfs
 service_id: {nfs_name}
 placement:
     hosts:
         - {nfs_server_name}
 spec:
-    enable_nlm: true"""
+{spec_block}"""
 
+    log.info(f"Generated NFS Ganesha spec:\n{content}")
+
+    # Write spec to local file
     with open("ganesha.yaml", "w") as f:
         yaml.dump(content, f)
-    log.info(content)
+    log.debug("Spec file written to local ganesha.yaml")
 
-    # Adding the configurations into the ganesha.yaml file.
+    # Adding the configurations into the ganesha.yaml file inside cephadm shell
+    log.info("Creating ganesha.yaml inside cephadm shell")
     cmd = f"echo '{content}' >> ganesha.yaml"
     CephAdm(installer).shell(cmd=cmd)
 
-    # Mount the export file inside shell and apply changes
+    # Mount the spec file inside shell and apply changes
+    log.info("Applying NFS Ganesha spec using ceph orch apply")
     cmd = (
         "--mount ganesha.yaml:/var/lib/ceph/ganesha.yaml -- "
         "ceph orch apply -i /var/lib/ceph/ganesha.yaml"
@@ -608,21 +846,40 @@ spec:
     CephAdm(installer).shell(cmd=cmd)
 
     # Restart the NFS Ganesha service
+    log.info(f"Redeploying NFS Ganesha service: nfs.{nfs_name}")
     CephAdm(installer).ceph.orch.redeploy(service=f"nfs.{nfs_name}")
 
     # Wait till the NFS daemons are up
+    log.info("Waiting for NFS daemons to be ready...")
     sleep(10)
 
     verify_nfs_ganesha_service(node=installer, timeout=300)
-    log.info("NFS Ganesha spec file applied successfully.")
+    log.info("NFS Ganesha service is up and running")
 
-    # Start the rpc-statd service on server
+    # Verify the NFS spec has enable_nlm set after applying config
+    log.info("Verifying NFS service spec contains enable_nlm configuration")
+    cmd = f"cephadm shell -- ceph orch ls --service-name nfs.{nfs_name} --export"
+    out, _ = installer.exec_command(sudo=True, cmd=cmd)
+    log.debug(f"NFS service spec after apply:\n{out}")
+    if "enable_nlm: true" not in out:
+        log.error("enable_nlm: true not found in NFS service spec")
+        log.error(f"Exported spec output: {out}")
+        raise OperationFailedError(
+            "NFS service spec does not contain enable_nlm: true after applying config"
+        )
+    log.info("NFS service spec verified: enable_nlm is set to true")
+
+    # Start the rpc-statd service on server for NLM support
+    log.info(f"Starting rpc-statd service on NFS node: {nfs_node.hostname}")
     cmd = "sudo systemctl start rpc-statd"
     nfs_node.exec_command(cmd=cmd)
+    log.info("rpc-statd service started successfully")
 
-    # Open the NLM port
-    ports_to_open = ["nlockmgr"]
+    # Open the NLM port in firewall
+    log.info("Opening NLM (nlockmgr) port in firewall")
+    ports_to_open = ["nlockmgr", "mountd"]
     open_mandatory_v3_ports(nfs_node, ports_to_open)
+    log.info("NFSv3 locking (NLM) enabled successfully")
 
 
 def getfattr(client, file_path, attribute_name=None):
@@ -672,59 +929,176 @@ def check_nfs_daemons_removed(client):
     Check if NFS daemons are removed.
     Wait until there are no NFS daemons listed by 'ceph orch ls'.
     """
-    while True:
+    check_nfs_daemons_removed_retry(client)
+
+
+@retry(OperationFailedError, tries=30, delay=10, backoff=1)
+def check_nfs_daemons_removed_retry(client):
+    """
+    Helper function to check if NFS daemons are removed.
+    Raises OperationFailedError if daemons are still present (to trigger retry).
+    Returns True if all daemons are removed.
+    """
+    # We are increasing the timeout to 300 seconds to avoid the timeout error
+    # with some of the QoS tests which were intermittently failing to cleanup
+    out, _ = client.exec_command(sudo=True, cmd="ceph orch ls --service-type=nfs")
+    log.info(out)
+    out = out.strip()
+    if "No services reported" in out:
+        log.info("All NFS daemons have been removed.")
+        return True
+    else:
+        raise OperationFailedError("NFS daemons still present")
+
+
+def _orch_ps_json_stdout(installer_node, cmd):
+    """Return stripped stdout from ``ceph orch ps`` as a string (handles str or file-like)."""
+    raw, _ = installer_node.exec_command(
+        sudo=True, cmd=cmd, timeout=120, check_ec=False
+    )
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    return raw.read().decode().strip()
+
+
+def _resolve_nfs_nodes_for_service_ids(installer_node, nfs_objects, cluster_nodes):
+    """
+    Map ``ceph orch ps`` hostnames for ``nfs.<service_id>`` to Ceph test node objects.
+
+    Used when ``create_nfs_via_file_and_verify`` is called without an explicit ``nfs_nodes``
+    list (for example multi-instance spec apply from a single installer).
+    """
+    if not cluster_nodes:
+        return []
+    service_ids = [
+        o.get("service_id")
+        for o in nfs_objects
+        if isinstance(o, dict) and o.get("service_id")
+    ]
+    if not service_ids:
+        return []
+    hostnames = set()
+    for sid in service_ids:
+        text = _orch_ps_json_stdout(
+            installer_node,
+            f"ceph orch ps --service_name nfs.{sid} --format json",
+        )
+        if not text:
+            continue
         try:
-            cmd = "ceph orch ls | grep nfs"
-            out = client.exec_command(sudo=True, cmd=cmd)
-
-            if out:
-                print("NFS daemons are still present. Waiting...")
-                sleep(10)  # Wait before checking again
-            else:
-                print("All NFS daemons have been removed.")
-                break
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            break
+            daemons = json.loads(text)
+        except json.JSONDecodeError:
+            log.warning("Could not parse orch ps JSON for nfs.%s", sid)
+            continue
+        for d in daemons:
+            h = d.get("hostname")
+            if h:
+                hostnames.add(h)
+    return [n for n in cluster_nodes if getattr(n, "hostname", None) in hostnames]
 
 
-def create_nfs_via_file_and_verify(installer_node, nfs_objects, timeout):
+def _first_kmip_pem(val):
+    """BYOK specs may store PEM as a bare string or a one-element tuple/list."""
+    if isinstance(val, (list, tuple)):
+        return val[0]
+    return val
+
+
+def create_nfs_via_file_and_verify(
+    installer_node, nfs_objects, timeout, nfs_nodes=None, cluster_nodes=None
+):
     """
     Create a temporary YAML file with NFS Ganesha configuration.
     Args:
         installer_node: The node where the NFS Ganesha configuration will be applied.
+                      Can be a single node or list of nodes (first node will be used)
         nfs_objects: List of NFS Ganesha configuration objects.
+        nfs_nodes: Optional node objects for Enable_nfs_coredump after apply.
+        cluster_nodes: Optional full cluster node list; when ``nfs_nodes`` does not
+            resolve to any host, used with ``ceph orch ps`` via
+            ``_resolve_nfs_nodes_for_service_ids`` to find Ganesha daemon nodes.
     Returns:
-        str: Path to the temporary YAML file.
+        bool: True if apply and verification succeeded, else False.
     """
-    temp_file = tempfile.NamedTemporaryFile(suffix=".yaml")
-    spec_file = installer_node.remote_file(
-        sudo=True, file_name=temp_file.name, file_mode="wb"
-    )
-    spec = yaml.dump_all(nfs_objects, sort_keys=False, indent=2).encode("utf-8")
-    spec_file.write(spec)
-    spec_file.flush()
+    # Handle case where installer_node is a list
+    if isinstance(installer_node, list):
+        installer_node = installer_node[0]
+
+    remote_spec = "/tmp/cephci_nfs_spec_{}.yaml".format(uuid.uuid4().hex)
+    spec_fp = None
+    try:
+        spec_fp = installer_node.remote_file(
+            sudo=True, file_name=remote_spec, file_mode="wb"
+        )
+        spec_fp.write(
+            yaml.dump_all(
+                nfs_objects,
+                sort_keys=False,
+                indent=2,
+                default_flow_style=False,
+                Dumper=_LiteralPemDumper,
+            ).encode("utf-8")
+        )
+        spec_fp.flush()
+    finally:
+        if spec_fp is not None:
+            try:
+                spec_fp.close()
+            except OSError:
+                pass
 
     try:
         pos_args = []
         CephAdm(installer_node, mount="/tmp/").ceph.orch.apply(
-            input=temp_file.name, check_ec=True, pos_args=pos_args
+            input=remote_spec, check_ec=True, pos_args=pos_args
         )
         verify_nfs_ganesha_service(node=installer_node, timeout=timeout)
         log.info("NFS Ganesha spec file applied successfully.")
+        nodes_for_coredump = None
+        if nfs_nodes:
+            nodes_for_coredump = (
+                nfs_nodes if isinstance(nfs_nodes, list) else [nfs_nodes]
+            )
+        if not nodes_for_coredump and cluster_nodes:
+            resolved = _resolve_nfs_nodes_for_service_ids(
+                installer_node, nfs_objects, cluster_nodes
+            )
+            if resolved:
+                nodes_for_coredump = resolved
+        if nodes_for_coredump:
+            log.info(
+                "Enabling NFS coredump on node(s): %s",
+                [getattr(n, "hostname", n) for n in nodes_for_coredump],
+            )
+            Enable_nfs_coredump(nodes_for_coredump)
+        else:
+            log.warning(
+                "Enable_nfs_coredump skipped: provide nfs_nodes or cluster_nodes "
+                "to create_nfs_via_file_and_verify so Ganesha hosts can be resolved."
+            )
         return True
     except Exception as err:
         log.error(f"Failed to apply NFS Ganesha spec file: {err}")
+        return False
+    finally:
+        installer_node.exec_command(
+            sudo=True, cmd="rm -f {}".format(remote_spec), check_ec=False
+        )
 
 
-def delete_nfs_clusters_in_parallel(installer_node, timeout):
+def delete_nfs_clusters_in_parallel(installer_node, timeout=300, clusters=None):
     """
     Delete NFS clusters in batch.
     Args:
         installer_node: The node where the NFS Ganesha configuration will be applied.
         nfs_objects: List of NFS Ganesha configuration objects.
     """
-    clusters = CephAdm(installer_node).ceph.nfs.cluster.ls()
+    if not clusters:
+        clusters = CephAdm(installer_node).ceph.nfs.cluster.ls()
+    else:
+        clusters = clusters
     with ThreadPoolExecutor(max_workers=None) as executor:
         futures = [
             executor.submit(
@@ -742,6 +1116,8 @@ def delete_nfs_clusters_in_parallel(installer_node, timeout):
             CephAdm(installer_node).ceph.orch.ls(format="json", service_type="nfs")
         )
         if all(x["status"]["running"] == 0 for x in result) or not result:
+            log.info("sleep(10)  # Allow some time for the service to stabilize")
+            sleep(10)
             log.info(
                 "\n"
                 + "=" * 30
@@ -765,19 +1141,36 @@ def delete_nfs_clusters_in_parallel(installer_node, timeout):
         )
 
 
+@retry(OperationFailedError, tries=4, delay=5, backoff=2)
 def open_mandatory_v3_ports(nfs_node, ports_to_open):
     """
-    Open the required ports for v3 mount (portmapper, mountd, nlockmgr) based on rpcinfo output.
+    Open the required ports for NFSv3 mount based on rpcinfo output.
+    (portmapper, mountd, nlockmgr) and opens them in the firewall.
+
+    Args:
+        nfs_node: NFS server node where ports need to be opened
+        ports_to_open: List of service names to open (e.g., ["nlockmgr", "mountd"])
+
+    Raises:
+        OperationFailedError: If rpcinfo fails or required service port is not found
     """
+    log.info(f"Opening NFSv3 ports on node: {nfs_node.hostname}")
+    log.info(f"Services to open: {ports_to_open}")
+
     # Initialize the service_ports_mapping dictionary to store the port lists
     service_ports_mapping = {"portmapper": None, "mountd": None, "nlockmgr": None}
 
     # Execute rpcinfo command to get the port information
+    log.info("Querying rpcinfo for service ports")
     cmd = "sudo rpcinfo -p"
     out, _ = nfs_node.exec_command(sudo=True, cmd=cmd)
+    log.debug(f"rpcinfo output:\n{out}")
+
     if not out:
-        log.error(f"Failed to execute rpcinfo -p on {nfs_node}")
-        return
+        log.error(f"Failed to execute rpcinfo -p on {nfs_node.hostname}")
+        raise OperationFailedError(
+            f"rpcinfo -p returned empty output on {nfs_node.hostname}"
+        )
 
     # Split the output into lines and iterate over them
     lines = out.splitlines()
@@ -801,44 +1194,59 @@ def open_mandatory_v3_ports(nfs_node, ports_to_open):
         elif service == "nlockmgr":
             service_ports_mapping["nlockmgr"] = port
 
+    log.debug(f"Discovered service ports: {service_ports_mapping}")
+
     # Open firewall ports based on services in ports_to_open
     for service in ports_to_open:
         port_to_open = service_ports_mapping.get(service)
 
         if port_to_open:
             # Open the port using the firewall command
+            log.info(f"Opening firewall port {port_to_open}/tcp for {service}")
             nfs_node.exec_command(
                 sudo=True,
                 cmd=f"sudo firewall-cmd --zone=public --add-port={port_to_open}/tcp --permanent",
             )
-            log.info(f"Opened {service} port: {port_to_open}")
+            log.info(f"Successfully opened {service} port: {port_to_open}")
         else:
-            log.warning(f"{service} port not found or not needed.")
+            log.error(f"{service} port not found in rpcinfo output")
+            log.error(f"Available services: {service_ports_mapping}")
+            raise OperationFailedError(f"{service} port not found in rpcinfo output")
 
     # Reload the firewall to apply the changes
+    log.info("Reloading firewall to apply changes")
     nfs_node.exec_command(sudo=True, cmd="sudo firewall-cmd --reload")
-    log.info("Firewall rules reloaded.")
+    log.info("Firewall rules reloaded successfully")
 
 
-@retry(OperationFailedError, tries=4, delay=5, backoff=2)
-def mount_retry(
-    clients,
-    client_num,
-    mount_name,
-    version,
-    port,
-    nfs_server,
-    export_name,
-):
-
-    if Mount(clients[client_num]).nfs(
+@retry((OperationFailedError, MountFailedError), tries=3, delay=5, backoff=2)
+def mount_retry(client, mount_name, version, port, nfs_server, export_name, **kwargs):
+    Mount(client).nfs(
         mount=mount_name,
         version=version,
         port=port,
         server=nfs_server,
         export=export_name,
-    ):
-        raise OperationFailedError("Failed to mount nfs on %s" % {export_name.hostname})
+        **kwargs,
+    )
+    return True
+
+
+@retry(OperationFailedError, tries=5, delay=10, backoff=2)
+def mount_cleanup_retry(client, mount_name):
+    try:
+        _, err = client.exec_command(
+            sudo=True, cmd=f"rm -rf {mount_name}/*", timeout=120
+        )
+        if err:
+            raise OperationFailedError("Failed to cleanup the mount directory")
+    except CommandFailed as e:
+        log.warning(
+            "rm -rf %s/* failed on %s: %s — skipping, will proceed to unmount",
+            mount_name,
+            client.hostname,
+            e,
+        )
     return True
 
 
@@ -883,6 +1291,7 @@ def verify_nfs_ganesha_service(node, timeout):
             )
             log.info("sleep(20)  # Allow some time for the service to stabilize")
             sleep(20)  # Allow some time for the service to stabilize
+
             return True
         else:
             log.info(
@@ -896,3 +1305,459 @@ def verify_nfs_ganesha_service(node, timeout):
         raise OperationFailedError(
             "NFS daemons check failed Timeout expired. -- %s seconds" % timeout
         )
+
+
+def create_multiple_nfs_instance_via_spec_file(
+    spec, replication_number, installer, timeout=300, **kwargs
+):
+    """
+    Create multiple NFS Ganesha service instances from a base spec file.
+
+    This function takes a service specification dictionary (as used in Ceph orchestrator),
+    clones it `replication_number` times, and increments the `service_id`, `port`, and
+    `monitoring_port` fields for each replica. The generated spec list is then used to
+    deploy the instances on the Ceph cluster via `create_nfs_via_file_and_verify`.
+
+    Args:
+        spec (dict): Base NFS Ganesha service spec containing:
+                     - service_type (str): common name for nfs instances
+                     - service_id (str): Base identifier for the service
+                     - placement.host_pattern (str): Node(s) to host the service(s)
+                     - spec.port (int): Base NFS server port
+                     - spec.monitoring_port (int): Base prometheus exporter port
+        replication_number (int): Number of NFS instances to create.
+        installer (CephAdm or str): Installer node or handler used for deployment.
+        timeout (int, optional): Timeout in seconds for instance creation and verification.
+                                 Defaults to 300.
+        cluster_nodes (list, optional): All Ceph cluster nodes; used to resolve NFS
+            daemon hosts for ``Enable_nfs_coredump`` when ``nfs_nodes`` is not passed
+            to ``create_nfs_via_file_and_verify``.
+
+    Returns:
+        list: One spec dict per instance on success.
+        int: ``1`` on failure.
+    """
+    cluster_nodes = kwargs.get("cluster_nodes")
+    try:
+        new_objects = []
+        for i in range(replication_number):
+            service_id = f"{spec['service_id']}{i if i != 0 else ''}"
+            port = spec["spec"]["port"] + i
+            monitoring_port = spec["spec"]["monitoring_port"] + i
+
+            new_object = {
+                "service_type": spec["service_type"],
+                "service_id": service_id,
+                "placement": {"host_pattern": spec["placement"]["host_pattern"]},
+                "spec": {
+                    "port": port,
+                    "monitoring_port": monitoring_port,
+                    "kmip_cert": _first_kmip_pem(spec["kmip_cert"]),
+                    "kmip_key": _first_kmip_pem(spec["kmip_key"]),
+                    "kmip_ca_cert": _first_kmip_pem(spec["kmip_ca_cert"]),
+                    "kmip_host_list": spec["kmip_host_list"],
+                },
+            }
+
+            new_objects.append(new_object)
+
+            log.debug(
+                f"Prepared spec for NFS instance {i + 1}/{replication_number}: "
+                f"service_id={service_id}, port={port}, monitoring_port={monitoring_port}"
+            )
+
+        log.info(
+            f"Creating {replication_number} NFS Ganesha instance(s) "
+            f"using base spec service_id='{spec['service_id']}'..."
+        )
+        log.debug(f"Full generated specs: {new_objects}")
+
+        # Deploy the NFS service(s) via orchestrator
+        if not create_nfs_via_file_and_verify(
+            installer, new_objects, timeout, cluster_nodes=cluster_nodes
+        ):
+            log.error("NFS Ganesha instance creation failed during verification.")
+            return 1
+
+        log.info(
+            f"Successfully created {replication_number} NFS Ganesha instance(s) "
+            f"with IDs: {[obj['service_id'] for obj in new_objects]}"
+        )
+        return new_objects
+
+    except KeyError as e:
+        log.error(f"Missing required key in spec: {e}")
+        return 1
+    except Exception as e:
+        log.error(f"Unexpected error creating NFS Ganesha instances: {e}")
+        return 1
+
+
+def dynamic_cleanup_common_names(
+    clients, mounts_common_name, clusters=None, mount_point="/mnt/", group_name=None
+):
+    """
+    Dynamically clean up NFS resources by common name.
+
+    Steps performed:
+        1. Unmount and remove all directories matching the given mount name prefix on all clients.
+        2. Delete all NFS exports in the specified clusters.
+        3. Delete all CephFS subvolumes associated with the exports.
+        4. Delete all NFS clusters.
+        5. Check for NFS coredumps and raise if found.
+
+    Args:
+        clients (list): List of client nodes.
+        mounts_common_name (str): Prefix for mount directories to clean up.
+        clusters (list, optional): List of NFS cluster names to clean up. If None, will auto-discover.
+        mount_point (str, optional): Base mount directory. Default is "/mnt/".
+        group_name (str, optional): CephFS subvolume group name.
+    Raises:
+        NfsCleanupFailed: If coredump is found or cleanup times out.
+        OperationFailedError: If unmount or resource deletion fails.
+    """
+    if not isinstance(clients, list):
+        clients = [clients]
+    # Check for NFS coredump on all NFS nodes before cleanup
+    nfs_nodes = []
+    coredump_path = "/var/lib/systemd/coredump"
+    if ceph_cluster_obj:
+        nfs_nodes = ceph_cluster_obj.get_nodes("nfs")
+
+    # Step 1: Unmount and remove all matching mount directories on each client
+    for client in clients:
+        log.info(f"Starting mount cleanup on client {client.hostname}")
+        for w in WaitUntil(timeout=600, interval=10):
+            # Find all mounts matching the common name prefix
+            mounts = [
+                x
+                for x in client.get_dir_list(mount_point)
+                if x.startswith(mounts_common_name)
+            ]
+            if not mounts:
+                log.info(
+                    f"No mounts found with prefix '{mounts_common_name}' on {client.hostname}"
+                )
+                break
+            for mount in mounts:
+                log.info(f"Removing files from mount {mount} on {client.hostname}")
+                client.remove_file(f"{mount_point}{mount}/*")
+                log.info(f"Unmounting {mount_point}{mount} on {client.hostname}")
+                if Unmount(client).unmount(mount_point + mount):
+                    log.error(
+                        f"Failed to unmount {mount_point}{mount} on {client.hostname}"
+                    )
+                    raise OperationFailedError(
+                        f"Failed to unmount {mount_point}{mount} nfs on {client.hostname}"
+                    )
+                client.exec_command(sudo=True, cmd=f"rm -rf {mount_point}{mount}")
+                log.info(
+                    f"Removed mount directory {mount_point}{mount} on {client.hostname}"
+                )
+            break
+        if w.expired:
+            log.error(f"Timeout while cleaning up mounts on {client.hostname}")
+            raise NfsCleanupFailed(
+                "Failed to cleanup nfs mount dir even after multiple iterations. Timed out!"
+            )
+
+    # Step 2: Delete all exports in each cluster
+    client = clients[0]
+    if not clusters:
+        clusters = Ceph(client).nfs.cluster.ls()
+        log.info(f"Auto-discovered clusters for cleanup: {clusters}")
+    if not isinstance(clusters, list):
+        clusters = [clusters]
+
+    # Step 3: Delete all CephFS subvolumes associated with the exports
+    subvols = json.loads(
+        Ceph(client).fs.sub_volume.ls(volume="cephfs", group_name=group_name)
+    )
+    for cluster in clusters:
+        try:
+            exports = json.loads(Ceph(client).nfs.export.ls(cluster))
+        except json.JSONDecodeError:
+            log.warning(
+                f"Failed to list exports for cluster '{cluster}'. Skipping export cleanup."
+            )
+            exports = []
+        log.info(f"Found {len(exports)} exports in cluster '{cluster}': {exports}")
+
+        for export in exports:
+            Ceph(client).nfs.export.delete(cluster, export)
+            log.info(f"Deleted export '{export}' in cluster '{cluster}'")
+
+        sub_vols_infos = []
+        for subvol in subvols:
+            subvol_info = Ceph(client).fs.sub_volume.info(
+                volume="cephfs", subvolume=subvol["name"], group_name=group_name
+            )
+            sub_vols_infos.append(subvol_info)
+            for export in exports:
+                # Check if export is referenced in the subvolume's pool_namespace
+                if re.findall(export, subvol_info["pool_namespace"])[1:]:
+                    log.info(f"Export '{export}' found in subvolume '{subvol['name']}'")
+                    Ceph(client).fs.sub_volume.rm(
+                        volume="cephfs",
+                        subvolume=subvol["name"],
+                        group_name=group_name,
+                        force=True,
+                    )
+                    log.info(
+                        f"Deleted subvolume '{subvol['name']}' in group '{group_name}'"
+                    )
+
+        # Step 4: Remove the NFS cluster itself
+        Ceph(clients[0]).nfs.cluster.delete(cluster)
+        log.info(f"Deleted NFS cluster '{cluster}'")
+
+    # Step 5: Wait for all NFS daemons to be removed
+    log.info("Waiting for all NFS daemons to be removed from the cluster...")
+    check_nfs_daemons_removed(client)
+    for nfs_node in nfs_nodes:
+        if check_coredump_generated(nfs_node, coredump_path, setup_start_time):
+            log.error(f"Coredump found on {nfs_node.hostname} after test execution.")
+            raise NfsCleanupFailed(
+                "Coredump generated post execution of the current test case"
+            )
+    log.info("Dynamic cleanup of NFS resources completed")
+
+
+def get_ganesha_info_from_container(installer, nfs_service_name, nfs_host_node):
+    """
+    Retrieves Ganesha NFS daemon information from a containerized NFS service.
+    This function extracts the process ID (PID) and related container information
+    for a Ganesha NFS daemon running inside a container managed by Ceph orchestrator.
+    Args:
+        installer: CephAdm installer object used to execute ceph orchestrator commands
+        nfs_service_name (str): Name of the NFS service to query (without 'nfs.' prefix)
+        nfs_host_node: Host node object where the NFS container is running, used for
+                       executing commands on the host system
+    Returns:
+        tuple: A tuple containing:
+            - int or None: Host PID of the Ganesha process, or None if not found
+            - dict or None: Dictionary containing container information with keys:
+                - 'container_id': Container ID of the NFS service
+                - 'hostname': Hostname where the container is running
+                - 'container_pid': PID of the container process on the host
+                - 'ganesha_pid_in_container': PID of Ganesha process inside container
+                - 'host_ganesha_pid': Host PID of the Ganesha process
+              Returns None if information cannot be retrieved
+    Raises:
+        Exception: Catches and logs any exceptions that occur during the process,
+                   returning (None, None) on failure
+    Note:
+        This function uses podman commands to inspect containers and find process IDs.
+        It requires sudo privileges on the host node to execute container inspection
+        and process listing commands.
+
+    """
+    try:
+        log.info(f"Getting Ganesha PID for service: {nfs_service_name}")
+
+        # Get NFS service container information
+        out = CephAdm(installer).ceph.orch.ps(
+            service_name=f"nfs.{nfs_service_name}", format="json"
+        )
+
+        nfs_processes = json.loads(out)
+
+        if not nfs_processes:
+            log.error(f"No running processes found for NFS service {nfs_service_name}")
+            return (None, None)
+
+        nfs_process = nfs_processes[0]
+        container_id = nfs_process.get("container_id", "")
+        hostname = nfs_process.get("hostname", "")
+
+        if not container_id:
+            log.error("Container ID not found for NFS service")
+            return (None, None)
+
+        log.info(f"NFS container ID: {container_id} on host: {hostname}")
+
+        # Method 1: Get PID from container inspection
+        cmd = f"podman inspect {container_id} --format '{{{{.State.Pid}}}}'"
+        out, err = nfs_host_node.exec_command(cmd=cmd, sudo=True)
+
+        if not err and out.strip().isdigit():
+            container_pid = int(out.strip())
+            log.info(f"Container PID: {container_pid}")
+
+            # Method 2: Find Ganesha process inside container
+            cmd = f"podman exec {container_id} ps aux | grep '[g]anesha.nfsd' | awk '{{print $2}}'"
+            out, err = nfs_host_node.exec_command(cmd=cmd, sudo=True)
+
+            if not err and out.strip():
+                ganesha_pid_in_container = out.strip()
+                log.info(f"Ganesha PID inside container: {ganesha_pid_in_container}")
+
+                # Get the actual host PID (container PID + offset usually)
+                # For most container runtimes, we can find the host PID through /proc
+                cmd = "ps -ef | grep '[g]anesha.nfsd' | grep -v grep | awk '{print $2}'"
+                out, err = nfs_host_node.exec_command(cmd=cmd, sudo=True)
+
+                if not err and out.strip():
+                    host_ganesha_pid = out.strip().split("\n")[0]
+                    log.info(f"Ganesha host PID: {host_ganesha_pid}")
+
+                    return (
+                        int(host_ganesha_pid),
+                        {
+                            "container_id": container_id,
+                            "hostname": hostname,
+                            "container_pid": container_pid,
+                            "ganesha_pid_in_container": ganesha_pid_in_container,
+                            "host_ganesha_pid": host_ganesha_pid,
+                        },
+                    )
+
+        log.error("Could not determine Ganesha PID")
+        return (None, None)
+
+    except Exception as e:
+        log.error(f"Failed to get Ganesha PID: {e}")
+        return (None, None)
+
+
+def nfs_log_parser(client, nfs_node, nfs_name, expect_list=None, expect_quiet=False):
+    """
+    This method parses the nfs debug log for given list of strings and returns 0 on Success
+    and 1 on failure
+    Required args:
+    client : for ceph cmds
+    nfs_node : Node object where nfs_daemon is hosted
+    nfs_name : Name of nfs cluster
+    expect_list : List of strings to be parsed
+    """
+    results = {"expect": {}}
+    if expect_list:
+        cmd = f"ceph orch ps | grep {nfs_name}"
+        out = list(client.exec_command(sudo=True, cmd=cmd))[0]
+        nfs_daemon_name = out.split()[0]
+        for search_str in expect_list:
+            cmd = f"cephadm logs --name {nfs_daemon_name} > nfs_log"
+            nfs_node.exec_command(sudo=True, cmd=cmd)
+            try:
+                cmd = f'grep "{search_str}" nfs_log'
+                out = nfs_node.exec_command(sudo=True, cmd=cmd)
+                if len(out) > 0:
+                    log.info(
+                        f"Found {search_str} in {nfs_daemon_name} log on {nfs_node.hostname}:\n {out}"
+                    )
+                    results["expect"].update({search_str: nfs_node})
+            except BaseException as ex:
+                log.info(ex)
+
+        expect_not_found = []
+        for exp_str in expect_list:
+            if exp_str not in results["expect"]:
+                expect_not_found.append(exp_str)
+        if len(expect_not_found):
+            msg = (
+                f"Some of expected strings not found in debug logs for "
+                f"{nfs_daemon_name}:{expect_not_found}"
+            )
+            if expect_quiet:
+                log.debug(msg)
+            else:
+                log.error(msg)
+            return 1
+        return 0
+
+    else:
+        if type(nfs_node) is not list:
+            nfs_node = [nfs_node]
+        for node in nfs_node:
+            try:
+                log.info(
+                    "\n\n" + "-" * 30 + "Fetching logs and Ganesha confs" + "-" * 30
+                )
+                log.info(Ceph(client).orch.ls())
+                nfs_containers_deatail = [
+                    x
+                    for x in node.exec_command(
+                        sudo=True, cmd=f"podman ps | grep {nfs_name}"
+                    )[0].split("\n")
+                    if x and "ceph/keepalived" not in x
+                ]
+                nfs_containers = [
+                    x.split(" ")[0]
+                    for x in node.exec_command(
+                        sudo=True, cmd=f"podman ps | grep {nfs_name}"
+                    )[0].split("\n")
+                    if x and "ceph/keepalived" not in x
+                ]
+                container_logs = [
+                    "\n".join(
+                        node.exec_command(sudo=True, cmd=f"podman logs {container}")
+                    )
+                    for container in nfs_containers
+                ]
+
+                log.info("\n\nNFS containers logs on {0}\n".format(node.hostname))
+
+                log.info(Ceph(client).version())
+                log.info("\n Ceph Health :\n {0}".format(Ceph(client).status()))
+
+                [fsid] = node.get_dir_list("/var/lib/ceph", sudo=True)
+                nfs_conf_path = "/var/lib/ceph/{0}".format(fsid)
+                nfs_full_names = [
+                    x
+                    for x in node.get_dir_list(nfs_conf_path, sudo=True)
+                    if nfs_name in x
+                ]
+                nfs_instances_confs_path = [
+                    os.path.join(nfs_conf_path + "/" + x + "/etc/ganesha/ganesha.conf")
+                    for x in nfs_full_names
+                ]
+                for nfs_conf in nfs_instances_confs_path:
+                    nfs_conf = node.exec_command(sudo=True, cmd=f"cat {nfs_conf}")[0]
+                    log.info(
+                        "\n Ganesha Conf for {0}: \n \n {1}".format(nfs_name, nfs_conf)
+                    )
+
+                for container, logs in zip(nfs_containers_deatail, container_logs):
+                    log.info("\nLogs for container {0}:\n{1}\n".format(container, logs))
+            except Exception:
+                log.info(
+                    "Since we are collecting logs, ignoring the exception will not fail the test"
+                )
+
+
+def get_ceph_version(client, prefix_cephadm=False):
+    """
+    Retrieve the Ceph version installed on a cluster using the provided client.
+
+    Args:
+        client : An instance of the client used for executing commands.
+
+    Returns:
+        str or None: The Ceph version if installed, or None if Ceph is not installed.
+
+    Raises:
+        ValueError: If the JSON output does not contain the expected version information.
+    """
+    if prefix_cephadm:
+        cmd = "cephadm shell -- ceph version -f json"
+    else:
+        cmd = "ceph version -f json"
+    out, rc = client.exec_command(
+        sudo=True,
+        cmd=cmd,
+        check_ec=False,
+    )
+    log.info(out)
+    ceph_version = json.loads(out)
+    version_string = ceph_version.get("version", None)
+    log.info(version_string)
+    if not version_string:
+        log.error("Ceph is not installed please install ceph")
+        return None
+    version_pattern = r"ceph version (\S+).*"
+    match = re.search(version_pattern, version_string)
+    re.search(version_pattern, version_string)
+    if not match:
+        raise RuntimeError("Failed to get ceph version from cluster")
+    ceph_version_installed = match.group(1)
+    return ceph_version_installed

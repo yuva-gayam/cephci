@@ -23,13 +23,10 @@ tests:
           verbose: true
         args:
           rhcs-version: 6.1
-          release: rc
+          release: released
           mon-ip: node1
           orphan-initial-daemons: true
           registry-url: registry.redhat.io
-          skip-monitoring-stack: true
-          registry-json: registry.redhat.io
-          skip-dashboard: true
           ssh-user: cephuser
           apply-spec:
             - service_type: host
@@ -151,9 +148,10 @@ tests:
       config:
         command: add
         id: client.1                      # client Id (<type>.<Id>)
-        nodes:
+        nodes:                            # client node
           - node8:
-              release: 5
+              release: 6.1
+              tag: released
         install_packages:
           - ceph-common
           - ceph-base

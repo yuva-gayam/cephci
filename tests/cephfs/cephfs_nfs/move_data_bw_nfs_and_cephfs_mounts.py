@@ -34,6 +34,11 @@ def run(ceph_cluster, **kw):
     1. Remove cephfs nfs export
     2. Remove NFS Cluster
     """
+    nfs_mounting_dir = None
+    kernel_mounting_dir_1 = None
+    fuse_mounting_dir_1 = None
+    nfs_name = "cephfs-nfs"
+    nfs_export_name = None
     try:
         tc = "CEPH-11309"
         log.info(f"Running cephfs {tc} test case")
@@ -53,11 +58,12 @@ def run(ceph_cluster, **kw):
         rhbuild = config.get("rhbuild")
         nfs_servers = ceph_cluster.get_ceph_objects("nfs")
         nfs_server = nfs_servers[0].node.hostname
-        nfs_name = "cephfs-nfs"
         default_fs = "cephfs" if not erasure else "cephfs-ec"
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -72,6 +78,7 @@ def run(ceph_cluster, **kw):
 
         if not fs_details:
             fs_util.create_fs(client1, fs_name)
+            fs_util.wait_for_mds_process(client1, fs_name)
         if "5.0" in rhbuild:
             client1.exec_command(
                 sudo=True,
@@ -94,14 +101,20 @@ def run(ceph_cluster, **kw):
             sudo=True, cmd=f"ceph nfs export get {nfs_name} {nfs_export_name}"
         )
         output = json.loads(out)
+        log.debug("NFS Export Get: {}".format(output))
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
         nfs_mounting_dir = f"/mnt/cephfs_nfs{mounting_dir}_1/"
         client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-        command = f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_name} {nfs_mounting_dir}"
-        output, err = client1.exec_command(sudo=True, cmd=command, check_ec=False)
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_name, nfs_mounting_dir
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
+
         if build.startswith("5"):
             kernel_mounting_dir_1 = f"/mnt/cephfs_kernel{mounting_dir}_1/"
             mon_node_ips = fs_util.get_mon_node_ips()
@@ -125,12 +138,14 @@ def run(ceph_cluster, **kw):
                 [clients[0]],
                 kernel_mounting_dir_1,
                 ",".join(mon_node_ips),
+                extra_params=f",fs={default_fs}",
             )
 
             fuse_mounting_dir_1 = f"/mnt/cephfs_fuse{mounting_dir}_1/"
             fs_util.fuse_mount(
                 [clients[0]],
                 fuse_mounting_dir_1,
+                extra_params=f" --client_fs {default_fs}",
             )
 
         run_ios(
@@ -156,10 +171,10 @@ def run(ceph_cluster, **kw):
         fusepath = f"{fuse_mounting_dir_1}{clients[0].node.hostname}dd_file_fuse"
         nfspath = f"{nfs_mounting_dir}{clients[0].node.hostname}dd_file_nfs"
         mv_bw_mounts = [
-            f"cp {kernelpath} {nfs_mounting_dir}_dd_file_kernel",
-            f"cp {fusepath} {nfs_mounting_dir}_dd_file_fuse",
-            f"cp {nfspath} {kernel_mounting_dir_1}_dd_file_nfs1",
-            f"cp {nfspath} {fuse_mounting_dir_1}_dd_file_nfs2",
+            f"rsync -av {kernelpath} {nfs_mounting_dir}_dd_file_kernel",
+            f"rsync -av {fusepath} {nfs_mounting_dir}_dd_file_fuse",
+            f"rsync -av {nfspath} {kernel_mounting_dir_1}_dd_file_nfs1",
+            f"rsync -av {nfspath} {fuse_mounting_dir_1}_dd_file_nfs2",
         ]
         for cmd in mv_bw_mounts:
             clients[0].exec_command(sudo=True, cmd=cmd)
@@ -186,31 +201,34 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         log.info("Cleaning Up")
-        client1.exec_command(
-            sudo=True, cmd=f"umount -f {nfs_mounting_dir}", check_ec=False
-        )
-        client1.exec_command(
-            sudo=True, cmd=f"umount -l {kernel_mounting_dir_1}", check_ec=False
-        )
-        client1.exec_command(
-            sudo=True, cmd=f"umount -l {fuse_mounting_dir_1}", check_ec=False
-        )
-        client1.exec_command(
-            sudo=True, cmd=f"rm -rf {nfs_mounting_dir}", check_ec=False
-        )
-        client1.exec_command(
-            sudo=True, cmd=f"rm -rf {kernel_mounting_dir_1}", check_ec=False
-        )
-        client1.exec_command(
-            sudo=True, cmd=f"rm -rf {fuse_mounting_dir_1}", check_ec=False
-        )
-        log.info("Removing the Export")
-        client1.exec_command(
-            sudo=True,
-            cmd=f"ceph nfs export delete {nfs_name} {nfs_export_name}",
-            check_ec=False,
-        )
-
+        if nfs_mounting_dir:
+            client1.exec_command(
+                sudo=True, cmd=f"umount -f {nfs_mounting_dir}", check_ec=False
+            )
+            client1.exec_command(
+                sudo=True, cmd=f"rm -rf {nfs_mounting_dir}", check_ec=False
+            )
+        if kernel_mounting_dir_1:
+            client1.exec_command(
+                sudo=True, cmd=f"umount -l {kernel_mounting_dir_1}", check_ec=False
+            )
+            client1.exec_command(
+                sudo=True, cmd=f"rm -rf {kernel_mounting_dir_1}", check_ec=False
+            )
+        if fuse_mounting_dir_1:
+            client1.exec_command(
+                sudo=True, cmd=f"umount -l {fuse_mounting_dir_1}", check_ec=False
+            )
+            client1.exec_command(
+                sudo=True, cmd=f"rm -rf {fuse_mounting_dir_1}", check_ec=False
+            )
+        if nfs_export_name:
+            log.info("Removing the Export")
+            client1.exec_command(
+                sudo=True,
+                cmd=f"ceph nfs export delete {nfs_name} {nfs_export_name}",
+                check_ec=False,
+            )
         log.info("Removing NFS Cluster")
         client1.exec_command(
             sudo=True,

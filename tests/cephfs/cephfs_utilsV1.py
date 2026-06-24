@@ -12,6 +12,7 @@ import json
 import os
 import random
 import re
+import signal
 import string
 import subprocess
 import time
@@ -25,8 +26,10 @@ import paramiko
 from ceph.ceph import CommandFailed, SSHConnectionManager
 from ceph.parallel import parallel
 from ceph.utils import check_ceph_healthly
+from cli.ceph.ceph import Ceph
 from cli.cephadm.cephadm import CephAdm
-from mita.v2 import get_openstack_driver
+from cli.utilities.filesys import Mount
+from compute.openstack import get_openstack_driver
 from tests.cephfs.exceptions import ValueMismatchError
 from utility.log import Log
 from utility.retry import retry
@@ -107,6 +110,7 @@ class FsUtils(object):
                 "python3-devel",
                 "git",
                 "lua",
+                "acl",
             ]
             if build.endswith("7") or build.startswith("3"):
                 pkgs.extend(
@@ -126,7 +130,7 @@ class FsUtils(object):
             out, rc = client.node.exec_command(sudo=True, cmd="ls /home/cephuser")
             if "smallfile" not in out:
                 client.node.exec_command(
-                    cmd="git clone https://github.com/bengland2/smallfile.git"
+                    cmd="git clone https://github.com/distributed-system-analysis/smallfile.git"
                 )
             if "iozone" not in out:
                 cmd_list = [
@@ -180,6 +184,7 @@ class FsUtils(object):
                 output_dict["fs_name"] = fs["name"]
                 output_dict["metadata_pool_name"] = fs["metadata_pool"]
                 output_dict["data_pool_name"] = fs["data_pools"][0]
+        log.debug("Fs info: %s", output_dict)
         return output_dict
 
     def get_pool_num(self, client, pool_name):
@@ -374,7 +379,7 @@ class FsUtils(object):
     def deamon_name(node, service):
         out, rc = node.exec_command(
             sudo=True,
-            cmd=f"systemctl list-units --type=service | grep {service} | awk {{'print $1'}}",
+            cmd=f"systemctl list-units --type=service --all | grep {service} | awk {{'print $1'}}",
         )
         service_deamon = out.strip().split()[0]
         return service_deamon
@@ -1199,20 +1204,30 @@ class FsUtils(object):
         Returns:
             tuple: A tuple containing the Ceph command output and command return code.
         """
-        nfs_cmd = f"ceph nfs cluster create {nfs_cluster_name}"
-        if kwargs.get("nfs_server_name"):
-            nfs_cmd += f" {kwargs.get('nfs_server_name')}"
-        if kwargs.get("placement"):
-            nfs_cmd += f" --placement '{kwargs.get('placement')}'"
-        nfs_port = kwargs.get("port")
-        if nfs_port:
-            nfs_cmd += f" --port {nfs_port}"
-        # BYOK / KMIP support
+        extra_args = {}
+        nfs_server = kwargs.get("nfs_server_name")
+
+        if not nfs_server and kwargs.get("placement"):
+            placement = kwargs["placement"].strip().split()
+            nfs_server = placement
+
+        # Port
+        if kwargs.get("port"):
+            extra_args["port"] = kwargs["port"]
+
+        # BYOK / KMIP
         if kwargs.get("byok_enabled", False):
-            yaml_path = kwargs.get("kmip_yaml_path", "/root/nfs_kmip.yaml")
-            nfs_cmd += f" -i {yaml_path}"
-        cmd_out, cmd_rc = client.exec_command(
-            sudo=True, cmd=nfs_cmd, check_ec=kwargs.get("check_ec", True)
+            extra_args["in-file"] = kwargs.get("kmip_yaml_path", "/root/nfs_kmip.yaml")
+
+        nfs_nodes = self.ceph_cluster.get_nodes("nfs")
+
+        # Execute via new API
+        cmd_out = Ceph(client).nfs.cluster.create(
+            name=nfs_cluster_name,
+            nfs_server=nfs_server,
+            check_ec=kwargs.get("check_ec", True),
+            nfs_nodes_obj=nfs_nodes,
+            **extra_args,
         )
 
         if validate:
@@ -1233,7 +1248,7 @@ class FsUtils(object):
                     f"Creation of NFS cluster: {nfs_cluster_name} failed"
                 )
 
-        return cmd_out, cmd_rc
+        return cmd_out
 
     @function_execution_time
     @retry(CommandFailed, tries=5, delay=60)
@@ -2346,6 +2361,55 @@ class FsUtils(object):
             )
         return 0
 
+    @retry(CommandFailed, tries=30, delay=10, backoff=1)
+    def _wait_for_pid_signal(self, node, daemon, sig, pids_before, expect_exit):
+        out_after, rc_after = node.exec_command(
+            cmd=f"pgrep {daemon}",
+            container_exec=False,
+            check_ec=False,
+        )
+        pids_after = out_after.splitlines() if not rc_after else []
+        still_running = set(pids_before) & set(pids_after)
+        log.info(
+            f"PIDs after {sig.name}: {pids_after}, "
+            f"still running from before: {still_running}"
+        )
+        if expect_exit and still_running:
+            raise CommandFailed(
+                f"{sig.name} failed. PIDs still running: {still_running}"
+            )
+        if not expect_exit and not pids_after:
+            raise CommandFailed(f"{sig.name} failed. {daemon} exited unexpectedly")
+
+    def pid_signal(
+        self,
+        node,
+        daemon,
+        sig=signal.SIGTERM,
+        expect_exit=True,
+    ):
+        out, rc = node.exec_command(
+            cmd=f"pgrep {daemon}",
+            container_exec=False,
+            check_ec=False,
+        )
+        pids_before = [pid for pid in out.splitlines() if pid.strip()] if not rc else []
+        if not pids_before:
+            log.info(
+                f"No running {daemon} process found on {node.hostname}, skipping {sig.name}"
+            )
+            return 0
+        log.info(f"PIDs before {sig.name}: {pids_before}")
+        for pid in pids_before:
+            node.exec_command(
+                sudo=True,
+                cmd=f"kill -{sig.value} {pid}",
+                container_exec=False,
+                check_ec=False,
+            )
+        self._wait_for_pid_signal(node, daemon, sig, pids_before, expect_exit)
+        return 0
+
     def network_disconnect(self, ceph_object, sleep_time=20):
         script = f"""import time,os
 os.system('sudo systemctl stop network')
@@ -2499,8 +2563,9 @@ os.system('sudo systemctl start  network')
         :return:
         """
         out, rc = client.exec_command(
-            sudo=True, cmd=f"cd {directory};ls -lrt |  awk {{'print $9'}}"
+            sudo=True, cmd=f"find {directory} -maxdepth 1 -type f -printf '%f\n'"
         )
+
         file_list = out.strip().split()
         file_dict = {}
         for file in file_list:
@@ -3225,8 +3290,10 @@ os.system('sudo systemctl start  network')
         :param nfs_export:
         :param nfs_mount_dir:
         """
+        Mount(client)._ensure_nfs_utils()
+
         client.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mount_dir}")
-        command = f"mount -t nfs -o port={kwargs.get('port', '2049')} {nfs_server}:{nfs_export} {nfs_mount_dir}"
+        command = f"mount -t nfs -o vers=4,port={kwargs.get('port', '2049')} {nfs_server}:{nfs_export} {nfs_mount_dir}"
         if kwargs.get("fstab"):
             try:
                 client.exec_command(sudo=True, cmd="ls -lrt /etc/fstab.backup")
@@ -3434,7 +3501,7 @@ os.system('sudo systemctl start  network')
 
                 if "smallfile" not in out:
                     node.exec_command(
-                        cmd="git clone https://github.com/bengland2/" "smallfile.git"
+                        cmd="git clone https://github.com/distributed-system-analysis/smallfile.git"
                     )
 
                 out, rc = node.exec_command(sudo=True, cmd="rpm -qa")
@@ -3468,7 +3535,8 @@ os.system('sudo systemctl start  network')
                 out, rc = node.exec_command(sudo=True, cmd="ls /home/cephuser")
                 if "smallfile" not in out:
                     node.exec_command(
-                        cmd="git clone " "https://github.com/bengland2/smallfile.git"
+                        cmd="git clone "
+                        "https://github.com/distributed-system-analysis/smallfile.git"
                     )
         self.mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
@@ -3786,7 +3854,7 @@ os.system('sudo systemctl start  network')
         nfs_client.exec_command(sudo=True, cmd=f"mkdir -p {mount_path}")
         assert self.wait_for_cmd_to_succeed(
             nfs_client,
-            cmd=f"mount -t nfs -o port=2049 {nfs_server}:{export_name} {mount_path}",
+            cmd=f"mount -t nfs -o vers=4,port=2049 {nfs_server}:{export_name} {mount_path}",
         )
         out, rc = nfs_client.exec_command(cmd="mount")
         mount_output = out.split()
@@ -3827,7 +3895,10 @@ os.system('sudo systemctl start  network')
         :param port:
         """
         client.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-        command = f"mount -t nfs -o port={port},nfsvers={nfs_version} {virtual_ip}:{psuedo_path} {nfs_mounting_dir}"
+        command = (
+            f"mount -t nfs -o vers=4,port={port},nfsvers={nfs_version} "
+            f"{virtual_ip}:{psuedo_path} {nfs_mounting_dir}"
+        )
         client.exec_command(sudo=True, cmd=command, check_ec=False)
 
     def mount_ceph(self, mnt_type, mount_params):
@@ -3877,10 +3948,13 @@ os.system('sudo systemctl start  network')
         if mnt_type == "nfs":
             mounting_dir = f"/mnt/cephfs_nfs_{mount_suffix}/"
             if mount_params["export_created"] == 0:
+                cmd = f"ceph nfs export create cephfs {mount_params['nfs_name']} {mount_params['nfs_export_name']}"
+                cmd += f" {mount_params['fs_name']} --path {fs_vol_path}"
+                if mount_params.get("kmip_key_id"):
+                    cmd += f" --kmip_key_id {mount_params['kmip_key_id']}"
                 client.exec_command(
                     sudo=True,
-                    cmd=f"ceph nfs export create cephfs {mount_params['nfs_name']} "
-                    f"{mount_params['nfs_export_name']} {mount_params['fs_name']} path={fs_vol_path}",
+                    cmd=cmd,
                 )
                 mount_params["export_created"] = 1
             self.cephfs_nfs_mount(
@@ -5449,7 +5523,7 @@ os.system('sudo systemctl start  network')
             returns status,data_avail,data_used,meta_avail,meta_used and mds name from ceph fs status in dict format
         """
         fs_status_dict = {}
-        fs_status_info = self.get_fs_status_dump(client)
+        fs_status_info = self.get_fs_status_dump(client, vol_name=fs_name)
         log.debug(f"Output: {fs_status_info}")
 
         status = self.fetch_value_from_json_output(
@@ -5609,6 +5683,59 @@ os.system('sudo systemctl start  network')
         )
         return fs_dump_info_dict
 
+    def collect_fs_dump_for_validation_1(self, client, fs_name):
+        """
+        Gets the output using fs dump and collected required info
+        Args:
+            client: client node
+            fs_name: File system name
+        Return:
+            returns status, fs_name, fsid, rank and mds name from ceph fs dump in dict format
+        """
+        fs_dump_info_dict = {}
+        fs_dump = self.get_fs_dump(client)
+        log.debug(fs_dump)
+
+        target_fs = None
+        for fs_entry in fs_dump.get("filesystems", []):
+            mdsmap = fs_entry.get("mdsmap", {})
+            if mdsmap.get("fs_name") == fs_name:
+                target_fs = fs_entry
+                break
+
+        if target_fs is None:
+            log.error(f"Filesystem '{fs_name}' not found in fs dump")
+            return fs_dump_info_dict
+
+        mdsmap = target_fs["mdsmap"]
+        fsname = mdsmap["fs_name"]
+        fsid = target_fs["id"]
+
+        active_mds = None
+        for gid_info in mdsmap.get("info", {}).values():
+            if "active" in gid_info.get("state", ""):
+                active_mds = gid_info
+                break
+
+        if active_mds is None:
+            log.error(f"No active MDS found for filesystem '{fs_name}' in fs dump")
+            return fs_dump_info_dict
+
+        status = active_mds["state"].split(":", 1)[1]
+        rank = active_mds["rank"]
+        mds_name = active_mds["name"]
+
+        fs_dump_info_dict.update(
+            {
+                "status": status,
+                "fsname": fsname,
+                "fsid": fsid,
+                "rank": rank,
+                "mds_name": mds_name,
+            }
+        )
+        return fs_dump_info_dict
+
     @retry(CommandFailed, tries=3, delay=10)
     def collect_fs_get_for_validation(self, client, fs_name):
         """
@@ -5688,7 +5815,7 @@ os.system('sudo systemctl start  network')
         for key in keys_to_check:
             # Find dictionaries that contain the key
             dicts_with_key = [d for d in dicts if key in d]
-
+            log.info("dicts_with_key: %s for key %s", dicts_with_key, key)
             if len(dicts_with_key) == 0:
                 log.error(f"Key '{key}' not found in any dictionary")
                 return False
@@ -5698,7 +5825,7 @@ os.system('sudo systemctl start  network')
             else:
                 # Collect values for the key
                 values = [d[key] for d in dicts_with_key]
-
+                log.info("Collect values for the key: %s: values: %s", key, values)
                 # Check if values are lists
                 if all(isinstance(v, list) for v in values):
                     # Compare list contents

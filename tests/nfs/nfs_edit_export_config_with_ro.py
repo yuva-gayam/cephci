@@ -1,6 +1,6 @@
 from time import sleep
 
-from nfs_operations import cleanup_cluster, setup_nfs_cluster
+from nfs_operations import cleanup_cluster, open_mandatory_v3_ports, setup_nfs_cluster
 
 from cli.ceph.ceph import Ceph
 from cli.exceptions import ConfigError, OperationFailedError
@@ -15,12 +15,12 @@ def update_export_conf(
 ):
     try:
         out = Ceph(client).nfs.export.get(nfs_name, nfs_export_readonly)
-        client.exec_command(sudo=True, cmd=f"echo '{out}' > export.conf")
+        client.exec_command(sudo=True, cmd=f"echo '{out}' > /tmp/export.conf")
         client.exec_command(
             sudo=True,
-            cmd=f"sed -i 's/{original_access_type}/{new_access_type}/g' export.conf",
+            cmd=f"sed -i 's/{original_access_type}/{new_access_type}/gI' /tmp/export.conf",
         )
-        Ceph(client).nfs.export.apply(nfs_name, "export.conf")
+        Ceph(client).nfs.export.apply(nfs_name, "/tmp/export.conf")
     except Exception:
         raise OperationFailedError("failed to edit access type in export conf file")
 
@@ -51,8 +51,8 @@ def run(ceph_cluster, **kw):
     # Export Conf Parameter
     nfs_export_readonly = "/exportRO"
     nfs_readonly_mount = "/mnt/nfs_readonly"
-    original_access_type = '"access_type": "RW"'
-    new_access_type = '"access_type": "RO"'
+    original_access_type = '"access_type": "rw"'
+    new_access_type = '"access_type": "ro"'
 
     try:
         # Setup nfs cluster
@@ -67,6 +67,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs_name,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create export
@@ -86,6 +88,14 @@ def run(ceph_cluster, **kw):
             new_access_type,
         )
 
+        # Open the mountd port for RO export
+        log.info("Check build version")
+        build = config.get("build", config.get("rhbuild"))
+        if build.startswith("7"):
+            sleep(10)
+            ports_to_open = ["portmapper", "mountd"]
+            open_mandatory_v3_ports(nfs_node, ports_to_open)
+
         # Mount the RO export on client
         clients[0].create_dirs(dir_path=nfs_readonly_mount, sudo=True)
         if Mount(clients[0]).nfs(
@@ -101,7 +111,7 @@ def run(ceph_cluster, **kw):
         # Test writes on Readonly export
         sleep(3)
         _, rc = clients[0].exec_command(
-            sudo=True, cmd=f"touch {nfs_readonly_mount}/file_ro", check_ec=False
+            cmd=f"touch {nfs_readonly_mount}/file_ro", check_ec=False
         )
         # Ignore the "Read-only file system" error and consider it as a successful execution
         if "touch: cannot touch" in str(rc) and "Read-only file system" in str(rc):
@@ -111,11 +121,12 @@ def run(ceph_cluster, **kw):
             return 1
 
         # Test writes on RW export
-        if clients[0].exec_command(sudo=True, cmd=f"touch {nfs_mount}/file_rw"):
+        if clients[0].exec_command(cmd=f"touch {nfs_mount}/file_rw"):
             log.info("Successfully created file on RW export")
         else:
             log.error("failed to create file on RW export")
             return 1
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
         return 1
@@ -131,6 +142,5 @@ def run(ceph_cluster, **kw):
         Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_readonly)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successfull")
-    return 0

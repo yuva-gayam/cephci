@@ -42,7 +42,7 @@ def run(ceph_cluster, **kw):
         common_util = CephFSCommonUtils(ceph_cluster)
         config = kw.get("config")
         cephfs_config = {}
-        run_time = config.get("run_time_hrs", 4)
+        run_time = config.get("run_time_hrs", 8)
         nested_dir = config.get("nested_dir", True)
         sv_cnt = config.get("sv_cnt", 100)
         clone_cnt = config.get("clone_cnt", 10)
@@ -69,7 +69,8 @@ def run(ceph_cluster, **kw):
         proc_status_list = []
         write_procs = []
         io_test_fail = 0
-        log_base_dir = os.path.dirname(log.logger.handlers[0].baseFilename)
+        # log_base_dir = os.path.dirname(log.logger.handlers[0].baseFilename)
+        log_base_dir = config.get("log-dir")
         log_path = f"{log_base_dir}/sv_clone_subtests"
         try:
             os.mkdir(log_path)

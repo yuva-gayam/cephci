@@ -49,6 +49,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create export with client permission
@@ -84,7 +86,7 @@ def run(ceph_cluster, **kw):
             pass
         else:
             log.error(f"Mount passed on unauthorized client: {clients[0].hostname}")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to perform export client addr validation : {e}")
         return 1
@@ -101,6 +103,5 @@ def run(ceph_cluster, **kw):
             client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_client_addr_mount}")
             Ceph(client).nfs.export.delete(nfs_name, nfs_export_client)
 
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

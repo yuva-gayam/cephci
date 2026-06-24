@@ -111,6 +111,8 @@ def create_nfs_cluster(
     ha=False,
     vip=None,
     active_standby=False,
+    enable_rdma=False,
+    rdma_port=None,
 ):
     """Create NFS cluster"""
     try:
@@ -130,6 +132,8 @@ def create_nfs_cluster(
             ha=ha,
             vip=vip,
             active_standby=active_standby,
+            enable_rdma=enable_rdma,
+            rdma_port=rdma_port,
         )
     except Exception as e:
         raise ConfigError(f"Failed to create NFS cluster: {e}")
@@ -187,6 +191,8 @@ def run(ceph_cluster, **kw):
                 ha=ha,
                 vip=vip,
                 active_standby=active_standby,
+                enable_rdma=config.get("enable_rdma", False),
+                rdma_port=config.get("rdma_port"),
             )
             # Create file in parellel using ThreadPoolExecutor
             log.info("Creating files in parallel using ThreadPoolExecutor")
@@ -328,4 +334,6 @@ def run(ceph_cluster, **kw):
     finally:
         if operation == "after_upgrade":
             # Cleanup NFS Cluster
-            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+            cleanup_cluster(
+                clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node
+            )

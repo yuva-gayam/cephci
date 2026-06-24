@@ -49,8 +49,10 @@ def run(ceph_cluster, **kw):
         nfs_name = "cephfs-nfs"
         local_fs_path = "/tmp/"
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -93,8 +95,12 @@ def run(ceph_cluster, **kw):
         )
         nfs_mounting_dir = f"/mnt/cephfs_nfs{mounting_dir}_1/"
         client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-        command = f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_name} {nfs_mounting_dir}"
-        client1.exec_command(sudo=True, cmd=command, check_ec=False)
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_name, nfs_mounting_dir
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
         dd(clients[0], nfs_mounting_dir, file_name="dd_file_nfs", bs="100M", count=20)
         dd(clients[0], local_fs_path, file_name="dd_file_local", bs="100M", count=20)
 
@@ -232,8 +238,12 @@ def run(ceph_cluster, **kw):
         return 1
     finally:
         log.info("Cleaning Up")
-        client1.exec_command(sudo=True, cmd=f"rm -rf {nfs_mounting_dir}{nfs_dir}")
-        client1.exec_command(sudo=True, cmd=f"rm -rf {local_fs_path}{nfs_dir}")
+        client1.exec_command(
+            sudo=True, cmd=f"rm -rf {nfs_mounting_dir}{nfs_dir}", check_ec=False
+        )
+        client1.exec_command(
+            sudo=True, cmd=f"rm -rf {local_fs_path}{nfs_dir}", check_ec=False
+        )
         log.info("Unmount NFS export")
         client1.exec_command(
             sudo=True, cmd=f"umount -l {nfs_mounting_dir}", check_ec=False

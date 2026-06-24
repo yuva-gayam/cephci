@@ -1,6 +1,7 @@
 import json
 import secrets
 import string
+import time
 import traceback
 from json import JSONDecodeError
 
@@ -64,8 +65,10 @@ def run(ceph_cluster, **kw):
         nfs_mounting_dir = "/mnt/nfs_" + "".join(
             secrets.choice(string.ascii_uppercase + string.digits) for i in range(5)
         )
-        out, rc = client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             raise CommandFailed("Cluster has not been created")
@@ -83,15 +86,33 @@ def run(ceph_cluster, **kw):
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=False):
             raise CommandFailed("Cluster has not been deleted")
-        try:
+
+        # Added a retry mechanism to confirm deletion
+        retries = 10
+        while retries > 0:
+            log.info(
+                "Checking if nfs cluster is deleted. Attempts left: " + str(retries)
+            )
+
             out, rc = client1.exec_command(sudo=True, cmd="ceph nfs cluster ls -f json")
-            output = json.loads(out)
-        except JSONDecodeError:
-            output = json.dumps([out])
-        if nfs_name not in output:
-            log.info("ceph nfs cluster deleted successfully")
+            log.debug("NFS Cluster list output after deletion: " + str(out))
+
+            try:
+                output = json.loads(out)
+            except JSONDecodeError:
+                log.debug("JSON decode error occurred")
+                output = json.dumps([out])
+
+            if nfs_name not in output:
+                log.info("ceph nfs cluster deleted successfully")
+                break
+
+            retries -= 1
+            time.sleep(3)
+
         else:
             raise CommandFailed("Failed to delete nfs cluster")
+
         out, rc = client1.exec_command(
             sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
         )
@@ -133,24 +154,26 @@ def run(ceph_cluster, **kw):
         if not rc:
             log.error("cephfs nfs export mount failed")
             return 1
+
         commands = [
-            f"mkdir {nfs_mounting_dir}/dir1 {nfs_mounting_dir}/dir2"
-            f"python3 /home/cephuser/smallfile/smallfile_cli.py --operation create --threads 10 --file-size 4 --files"
-            f" 1000 --files-per-dir 10 --dirs-per-dir 2 --top {nfs_mounting_dir}/dir1",
-            f"python3 /home/cephuser/smallfile/smallfile_cli.py --operation read --threads 10 --file-size 4 --files"
-            f" 1000 --files-per-dir 10 --dirs-per-dir 2 --top {nfs_mounting_dir}/dir1",
-            f"for n in {{1..20}}; do     dd if=/dev/urandom of={nfs_mounting_dir}/dir2"
-            f"/file$(printf %03d "
-            "$n"
-            ") bs=500k count=1000; done",
-            f"dd if={nfs_mounting_dir}/dir2/file1 of={nfs_mounting_dir}/dir2/copy_file1 bs=500k count=1000; done",
+            f"mkdir -p {nfs_mounting_dir}/dir1 {nfs_mounting_dir}/dir2",
+            f"python3 /home/cephuser/smallfile/smallfile_cli.py --operation create --threads 10 "
+            f"--file-size 4 --files 1000 --files-per-dir 10 --dirs-per-dir 2 --top {nfs_mounting_dir}/dir1",
+            f"python3 /home/cephuser/smallfile/smallfile_cli.py --operation read --threads 10 "
+            f"--file-size 4 --files 1000 --files-per-dir 10 --dirs-per-dir 2 --top {nfs_mounting_dir}/dir1",
+            f"for n in {{1..20}}; do dd if=/dev/urandom of={nfs_mounting_dir}/dir2/file$(printf %03d $n) "
+            f"bs=500k count=1000; done",
+            f"ls -l {nfs_mounting_dir}/dir2",
+            f"dd if={nfs_mounting_dir}/dir2/file001 of={nfs_mounting_dir}/dir2/copy_file1 bs=500k count=1000",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command, long_running=True)
+            client1.exec_command(sudo=True, cmd=command, timeout=600)
+            log.info("Sleeping for 5 seconds between commands...")
+            time.sleep(5)
         return 0
     except Exception as e:
-        log.info(e)
-        log.info(traceback.format_exc())
+        log.error(e)
+        log.error(traceback.format_exc())
         return 1
     finally:
         log.info("Cleaning up the system")

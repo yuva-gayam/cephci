@@ -57,6 +57,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         sleep(3)
@@ -77,7 +79,7 @@ def run(ceph_cluster, **kw):
 
         # Wait to complete linux untar
         th.join()
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
         log.info("Cleaning up")
@@ -88,6 +90,5 @@ def run(ceph_cluster, **kw):
     finally:
         log.info("Cleaning up")
         sleep(100)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)
         log.info("Cleaning up successfull")
-    return 0

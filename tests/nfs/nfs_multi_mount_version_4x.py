@@ -50,6 +50,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Run parallel IO on v4.1 and v4.2 mounts
@@ -63,11 +65,10 @@ def run(ceph_cluster, **kw):
             threads.append(io)
         for th in threads:
             th.join()
-
+        return 0
     except Exception as e:
         log.error(f"Failed to setup nfs-ganesha cluster {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
         return 1
     finally:
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)

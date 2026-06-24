@@ -4,7 +4,7 @@ import re
 import time
 
 from ceph.parallel import parallel
-from ceph.utils import config_ntp, is_client, update_ca_cert
+from ceph.utils import config_ntp, enable_coredump, is_client, update_ca_cert
 from ceph.waiter import WaitUntil
 from cli.exceptions import ConfigError
 from cli.utilities.packages import Package
@@ -50,11 +50,13 @@ rpm_packages = {
         "wget",
         "git-core",
         "python3-devel",
+        "python3-pip",
         "chrony",
         "yum-utils",
         "net-tools",
         "lvm2",
         "podman",
+        "rpcbind",
         "net-snmp-utils",
         "net-snmp",
         "kernel-modules-extra",
@@ -84,6 +86,18 @@ def run(**kw):
     # Extract test_data from kw
     test_data = kw.get("test_data", None)
 
+    # Validate podman auth file once before parallel execution
+    podman_auth_file = config.get("podman_auth_file")
+    if podman_auth_file:
+        from utility.registry_auth import validate_podman_auth_file
+
+        try:
+            validate_podman_auth_file(podman_auth_file)
+            log.info(f"Successfully validated podman auth file: {podman_auth_file}")
+        except Exception as e:
+            log.error(f"Failed to validate podman auth file: {e}")
+            raise
+
     with parallel() as p:
         for ceph in ceph_nodes:
             p.spawn(
@@ -97,6 +111,7 @@ def run(**kw):
                 cloud_type,
                 fips_mode,
                 firewall,
+                config,
             )
             time.sleep(20)
 
@@ -128,6 +143,7 @@ def install_prereq(
     cloud_type="openstack",
     fips_mode=False,
     firewall=False,
+    config=None,
 ):
     log.info("Waiting for cloud config to complete on " + ceph.hostname)
     ceph.exec_command(cmd="while [ ! -f /ceph-qa-ready ]; do sleep 15; done")
@@ -163,11 +179,18 @@ def install_prereq(
     ceph.exec_command(cmd=cmd_remove_apache_arrow)
 
     # Max SSH Sessions
-    sshd_configs = [
-        "sed -i '/MaxSessions*/d' /etc/ssh/sshd_config",
-        "echo 'MaxSessions 150' | tee -a /etc/ssh/sshd_config",
-        "systemctl restart sshd",
-    ]
+    if cloud_type == "onecloud":
+        sshd_configs = [
+            "sed -i '/MaxSessions*/d' /etc/ssh/sshd_config",
+            "echo 'MaxSessions 150' | tee -a /etc/ssh/sshd_config",
+            "systemctl restart sshd",
+        ]
+    else:
+        sshd_configs = [
+            "sudo sed -i '/MaxSessions*/d' /etc/ssh/sshd_config",
+            "echo 'MaxSessions 150' | sudo tee -a /etc/ssh/sshd_config",
+            "sudo systemctl restart sshd",
+        ]
     for sshd_cfg in sshd_configs:
         ceph.exec_command(cmd=sshd_cfg, sudo=True)
 
@@ -205,9 +228,8 @@ def install_prereq(
         if distro_ver.startswith("7"):
             rpm_all_packages = " ".join(rpm_packages.get("7"))
 
-        ceph.exec_command(
-            cmd=f"sudo yum install -y {rpm_all_packages}", long_running=True
-        )
+        cmd = f"sudo dnf install --setopt install_weak_deps=False -y {rpm_all_packages}"
+        ceph.exec_command(cmd=cmd, long_running=True)
 
         # Restarting the node for qdisc filter to be loaded. This is required for
         # RHEL-8
@@ -251,7 +273,7 @@ def install_prereq(
         ceph.exec_command(cmd="sudo yum clean all")
         config_ntp(ceph, cloud_type)
 
-    registry_login(ceph, distro_ver, test_data)
+    registry_login(ceph, distro_ver, test_data, cloud_type=cloud_type)
     update_iptables(ceph)
 
     if fips_mode:
@@ -278,6 +300,25 @@ def install_prereq(
         if get_service_state(ceph, "firewalld").strip() != "active":
             raise ConfigError("Firewall not active")
         log.info("Firewall is active")
+
+    # Enable coredump collection
+    enable_coredump(ceph)
+    # Distribute podman auth file if specified in config
+    # Note: File is validated once before parallel execution in run()
+    if config:
+        podman_auth_file = config.get("podman_auth_file")
+        if podman_auth_file:
+            from utility.registry_auth import distribute_podman_auth_file
+
+            try:
+                distribute_podman_auth_file(ceph, podman_auth_file)
+                log.info(
+                    f"Successfully distributed podman auth file to {ceph.hostname}"
+                )
+            except Exception as e:
+                log.error(
+                    f"Failed to distribute podman auth file to {ceph.hostname}: {e}"
+                )
 
 
 def setup_addition_repo(ceph, repo):
@@ -362,19 +403,21 @@ def enable_rhel_rpms(ceph, distro_ver):
         ceph:       cluster instance
         distro_ver: distro version details
     """
+    sm_cmd = "subscription-manager"
 
     repos = {
         "7": ["rhel-7-server-rpms", "rhel-7-server-extras-rpms"],
         "8": ["rhel-8-for-x86_64-appstream-rpms", "rhel-8-for-x86_64-baseos-rpms"],
         "9": ["rhel-9-for-x86_64-appstream-rpms", "rhel-9-for-x86_64-baseos-rpms"],
+        "10": ["rhel-10-for-x86_64-appstream-rpms", "rhel-10-for-x86_64-baseos-rpms"],
     }
 
-    ceph.exec_command(sudo=True, cmd=f"subscription-manager release --set {distro_ver}")
+    ceph.exec_command(sudo=True, cmd=f"{sm_cmd} release --set {distro_ver}")
 
-    for repo in repos.get(distro_ver[0]):
+    for repo in repos.get(distro_ver.split(".")[0]):
         ceph.exec_command(
             sudo=True,
-            cmd="subscription-manager repos --enable={r}".format(r=repo),
+            cmd="{sm_cmd} repos --enable={r}".format(sm_cmd=sm_cmd, r=repo),
             long_running=True,
         )
 
@@ -387,13 +430,14 @@ def enable_rhel_eus_rpms(ceph, distro_ver):
         distro_ver:     distro version - example: 7.7
         ceph:           ceph object
     """
+    sm_cmd = "subscription-manager"
 
     eus_repos = {"7": ["rhel-7-server-eus-rpms", "rhel-7-server-extras-rpms"]}
 
     for repo in eus_repos.get(distro_ver[0]):
         ceph.exec_command(
             sudo=True,
-            cmd="subscription-manager repos --enable={r}".format(r=repo),
+            cmd="{sm_cmd} repos --enable={r}".format(sm_cmd=sm_cmd, r=repo),
             long_running=True,
         )
 
@@ -405,7 +449,7 @@ def enable_rhel_eus_rpms(ceph, distro_ver):
     else:
         raise NotImplementedError("cannot set EUS repos for %s", rhel_major_version)
 
-    cmd = f"subscription-manager release --set={release}"
+    cmd = f"{sm_cmd} release --set={release}"
 
     ceph.exec_command(
         sudo=True,
@@ -416,7 +460,7 @@ def enable_rhel_eus_rpms(ceph, distro_ver):
     ceph.exec_command(sudo=True, cmd="yum clean all", long_running=True)
 
 
-def registry_login(ceph, distro_ver, test_data=None):
+def registry_login(ceph, distro_ver, test_data=None, cloud_type="openstack"):
     """
     Login to the given Container registries provided in the configuration.
 

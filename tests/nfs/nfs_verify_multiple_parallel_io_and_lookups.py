@@ -53,6 +53,8 @@ def run(ceph_cluster, **kw):
                 nfs_export,
                 fs,
                 ceph_cluster=ceph_cluster,
+                enable_rdma=config.get("enable_rdma", False),
+                rdma_port=config.get("rdma_port"),
             )
 
         if io:
@@ -86,7 +88,7 @@ def run(ceph_cluster, **kw):
 
             th1.join()
             th2.join()
-
+        return 0
     except Exception as e:
         log.error(f"Failed to validate multiple ios and lookups : {e}")
         return 1
@@ -96,6 +98,7 @@ def run(ceph_cluster, **kw):
             import time
 
             time.sleep(20)
-            cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+            cleanup_cluster(
+                clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+            )
             log.info("Cleaning up successful")
-    return 0

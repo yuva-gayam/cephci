@@ -44,6 +44,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create a file on Mount point
@@ -76,6 +78,7 @@ def run(ceph_cluster, **kw):
             else:
                 log.info("Attribute 'myattr' set to 'value' not found in the output.")
                 return 1
+        return 0
 
     except Exception as e:
         log.error(f"Failed to perform export client addr validation : {e}")
@@ -85,6 +88,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

@@ -35,7 +35,7 @@ def run(ceph_cluster, **kw):
         cephfs_common_utils = CephFSCommonUtils(ceph_cluster)
         config = kw.get("config")
         cephfs_config = {}
-        run_time = config.get("run_time_hrs", 4)
+        run_time = config.get("run_time_hrs", 8)
         # Derive OSD usage limit to trigger OSD removal
         osd_rm_limit_def = random.randrange(5, 26)
         osd_rm_limit = config.get("osd_rm_limit", osd_rm_limit_def)
@@ -66,7 +66,8 @@ def run(ceph_cluster, **kw):
         proc_status_list = []
         write_procs = []
         mds_test_fail = 0
-        log_base_dir = os.path.dirname(log.logger.handlers[0].baseFilename)
+        # log_base_dir = os.path.dirname(log.logger.handlers[0].baseFilename)
+        log_base_dir = config.get("log-dir")
         log_path = f"{log_base_dir}/disruptive_subtests"
         try:
             os.mkdir(log_path)

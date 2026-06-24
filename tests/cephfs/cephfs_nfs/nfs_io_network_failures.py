@@ -1,6 +1,7 @@
 import json
 import secrets
 import string
+import time
 import traceback
 from json import JSONDecodeError
 
@@ -16,7 +17,7 @@ log = Log(__name__)
 
 def run_io_commands(client, io_commands):
     for command in io_commands:
-        client.exec_command(sudo=True, cmd=command, long_running=True)
+        client.exec_command(sudo=True, cmd=command, timeout=300)
 
 
 @retry(CommandFailed, tries=3, delay=60)
@@ -83,8 +84,10 @@ def run(ceph_cluster, **kw):
         nfs_mounting_dir = "/mnt/nfs_" + "".join(
             secrets.choice(string.ascii_uppercase + string.digits) for i in range(5)
         )
-        out, rc = client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if not wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             raise CommandFailed("Cluster has not been created")
@@ -129,7 +132,9 @@ def run(ceph_cluster, **kw):
             ") bs=500k count=1000; done",
         ]
         for command in commands:
-            client1.exec_command(sudo=True, cmd=command, long_running=True)
+            client1.exec_command(sudo=True, cmd=command, timeout=300)
+            log.info("Sleeping for 5 seconds between commands...")
+            time.sleep(5)
         for nfs in nfs_nodes:
             with parallel() as p:
                 p.spawn(fs_util.network_disconnect, nfs)

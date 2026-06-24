@@ -78,6 +78,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create export
@@ -115,7 +117,7 @@ def run(ceph_cluster, **kw):
             pass
         else:
             log.error(f"Mount passed on unauthorized client: {clients[0].hostname}")
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
         return 1
@@ -131,6 +133,5 @@ def run(ceph_cluster, **kw):
             log.info("Removing nfs-ganesha client addr dir on client:")
             client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_client_mount}")
             Ceph(client).nfs.export.delete(nfs_name, nfs_export_client)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)
         log.info("Cleaning up successfull")
-    return 0

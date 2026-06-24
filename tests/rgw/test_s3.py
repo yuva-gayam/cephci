@@ -65,13 +65,6 @@ access_key = {{ data.alt.access_key }}
 secret_key = {{ data.alt.secret_key }}
 email = {{ data.alt.email }}
 
-[s3 tenant]
-display_name = {{ data.tenant.name }}
-user_id = {{ data.tenant.id }}
-access_key = {{ data.tenant.access_key }}
-secret_key = {{ data.tenant.secret_key }}
-email = {{ data.tenant.email }}
-
 {%- if data.iam %}
 [iam]
 display_name = {{ data.iam.name }}
@@ -106,6 +99,24 @@ secret_key = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 user_id = RGW22222222222222222
 email = account2@ceph.com
 {% endif %}
+"""
+S3CONF_TENANT = """
+[s3 tenant]
+display_name = {{ data.tenant.name }}
+user_id = {{ data.tenant.id }}
+access_key = {{ data.tenant.access_key }}
+secret_key = {{ data.tenant.secret_key }}
+email = {{ data.tenant.email }}
+"""
+
+S3CONF_TENANT_Tentacle = """
+[s3 tenant]
+display_name = {{ data.tenant.name }}
+user_id = {{ data.tenant.id }}
+access_key = {{ data.tenant.access_key }}
+secret_key = {{ data.tenant.secret_key }}
+email = {{ data.tenant.email }}
+tenant = {{ data.tenant.name }}
 """
 
 
@@ -166,7 +177,8 @@ def execute_setup(cluster: Ceph, config: dict) -> None:
 
     branch = config.get("branch", "ceph-quincy")
     clone_s3_tests(node=client_node, branch=branch)
-    install_s3test_requirements(client_node, branch, os_ver=build[-1])
+    os_ver = build.split("-")[-1]
+    install_s3test_requirements(client_node, branch, os_ver=os_ver)
 
     if not all([host, port]):
         host = rgw_node.shortname
@@ -204,12 +216,17 @@ def execute_s3_tests(
         base_cmd = "cd s3-tests; S3TEST_CONF=config.yaml virtualenv/bin/nosetests -v"
         extra_args = "-a '!fails_on_rgw,!fails_strict_rfc2616,!encryption'"
         tests = "s3tests"
+        if build.split(".")[0] >= "8":
+            test_directory = "s3tests"
+        else:
+            test_directory = "s3tests_boto3"
+
         log.info(f"build :{build}")
         if not build.split(".")[0] >= "7":
             if execute_granular:
-                tests = f"s3tests_boto3/functional/{path}"
+                tests = f"{test_directory}/functional/{path}"
             else:
-                tests = "s3tests_boto3"
+                tests = {test_directory}
             extra_args = "-a '!fails_on_rgw,!fails_strict_rfc2616"
 
             if not encryption:
@@ -220,9 +237,9 @@ def execute_s3_tests(
         else:
             base_cmd = "cd s3-tests; S3TEST_CONF=config.yaml virtualenv/bin/tox"
             if execute_granular:
-                tests = f"s3tests_boto3/functional/{path}"
+                tests = f"{test_directory}/functional/{path}"
             else:
-                tests = "s3tests_boto3"
+                tests = {test_directory}
             extra_args = "-- -v -m 'not fails_on_rgw and not fails_strict_rfc2616"
 
             if not encryption:
@@ -276,7 +293,7 @@ def install_s3test_requirements(
     Raises:
         CommandFailed:  Whenever a command returns a non-zero value part of the method.
     """
-    if branch in ["ceph-nautilus", "ceph-luminous"] or os_ver == "9":
+    if branch in ["ceph-nautilus", "ceph-luminous"] or int(os_ver) >= 9:
         return _s3tests_req_install(node, os_ver)
 
     _s3tests_req_bootstrap(node)
@@ -454,6 +471,14 @@ def create_s3_conf(
 
     global S3CONF
     global S3CONF_ACC
+    global S3CONF_TENANT_Tentacle
+    global S3CONF_TENANT
+
+    if build.split(".")[0] >= "9":
+        S3CONF = S3CONF + S3CONF_TENANT_Tentacle
+    else:
+        S3CONF = S3CONF + S3CONF_TENANT
+
     if build.split(".")[0] >= "8":
         S3CONF = S3CONF + S3CONF_ACC
 
@@ -540,7 +565,7 @@ def _s3test_req_py3(node: CephNode) -> None:
 
 def _s3tests_req_install(node: CephNode, os_ver: str) -> None:
     """Install S3 prerequisites via pip."""
-    if os_ver == "9":
+    if int(os_ver) >= 9:
         return _s3test_req_py3(node)
 
     packages = [

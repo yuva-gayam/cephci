@@ -79,6 +79,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create oprtaions on each client
@@ -125,6 +127,7 @@ def run(ceph_cluster, **kw):
         # Wait to complete operations
         for Thread_operation in Thread_operations:
             Thread_operation.join()
+        return 0
 
     except Exception as e:
         log.error(
@@ -133,5 +136,4 @@ def run(ceph_cluster, **kw):
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
         return 1
     finally:
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)

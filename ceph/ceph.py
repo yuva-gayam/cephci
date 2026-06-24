@@ -1,12 +1,15 @@
 """This module implements the required foundation data structures for testing."""
 
+import base64
 import codecs
 import datetime
 import json
+import os
 import pickle
 import random
 import re
 import socket
+import subprocess
 from time import sleep, time
 
 import cryptography
@@ -51,6 +54,9 @@ class Ceph(object):
         self.__rhcs_version = None
         self.ceph_nodename = None
         self.networks = dict()
+        # When True, bootstrap/config may use IPv6 (OpenStack only);
+        #  driven by config/custom_config
+        self.use_ipv6 = False
 
     def __eq__(self, ceph_cluster):
         if hasattr(ceph_cluster, "node_list"):
@@ -100,7 +106,9 @@ class Ceph(object):
         self.__rhcs_version = version
         luminous_demons = self.get_ceph_objects("mgr") + self.get_ceph_objects("nfs")
         for luminous_demon in luminous_demons:  # type: CephDemon
-            luminous_demon.is_active = False if self.rhcs_version < "3" else True
+            luminous_demon.is_active = (
+                False if self.rhcs_version < LooseVersion("3") else True
+            )
 
     def get_nodes(self, role=None, ignore=None):
         """
@@ -203,15 +211,19 @@ class Ceph(object):
         for ceph in self.get_nodes():
             ceph.generate_id_rsa()
             keys = keys + ceph.id_rsa_pub
-            hosts = (
-                hosts
-                + ceph.ip_address
-                + "\t"
-                + ceph.hostname
-                + "\t"
-                + ceph.shortname
-                + "\n"
+            # Add IPv4 and IPv6 to /etc/hosts when available (one line per address)
+            hosts = hosts + (
+                ceph.ipv4_address + "\t" + ceph.hostname + "\t" + ceph.shortname + "\n"
             )
+            if getattr(ceph, "ipv6_address", None):
+                hosts = hosts + (
+                    ceph.ipv6_address
+                    + "\t"
+                    + ceph.hostname
+                    + "\t"
+                    + ceph.shortname
+                    + "\n"
+                )
         for ceph in self.get_nodes():
             keys_file = ceph.remote_file(
                 file_name=".ssh/authorized_keys", file_mode="a"
@@ -944,29 +956,42 @@ class Ceph(object):
         Args:
             base_url(str): rhel compose url
             repos(list): repos behind compose/ to process
-            cloud_type (str): The environment used for testing
+            cloud_type (str): The environment used for testing (DEPRECATED)
         Returns:
             str: repository file content
         """
         repo_file = ""
+        base_url = base_url.rstrip("/")
+        logger.debug(
+            "DEPRECATED: 'cloud_type' argument is unused and will be removed. Value supplied: %s",
+            cloud_type,
+        )
+
+        is_redhat_url = "redhat.com" in base_url
+
         for repo in repos:
-            base_url = base_url.rstrip("/")
-            if "ibmc" in cloud_type:
-                repo_to_use = f"{base_url}/{repo}/"
-            else:
+            if is_redhat_url:
                 repo_to_use = f"{base_url}/compose/{repo}/x86_64/os/"
+            else:
+                # The expecatation in other datacenters is Tools suffix is
+                # added by default. This is done for support of earlier
+                # versions of Ceph.
+                # ToDo -- we can deprecate it.
+                repo_to_use = f"{base_url}/{repo}/"
 
             logger.info(f"repo to use is {repo_to_use}")
             r = requests.get(repo_to_use, timeout=10, verify=False)
             logger.info("Checking %s", repo_to_use)
+
             if r.status_code == 200:
-                logger.info("Using %s", repo_to_use)
                 header = "[ceph-" + repo + "]" + "\n"
                 name = "name=ceph-" + repo + "\n"
                 baseurl = "baseurl=" + repo_to_use + "\n"
                 gpgcheck = "gpgcheck=0\n"
                 enabled = "enabled=1\n\n"
                 repo_file = repo_file + header + name + baseurl + gpgcheck + enabled
+            else:
+                logger.error("Unable to reach the given repository %s", base_url)
 
         return repo_file
 
@@ -1277,13 +1302,23 @@ class SSHConnectionManager(object):
         password,
         look_for_keys=False,
         private_key_file_path="",
+        private_key_password=None,
         outage_timeout=600,
     ):
         self.ip_address = ip_address
         self.username = username
         self.password = password
         self.look_for_keys = look_for_keys
-        self.pkey = self._get_ssh_key(private_key_file_path) if look_for_keys else None
+        self._private_key_file_path = private_key_file_path or ""
+        self._private_key_password = private_key_password
+        # Use pkey only when no explicit path (key_filename used for path+cert)
+        self.pkey = (
+            self._get_ssh_key(private_key_file_path)
+            if look_for_keys
+            and private_key_file_path
+            and not self._private_key_file_path
+            else None
+        )
         self.__client = paramiko.SSHClient()
         self.__client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
         self.__transport = None
@@ -1294,8 +1329,21 @@ class SSHConnectionManager(object):
     def client(self):
         return self.get_client()
 
+    def get_client(self):
+        if not (self.__transport and self.__transport.is_active()):
+            self.__connect()
+            self.__transport = self.__client.get_transport()
+
+        return self.__client
+
     def _get_ssh_key(self, private_key_file_path):
         """Get SSH key based on file type"""
+        passphrase = self._private_key_password
+        if isinstance(passphrase, str) and passphrase:
+            passphrase = passphrase.encode("utf-8")
+        elif not passphrase:
+            passphrase = None
+
         private_key = None
         with open(private_key_file_path, "rb") as key_file:
             key_data = key_file.read()
@@ -1305,7 +1353,7 @@ class SSHConnectionManager(object):
             private_key = (
                 cryptography.hazmat.primitives.serialization.load_ssh_private_key(
                     key_data,
-                    password=None,
+                    password=passphrase,
                     backend=cryptography.hazmat.backends.default_backend(),
                 )
             )
@@ -1314,7 +1362,7 @@ class SSHConnectionManager(object):
             private_key = (
                 cryptography.hazmat.primitives.serialization.load_pem_private_key(
                     key_data,
-                    password=None,
+                    password=passphrase,
                     backend=cryptography.hazmat.backends.default_backend(),
                 )
             )
@@ -1323,48 +1371,125 @@ class SSHConnectionManager(object):
             private_key,
             cryptography.hazmat.primitives.asymmetric.rsa.RSAPrivateKey,
         ):
-            return paramiko.RSAKey.from_private_key_file(private_key_file_path)
+            return paramiko.RSAKey.from_private_key_file(
+                private_key_file_path, password=self._private_key_password
+            )
 
         elif isinstance(
             private_key,
             cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey,
         ):
-            return paramiko.Ed25519Key.from_private_key_file(private_key_file_path)
+            return paramiko.Ed25519Key.from_private_key_file(
+                private_key_file_path, password=self._private_key_password
+            )
+
+        elif isinstance(
+            private_key,
+            cryptography.hazmat.primitives.asymmetric.ec.EllipticCurvePrivateKey,
+        ):
+            return paramiko.ECDSAKey.from_private_key_file(
+                private_key_file_path, password=self._private_key_password
+            )
 
         logger.error("Unsupported ssh key {}".format(private_key_file_path))
         return False
 
-    def get_client(self):
-        if not (self.__transport and self.__transport.is_active()):
-            self.__connect()
-            self.__transport = self.__client.get_transport()
-
-        return self.__client
+    def close(self):
+        """Close the SSH connection."""
+        try:
+            if self.__client:
+                self.__client.close()
+        except Exception:
+            pass
+        self.__transport = None
 
     def __connect(self):
         """Establishes a connection with the remote host using the IP Address."""
         end_time = datetime.datetime.now() + self.outage_timeout
+        last_error = None
         while end_time > datetime.datetime.now():
             try:
-                self.__client.connect(
-                    self.ip_address,
-                    username=self.username,
-                    password=self.password,
-                    look_for_keys=self.look_for_keys,
-                    allow_agent=False,
-                    pkey=self.pkey,
+                auth = (
+                    "key"
+                    if self._private_key_file_path
+                    else ("password" if self.password else "none")
                 )
+                logger.info(
+                    "SSH connect attempt to %s as %s (auth: %s, key_path: %s)",
+                    self.ip_address,
+                    self.username,
+                    auth,
+                    self._private_key_file_path or "(none)",
+                )
+                connect_kw = {
+                    "hostname": self.ip_address,
+                    "username": self.username,
+                    "password": self.password,
+                    "allow_agent": False,
+                    "look_for_keys": (
+                        False if self._private_key_file_path else self.look_for_keys
+                    ),
+                }
+                if self._private_key_file_path:
+                    # key_filename + passphrase (agent removed per user: agent did not work)
+                    connect_kw["key_filename"] = [self._private_key_file_path]
+                    connect_kw["passphrase"] = self._private_key_password
+                else:
+                    connect_kw["pkey"] = self.pkey
+                self.__client.connect(**connect_kw)
+                logger.info("SSH connected to %s as %s", self.ip_address, self.username)
                 self.__outage_start_time = None
                 return
             except Exception as e:
-                logger.warning(f"Error in connecting to {self.ip_address}: \n{e}")
+                last_error = e
+                logger.warning(
+                    "SSH connect failed to %s as %s: %s (auth: key=%s, pwd=%s)",
+                    self.ip_address,
+                    self.username,
+                    e,
+                    bool(self._private_key_file_path),
+                    bool(self.password),
+                )
                 if not self.__outage_start_time:
                     self.__outage_start_time = datetime.datetime.now()
 
                 logger.debug("Retrying connection in 10 seconds")
                 sleep(10)
 
-        raise AssertionError(f"Unable to establish a connection with {self.ip_address}")
+        hint = ""
+        err_str = str(last_error).lower() if last_error else ""
+        if "timed out" in err_str or "errno 60" in err_str:
+            hint = (
+                " (Connection timed out - check VPN, firewall, security group, "
+                "or run from a network that can reach the VM)"
+            )
+        elif (
+            "authentication" in err_str
+            or "publickey" in err_str
+            or "bad authentication type" in err_str
+        ):
+            key_hint = ""
+            if self._private_key_file_path:
+                cert_path = self._private_key_file_path + "-cert.pub"
+                if os.path.isfile(cert_path):
+                    key_hint = (
+                        f" CISO cert at {self._private_key_file_path}: Paramiko does "
+                        f"not support SSH certs; consider using system ssh or another workaround."
+                    )
+                else:
+                    key_hint = (
+                        f" Key: {self._private_key_file_path}. Ensure it matches "
+                        f"the key OneCloud has for user '{self.username}'."
+                    )
+            elif "bad authentication type" in err_str and self.password:
+                key_hint = (
+                    " Hardened images only allow publickey; use private_key_path "
+                    "with step ssh certificate."
+                )
+            hint = f" (SSH auth failed{key_hint})"
+        raise AssertionError(
+            f"Unable to establish a connection with {self.ip_address}{hint}"
+        )
 
     @property
     def transport(self):
@@ -1380,7 +1505,20 @@ class SSHConnectionManager(object):
             del pickle_dict["_SSHConnectionManager__transport"]
         if pickle_dict.get("_SSHConnectionManager__client"):
             del pickle_dict["_SSHConnectionManager__client"]
+        # pkey (paramiko/cryptography key) is not picklable; recreated in __setstate__
+        if pickle_dict.get("pkey") is not None:
+            del pickle_dict["pkey"]
         return pickle_dict
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__client = paramiko.SSHClient()
+        self.__client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
+        self.__transport = None
+        key_path = getattr(self, "_private_key_file_path", "") or ""
+        self.pkey = (
+            self._get_ssh_key(key_path) if self.look_for_keys and key_path else None
+        )
 
 
 class CephNode(object):
@@ -1394,26 +1532,61 @@ class CephNode(object):
 
     def __init__(self, **kw):
         """
-        Initialize a CephNode in a libcloud environment
-        eg CephNode(username='cephuser', password='cephpasswd',
-                    root_password='passwd', ip_address='ip_address',
-                    subnet='subnet', hostname='hostname',
-                    role='mon|osd|client', no_of_volumes=3,
-                    ceph_vmnode='ref_to_libcloudvm')
+        Initialize a CephNode in a libcloud environment.
 
+        Network attributes (use either explicit IPv4 or legacy ip_address/subnet):
+            ipv4_address, ipv4_subnet  - IPv4 address and subnet (or pass ip_address, subnet)
+            ipv6_address, ipv6_subnet  - IPv6 when available (e.g. OpenStack dual-stack)
+            use_ipv6                    - when True, ip_address/subnet follow IPv6
+        Derived: ip_address and subnet are the active stack (IPv6 if use_ipv6 and set, else IPv4).
+
+        eg CephNode(username='cephuser', password='cephpasswd',
+                    root_password='passwd', ipv4_address='...', ipv4_subnet='...',
+                    hostname='hostname', role='mon|osd|client', no_of_volumes=3,
+                    ceph_vmnode='ref_to_libcloudvm')
         """
         self.username = kw["username"]
         self.password = kw["password"]
         self.root_passwd = kw["root_password"]
+        self.root_username = kw.get("root_username") or "root"
         self.look_for_key = kw["look_for_key"]
-        self.private_key_path = kw["private_key_path"]
+        self.private_key_password = kw.get("private_key_password")
+        _key_path = kw.get("private_key_path") or ""
+        self.private_key_path = (
+            os.path.expanduser(str(_key_path).strip()) if _key_path else ""
+        )
+        _boot_key = kw.get("bootstrap_key_path") or ""
+        self.bootstrap_key_path = (
+            os.path.expanduser(str(_boot_key).strip()) if _boot_key else ""
+        )
+        self.bootstrap_key_password = kw.get("bootstrap_key_password") or ""
         self.root_login = kw["root_login"]
         self.private_ip = kw["private_ip"]
-        self.ip_address = kw["ip_address"]
-        self.subnet = kw["subnet"]
+
+        # Explicit IPv4 storage (backward compat: ip_address/subnet treated as IPv4)
+        self.ipv4_address = kw.get("ipv4_address") or kw.get("ip_address")
+        self.ipv4_subnet = kw.get("ipv4_subnet") or kw.get("subnet")
+        self.ipv6_address = kw.get("ipv6_address")
+        self.ipv6_subnet = kw.get("ipv6_subnet")
+        self.use_ipv6 = kw.get("use_ipv6", False)
+
+        # Active address/subnet: IPv6 when use_ipv6 and available, else IPv4
+        self.ip_address = (
+            self.ipv6_address
+            if (self.use_ipv6 and self.ipv6_address)
+            else self.ipv4_address
+        )
+        self.subnet = (
+            self.ipv6_subnet
+            if (self.use_ipv6 and self.ipv6_subnet)
+            else self.ipv4_subnet
+        )
         self.vmname = kw["hostname"]
         self.ceph_nodename = kw["ceph_nodename"]
         self.vmshortname = self.vmname.split(".")[0]
+        # Initial values from config; updated in connect() from remote hostname
+        self.hostname = self.vmname
+        self.shortname = self.vmshortname
 
         if kw.get("ceph_vmnode"):
             self.vm_node = kw["ceph_vmnode"]
@@ -1445,10 +1618,11 @@ class CephNode(object):
 
         self.root_connection = SSHConnectionManager(
             self.ip_address,
-            "root",
+            self.root_username,
             self.root_passwd,
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
+            private_key_password=self.private_key_password,
         )
         self.connection = SSHConnectionManager(
             self.ip_address,
@@ -1456,6 +1630,7 @@ class CephNode(object):
             self.password,
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
+            private_key_password=self.private_key_password,
         )
         self.rssh = self.root_connection.get_client
         self.rssh_transport = self.root_connection.get_transport
@@ -1521,22 +1696,233 @@ class CephNode(object):
             )
         )
 
-        self.rssh().exec_command("dmesg")
-        self.rssh_transport().set_keepalive(15)
-        _, stdout, stderr = self.rssh().exec_command(
-            f"echo '{self.username}:{self.password}' | chpasswd"
+        _is_onecloud_bootstrap = (
+            hasattr(self, "vm_node")
+            and getattr(self.vm_node, "node_type", None) == "onecloud"
+            and getattr(self, "bootstrap_key_path", "")
+            and self.private_key_path
         )
-        logger.info(stdout.readlines())
-        _, stdout, stderr = self.rssh().exec_command(
-            f"echo 'root:{self.root_passwd}' | chpasswd"
+
+        if _is_onecloud_bootstrap:
+            pass  # skip initial Paramiko connect; subprocess handles it below
+        else:
+            self.rssh().exec_command("dmesg")
+            self.rssh_transport().set_keepalive(15)
+
+        # OneCloud: bootstrap via system SSH (OpenSSH supports CISO certificates,
+        # Paramiko does not). Inject regular key into root+cephuser, then reconnect
+        # with Paramiko using the regular key.
+        if _is_onecloud_bootstrap:
+            boot_key = self.bootstrap_key_path
+            key_path = self.private_key_path
+            ssh_user = self.root_username
+
+            key_line = None
+            for path in (key_path + ".pub", key_path + "-cert.pub"):
+                if not path or not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, "r") as f:
+                        key_line = f.read().strip()
+                    if key_line:
+                        logger.info("OneCloud: using %s for authorized_keys", path)
+                        break
+                except Exception as e:
+                    logger.debug("OneCloud: could not read %s: %s", path, e)
+            if not key_line:
+                raise AssertionError(f"OneCloud: need pub key at {key_path}.pub")
+
+            logger.info(
+                "OneCloud: bootstrap via system SSH on %s as %s",
+                self.ip_address,
+                ssh_user,
+            )
+            ssh_base = [
+                "ssh",
+                "-i",
+                boot_key,
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                f"{ssh_user}@{self.ip_address}",
+            ]
+            key_b64 = base64.b64encode(key_line.encode()).decode()
+            setup_cmds = [
+                (
+                    "id cephuser >/dev/null 2>&1 || (sudo groupadd -f cephuser && "
+                    "sudo useradd -m -s /bin/bash -g cephuser cephuser)"
+                ),
+                "echo 'cephuser ALL=(ALL) NOPASSWD:ALL' "
+                "| sudo tee /etc/sudoers.d/cephuser",
+                "sudo chmod 440 /etc/sudoers.d/cephuser",
+                "sudo mkdir -p /home/cephuser/.ssh && "
+                "sudo chmod 700 /home/cephuser/.ssh",
+                f"echo '{key_b64}' | base64 -d "
+                "| sudo tee -a /home/cephuser/.ssh/authorized_keys",
+                "sudo chmod 600 /home/cephuser/.ssh/authorized_keys",
+                "sudo chown -R cephuser:cephuser /home/cephuser/.ssh",
+                "sudo mkdir -p /root/.ssh && sudo chmod 700 /root/.ssh",
+                f"echo '{key_b64}' | base64 -d "
+                "| sudo tee -a /root/.ssh/authorized_keys",
+                "sudo chmod 600 /root/.ssh/authorized_keys",
+                "sudo sed -i 's/^.*PermitRootLogin.*/PermitRootLogin prohibit-password/' "
+                "/etc/ssh/sshd_config.d/00-complianceascode-hardening.conf "
+                "2>/dev/null || true",
+                "sudo sed -i 's/^.*PermitRootLogin.*/PermitRootLogin prohibit-password/' "
+                "/etc/ssh/sshd_config 2>/dev/null || true",
+                "sudo systemctl restart sshd 2>/dev/null || "
+                "sudo systemctl restart ssh 2>/dev/null || true",
+                "sudo touch /ceph-qa-ready",
+            ]
+            ssh_env = None
+            askpass_file = None
+            boot_pwd = getattr(self, "bootstrap_key_password", "")
+            if boot_pwd:
+                import tempfile
+
+                askpass_file = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".sh", delete=False
+                )
+                askpass_file.write(f"#!/bin/sh\necho '{boot_pwd}'\n")
+                askpass_file.close()
+                os.chmod(askpass_file.name, 0o700)
+                ssh_env = os.environ.copy()
+                ssh_env["SSH_ASKPASS"] = askpass_file.name
+                ssh_env["SSH_ASKPASS_REQUIRE"] = "force"
+                ssh_env["DISPLAY"] = ":"
+
+            def _ssh_cmd(cmd, retries=1, retry_interval=15):
+                for attempt in range(retries):
+                    try:
+                        result = subprocess.run(
+                            ssh_base + [cmd],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            env=ssh_env,
+                        )
+                        if result.returncode == 0 or attempt == retries - 1:
+                            return result
+                        logger.warning(
+                            "OneCloud SSH cmd failed (attempt %d/%d): exit=%s err=%r",
+                            attempt + 1,
+                            retries,
+                            result.returncode,
+                            result.stderr[:100],
+                        )
+                    except subprocess.TimeoutExpired:
+                        if attempt == retries - 1:
+                            raise
+                        logger.warning(
+                            "OneCloud SSH timed out (attempt %d/%d), retrying in %ds",
+                            attempt + 1,
+                            retries,
+                            retry_interval,
+                        )
+                    sleep(retry_interval)
+                return result
+
+            try:
+                for i, cmd in enumerate(setup_cmds):
+                    result = _ssh_cmd(
+                        cmd, retries=20 if i == 0 else 1, retry_interval=15
+                    )
+                    logger.info(
+                        "OneCloud setup: cmd=%s exit=%s out=%r err=%r",
+                        cmd[:60],
+                        result.returncode,
+                        result.stdout[:200],
+                        result.stderr[:200],
+                    )
+            finally:
+                if askpass_file:
+                    try:
+                        os.unlink(askpass_file.name)
+                    except OSError:
+                        pass
+
+            logger.info(
+                "OneCloud: switching to Paramiko (root+cephuser) for %s",
+                self.ip_address,
+            )
+            self.root_connection.close()
+            self.connection.close()
+            self.root_username = "root"
+            self.root_passwd = ""
+            self.username = "cephuser"
+            self.password = ""
+            self.look_for_key = True
+            _key_pw = getattr(self, "private_key_password", None)
+            root_mgr = SSHConnectionManager(
+                self.ip_address,
+                "root",
+                "",
+                look_for_keys=True,
+                private_key_file_path=key_path,
+                private_key_password=_key_pw,
+            )
+            cephuser_mgr = SSHConnectionManager(
+                self.ip_address,
+                "cephuser",
+                "",
+                look_for_keys=True,
+                private_key_file_path=key_path,
+                private_key_password=_key_pw,
+            )
+            self.root_connection = root_mgr
+            self.connection = cephuser_mgr
+            self.rssh = root_mgr.get_client
+            self.rssh_transport = root_mgr.get_transport
+            self.ssh = cephuser_mgr.get_client
+            self.ssh_transport = cephuser_mgr.get_transport
+            for attempt in range(5):
+                try:
+                    self.rssh().exec_command("whoami")
+                    self.ssh().exec_command("whoami")
+                    logger.info(
+                        "OneCloud: root (rssh) + cephuser (ssh) ready for %s",
+                        self.ip_address,
+                    )
+                    break
+                except Exception as e:
+                    if attempt < 4:
+                        logger.warning(
+                            "OneCloud: connect attempt %s failed: %s, retrying in 3s",
+                            attempt + 1,
+                            e,
+                        )
+                        sleep(3)
+                    else:
+                        raise
+
+        sudo_prefix = "sudo " if self.username != "root" else ""
+        if self.password:
+            _, stdout, stderr = self.rssh().exec_command(
+                f"echo '{self.username}:{self.password}' | {sudo_prefix}chpasswd"
+            )
+            logger.info(stdout.readlines())
+        if self.root_passwd:
+            _, stdout, stderr = self.rssh().exec_command(
+                f"echo 'root:{self.root_passwd}' | {sudo_prefix}chpasswd"
+            )
+            logger.info(stdout.readlines())
+        # TCP keepalive (applies to both IPv4 and IPv6 on Linux)
+        self.rssh().exec_command(
+            f"echo 120 | {sudo_prefix}tee /proc/sys/net/ipv4/tcp_keepalive_time"
         )
-        logger.info(stdout.readlines())
-        self.rssh().exec_command("echo 120 > /proc/sys/net/ipv4/tcp_keepalive_time")
-        self.rssh().exec_command("echo 60 > /proc/sys/net/ipv4/tcp_keepalive_intvl")
-        self.rssh().exec_command("echo 20 > /proc/sys/net/ipv4/tcp_keepalive_probes")
+        self.rssh().exec_command(
+            f"echo 60 | {sudo_prefix}tee /proc/sys/net/ipv4/tcp_keepalive_intvl"
+        )
+        self.rssh().exec_command(
+            f"echo 20 | {sudo_prefix}tee /proc/sys/net/ipv4/tcp_keepalive_probes"
+        )
         self.exec_command(cmd="ls / ; uptime ; date")
         self.ssh_transport().set_keepalive(15)
-        if self.vm_node.node_type == "baremetal":
+        vm_node = getattr(self, "vm_node", None)
+        if vm_node and getattr(vm_node, "node_type", None) == "baremetal":
             out, err = self.exec_command(cmd="hostname -s")
         else:
             out, err = self.exec_command(cmd="hostname")
@@ -1548,7 +1934,10 @@ class CephNode(object):
             "hostname and shortname set to %s and %s", self.hostname, self.shortname
         )
         self.set_internal_ip()
-        self.exec_command(cmd="echo 'TMOUT=600' >> ~/.bashrc")
+        self.exec_command(
+            cmd="grep -q 'TMOUT' ~/.bashrc || echo '[[ -z \"${TMOUT+x}\" ]] && export TMOUT=600' >> ~/.bashrc",
+            check_ec=False,
+        )
         self.exec_command(cmd="[ -f /etc/redhat-release ]", check_ec=False)
 
         if self.exit_status == 0:
@@ -1612,7 +2001,12 @@ class CephNode(object):
             channel = ssh().get_transport().open_session(timeout=timeout)
             channel.settimeout(timeout)
 
-            logger.info("Execute %s on %s", cmd, self.ip_address)
+            logger.info(
+                "Execute %s on %s [%s]",
+                cmd,
+                self.hostname,
+                self.ip_address,
+            )
             _exec_start_time = datetime.datetime.now()
             channel.exec_command(cmd)
 
@@ -1643,10 +2037,12 @@ class CephNode(object):
 
             _time = (datetime.datetime.now() - _exec_start_time).total_seconds()
             logger.info(
-                "Execution of %s on %s took %s seconds",
+                "Execution of %s took %s seconds on %s by user %s [%s]",
                 cmd,
-                self.ip_address,
                 str(_time),
+                self.hostname,
+                channel.get_transport().get_username(),
+                self.ip_address,
             )
 
             # Check for data residues in the channel streams. This is required for the following reasons
@@ -1730,14 +2126,14 @@ class CephNode(object):
         if kw.get("long_running", False):
             if kw.get("check_ec", False) and _exit != 0:
                 raise CommandFailed(
-                    f"{cmd} returned {_err} and code {_exit} on {self.ip_address}"
+                    f"{cmd} returned {_err} and code {_exit} on {self.hostname} [{self.ip_address}]"
                 )
 
             return _exit
 
         if kw.get("check_ec", True) and _exit != 0:
             raise CommandFailed(
-                f"{cmd} returned {_err} and code {_exit} on {self.ip_address}"
+                f"{cmd} returned {_err} and code {_exit} on {self.hostname} [{self.ip_address}]"
             )
 
         return _out, _err
@@ -1778,7 +2174,7 @@ class CephNode(object):
         if d.get("ssh_transport"):
             del d["ssh_transport"]
 
-        if d.get("ssh_transport"):
+        if d.get("root_connection"):
             del d["root_connection"]
 
         if d.get("connection"):
@@ -1788,12 +2184,14 @@ class CephNode(object):
 
     def __setstate__(self, pickle_dict):
         self.__dict__.update(pickle_dict)
+        key_pw = getattr(self, "private_key_password", None)
         self.root_connection = SSHConnectionManager(
             self.ip_address,
             "root",
             self.root_passwd,
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
+            private_key_password=key_pw,
         )
         self.connection = SSHConnectionManager(
             self.ip_address,
@@ -1801,6 +2199,7 @@ class CephNode(object):
             self.password,
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
+            private_key_password=key_pw,
         )
         self.rssh = self.root_connection.get_client
         self.ssh = self.connection.get_client

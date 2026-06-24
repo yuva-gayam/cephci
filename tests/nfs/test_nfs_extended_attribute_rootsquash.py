@@ -71,6 +71,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Change the permission of mount dir from Linux client
@@ -122,6 +124,7 @@ def run(ceph_cluster, **kw):
 
         # Fetch the extended attribute of the file
         out = getfattr(client=clients[0], file_path=f"{nfs_mount1}/{filename}")
+        return 0
 
     except Exception as e:
         log.error(f"Failed to validate export rootsquash: {e}")
@@ -137,6 +140,7 @@ def run(ceph_cluster, **kw):
             )
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients[0], nfs_mount1, nfs_name, nfs_export1)
+        cleanup_cluster(
+            clients[0], nfs_mount1, nfs_name, nfs_export1, nfs_nodes=nfs_node
+        )
         log.info("Cleaning up successfull")
-    return 0

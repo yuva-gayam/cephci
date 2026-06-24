@@ -5,6 +5,20 @@ import requests
 from utility.gklm_client.auth import GklmAuth
 
 
+def _coerce_managed_object_list(data: Any) -> List[Dict[str, Any]]:
+    """Normalize list-objects JSON across SKLM / GKLM 5.x response shapes."""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for key in ("managedObject", "managedObjects", "object", "objects"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+    return []
+
+
 class GklmObjects:
     def __init__(self, auth: GklmAuth):
         self.auth = auth
@@ -33,8 +47,7 @@ class GklmObjects:
             verify=self.verify,
         )
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("managedObject", [])
+            return _coerce_managed_object_list(resp.json())
 
         # Handle error response
         content_type = resp.headers.get("Content-Type", "")
@@ -50,19 +63,29 @@ class GklmObjects:
         url = f"{self.base_url}/objects/{object_id}"
         resp = requests.delete(url, headers=self.auth._headers(), verify=self.verify)
 
-        if resp.status_code == 200:
+        # Success status codes for DELETE operations
+        if resp.status_code in [200, 201, 202, 204]:
             if resp.text:
                 try:
                     return resp.json()
                 except ValueError:
+                    # DELETE operations often return empty responses
                     return None
             return None
 
-        # Error path
+        # Handle 404 as success for delete operations (already deleted)
+        if resp.status_code == 404:
+            return None  # Object already deleted or doesn't exist
+
+        # Error path for other status codes
         content_type = resp.headers.get("Content-Type", "")
-        if "application/json" in content_type:
-            body = resp.json()
-            err = body.get("error") or body.get("message", resp.text)
+        if "application/json" in content_type and resp.text:
+            try:
+                body = resp.json()
+                err = body.get("error") or body.get("message", resp.text)
+            except (ValueError, requests.exceptions.JSONDecodeError):
+                # If JSON parsing fails, use the raw text
+                err = resp.text or f"HTTP {resp.status_code}"
         else:
             err = resp.text or f"HTTP {resp.status_code}"
 

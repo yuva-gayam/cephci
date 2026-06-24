@@ -30,7 +30,6 @@ tests:
                 release: z0
                 mon-ip: node1
                 orphan-initial-daemons: true
-                skip-monitoring-stack: true
           - config:
               command: add_hosts
               service: host
@@ -95,7 +94,10 @@ tests:
       config:
         command: add
         id: client.1                      # client Id (<type>.<Id>)
-        node: node7                       # client node
+        nodes:                            # client node
+          - node7:
+              release: 7.1
+              tag: z0
         install_packages:
           - ceph-common
         copy_admin_keyring: true          # Copy admin keyring to node
@@ -135,7 +137,7 @@ tests:
       name: Upgrade cluster to latest 7.x ceph version
       desc: Upgrade cluster to latest version
       module: test_upgrade_warn.py
-      polarion-id: CEPH-83574934,CEPH-83573790
+      polarion-id: CEPH-83574934
       abort-on-fail: true
       config:
         command: start

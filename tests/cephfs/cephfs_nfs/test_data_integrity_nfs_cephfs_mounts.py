@@ -69,8 +69,10 @@ def run(ceph_cluster, **kw):
         if not fs_details:
             fs_util.create_fs(client1, default_fs)
         client1.exec_command(sudo=True, cmd="ceph mgr module enable nfs")
-        client1.exec_command(
-            sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+        fs_util.create_nfs(
+            client1,
+            nfs_cluster_name=nfs_name,
+            nfs_server_name=nfs_server,
         )
         if wait_for_process(client=client1, process_name=nfs_name, ispresent=True):
             log.info("ceph nfs cluster created successfully")
@@ -103,14 +105,19 @@ def run(ceph_cluster, **kw):
             sudo=True, cmd=f"ceph nfs export get {nfs_name} {nfs_export_name}"
         )
         output = json.loads(out)
+        log.debug("NFS Export Get: {}".format(output))
         mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
         nfs_mounting_dir = f"/mnt/cephfs_nfs{mounting_dir}_1/"
         client1.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mounting_dir}")
-        command = f"mount -t nfs -o port=2049 {nfs_server}:{nfs_export_name} {nfs_mounting_dir}"
-        output, err = client1.exec_command(sudo=True, cmd=command, check_ec=False)
+        rc = fs_util.cephfs_nfs_mount(
+            client1, nfs_server, nfs_export_name, nfs_mounting_dir
+        )
+        if not rc:
+            log.error("cephfs nfs export mount failed")
+            return 1
         kernel_mounting_dir_1 = f"/mnt/cephfs_kernel{mounting_dir}_1/"
         mon_node_ips = fs_util.get_mon_node_ips()
         fs_util.kernel_mount(

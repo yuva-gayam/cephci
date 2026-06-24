@@ -106,6 +106,7 @@ class FscryptUtils(object):
             return 0
         except BaseException as ex:
             if "command not found" in str(ex):
+                log.error(ex)
                 return 1
 
     def setup(self, client, mnt_pt, validate=True):
@@ -154,7 +155,7 @@ class FscryptUtils(object):
             )
             log.info(out)
         except BaseException as ex:
-            if "already setup for use" in str(ex):
+            if "already setup" in str(ex):
                 log.info("FScrypt setup already exists for %s", mnt_pt)
             else:
                 log.error("Unexpected error during fscrypt setup - %s", str(ex))
@@ -311,8 +312,11 @@ class FscryptUtils(object):
                 not_successful = 0
             except BaseException as ex:
                 log.info(ex)
+                exp_str_1 = "is already locked"
                 exp_str_2 = "Directory was incompletely locked because some files are"
-                if exp_str_2 in str(ex):
+                if exp_str_1 in str(ex):
+                    not_successful = 0
+                elif exp_str_2 in str(ex):
                     try:
                         cmd_1 = f'find "{encrypt_path}" -print0 | xargs -0 fuser -k'
                         out, _ = client.exec_command(

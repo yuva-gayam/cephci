@@ -1,16 +1,14 @@
 import concurrent.futures
-import datetime
 import json
 import random
 import string
 import time
 import traceback
-from threading import Thread
 
 from ceph.ceph import CommandFailed
-from ceph.parallel import parallel
 from tests.cephfs.cephfs_utilsV1 import FsUtils
 from tests.cephfs.cephfs_volume_management import wait_for_process
+from tests.cephfs.lib.cephfs_common_lib import CephFSCommonUtils
 from utility.log import Log
 
 log = Log(__name__)
@@ -31,8 +29,10 @@ def test_setup(fs_util, ceph_cluster, client):
     nfs_server = nfs_servers[0].node.hostname
     nfs_name = "cephfs-nfs"
 
-    client.exec_command(
-        sudo=True, cmd=f"ceph nfs cluster create {nfs_name} {nfs_server}"
+    fs_util.create_nfs(
+        client,
+        nfs_cluster_name=nfs_name,
+        nfs_server_name=nfs_server,
     )
     if wait_for_process(client=client, process_name=nfs_name, ispresent=True):
         log.info("ceph nfs cluster created successfully")
@@ -93,7 +93,7 @@ def clone_test_prechecks(client):
     return 0
 
 
-def clone_test_io(default_fs, client1, run_time, fs_util, sv_list, nfs_params):
+def clone_test_io(default_fs, client1, fs_util, sv_list, nfs_params):
     """
     This method is to run IO - dd,smallfile and crefi, before clone test, on test subvolumes
     """
@@ -102,40 +102,9 @@ def clone_test_io(default_fs, client1, run_time, fs_util, sv_list, nfs_params):
             random.choice(string.ascii_lowercase + string.digits)
             for _ in list(range(10))
         )
-        log.info("Run IO on subvolumes")
-        dd_params = {
-            "file_name": "dd_test_file",
-            "input_type": "random",
-            "bs": "1M",
-            "count": 10,
-        }
-        smallfile_params = {
-            "testdir_prefix": "smallfile_io_dir",
-            "threads": 2,
-            "file-size": 10240,
-            "files": 10,
-        }
-        crefi_params = {
-            "testdir_prefix": "crefi_io_dir",
-            "files": 10,
-            "max": "100k",
-            "min": "10k",
-            "type": "tar",
-            "breadth": 3,
-            "depth": 3,
-            "threads": 2,
-        }
-        io_run_time_mins = run_time
-        io_args = {
-            "run_time": io_run_time_mins,
-            "dd_params": dd_params,
-            "smallfile_params": smallfile_params,
-            "crefi_params": crefi_params,
-        }
-
-        io_tools = ["dd", "smallfile", "crefi"]
+        log.info("Add dataset on subvolumes")
         mnt_type_list = ["kernel", "fuse", "nfs"]
-        write_procs = []
+        mnt_list = []
         for sv in sv_list:
             cmd = f"ceph fs subvolume getpath {default_fs} {sv['subvol_name']}"
             if sv.get("group_name"):
@@ -158,14 +127,29 @@ def clone_test_io(default_fs, client1, run_time, fs_util, sv_list, nfs_params):
             }
             mnt_type = random.choice(mnt_type_list)
             mounting_dir, _ = fs_util.mount_ceph(mnt_type, mount_params)
-            p = Thread(
-                target=fs_util.run_ios_V1,
-                args=(client1, mounting_dir, io_tools),
-                kwargs=io_args,
+            suffix = "".join(
+                [
+                    random.choice(string.ascii_lowercase + string.digits)
+                    for _ in range(4)
+                ]
             )
-            p.start()
-            write_procs.append(p)
-        return write_procs
+            io_path = f"{mounting_dir}/smallfile_io_dir_{suffix}"
+            client1.exec_command(sudo=True, cmd=f"mkdir {io_path}")
+            cmd = (
+                f"python3 /home/cephuser/smallfile/smallfile_cli.py "
+                f"--operation create --threads 2 "
+                f"--file-size 1024 --files 1000 "
+                f"--top {io_path}"
+            )
+            client1.exec_command(sudo=True, cmd=cmd, timeout=600)
+            file_path = f"{mounting_dir}/dd_test_file_{suffix}"
+            client1.exec_command(
+                sudo=True,
+                cmd=f"dd if=/dev/random of={file_path} bs=1M count=1000",
+                timeout=3600,
+            )
+            mnt_list.append(mounting_dir)
+        return mnt_list
     except Exception as ex:
         log.info(ex)
         return 1
@@ -193,6 +177,40 @@ def set_verify_clone_config(client, concurrent_limit, set_config=True):
         )
         return 1
     return 0
+
+
+def create_clone(
+    client,
+    vol_name,
+    subvol_name,
+    snap_name,
+    target_subvol_name,
+    timeout=600,
+    **kwargs,
+):
+    """
+    Creates clone based on the arguments vol_name,subvol_name,snap_name,target_subvol_name
+    Returns:
+        Returns the cmd_out and cmd_rc for Create cmd
+    """
+    clone_cmd = f"ceph fs subvolume snapshot clone {vol_name} {subvol_name} {snap_name} {target_subvol_name}"
+    if kwargs.get("group_name"):
+        clone_cmd += f" --group_name {kwargs.get('group_name')}"
+    if kwargs.get("target_group_name"):
+        clone_cmd += f" --target_group_name {kwargs.get('target_group_name')}"
+    if kwargs.get("pool_layout"):
+        clone_cmd += f" --pool_layout {kwargs.get('pool_layout')}"
+    try:
+        client.exec_command(
+            sudo=True,
+            cmd=clone_cmd,
+            check_ec=kwargs.get("check_ec", True),
+            timeout=timeout,
+        )
+    except Exception as ex:
+        log.info(ex)
+        return 1, ex
+    return 0, ""
 
 
 def get_clone_status(client, fs_util, clone):
@@ -249,16 +267,13 @@ def max_concurrent_clone_test(client1, fs_util, concurrent_limit, default_fs, sv
 
     log.info(f"clone list : {clone_list}")
     hit_clone_err = 0
-    try:
-        with parallel() as p:
-            for clone in clone_list:
-                p.spawn(fs_util.create_clone, client1, **clone, validate=False)
-    except Exception as ex:
-        log.info(ex)
-        if exp_str in str(ex):
+    for clone in clone_list:
+        _, err_msg = create_clone(client1, **clone)
+        if exp_str in str(err_msg):
             hit_clone_err = 1
             log.info(
-                f"Expected clone error message obtained during max+1 clone create:{ex}"
+                "Expected clone error message obtained during max+1 clone create: %s",
+                err_msg,
             )
     if hit_clone_err == 0:
         clone_cnt = int(concurrent_limit) + 1
@@ -280,6 +295,7 @@ def max_concurrent_clone_test(client1, fs_util, concurrent_limit, default_fs, sv
             ]
         status_list = [f.result() for f in futures]
         log.info(f"status_list:{status_list}")
+        time.sleep(5)
         if status_list.count("in-progress") > int(concurrent_limit):
             log.error("Clones more than concurrency limit are in-progress")
             return 1
@@ -337,11 +353,19 @@ def run(ceph_cluster, **kw):
     2. ceph fs subvolume rm <vol_name> <subvol_name> [--group_name <subvol_group_name>]
     3. ceph fs subvolumegroup rm <vol_name> <group_name>
     """
+    setup_params = None
+    mnt_list = None
+    snap_list = []
+    sv_list = []
+    rmclone_list = []
+    default_fs = None
+    test_status = 0
     try:
         fs_util = FsUtils(ceph_cluster)
         config = kw.get("config")
         clients = ceph_cluster.get_ceph_objects("client")
         build = config.get("build", config.get("rhbuild"))
+        cephfs_common_utils = CephFSCommonUtils(ceph_cluster)
         fs_util.prepare_clients(clients, build)
         fs_util.auth_list(clients)
         log.info("checking Pre-requisites")
@@ -351,6 +375,9 @@ def run(ceph_cluster, **kw):
             )
             return 1
         client1 = clients[0]
+        log.info("Check ceph Health before starting the test")
+        if cephfs_common_utils.wait_for_healthy_ceph(client1):
+            raise Exception("Cluster health is not OK before starting the test")
         log.info("Verify the pre-requisites for Clone_no_wait_if_max_concurrent test")
         if clone_test_prechecks(client1) == 1:
             return 1
@@ -368,15 +395,7 @@ def run(ceph_cluster, **kw):
             "nfs_export_name": setup_params["nfs_export_name"],
         }
         log.info("Start IO on test subvolumes")
-        io_run_time_mins = 2
-        write_procs = clone_test_io(
-            default_fs, client1, io_run_time_mins, fs_util, sv_list, nfs_params
-        )
-        if write_procs == 1:
-            log.error("IO could not be started")
-            return 1
-
-        time.sleep(10)
+        mnt_list = clone_test_io(default_fs, client1, fs_util, sv_list, nfs_params)
         log.info("Create Snapshot on subvolumes")
         snap_list = []
         for sv in sv_list:
@@ -435,6 +454,8 @@ def run(ceph_cluster, **kw):
         return 1
 
     finally:
+        wait_time_secs = 300
+        test_fail = 0
         log.info("Setting back the max concurrent clones to default value 4")
         client1.exec_command(
             sudo=True, cmd="ceph config set mgr mgr/volumes/max_concurrent_clones 4"
@@ -443,23 +464,11 @@ def run(ceph_cluster, **kw):
         clients[0].exec_command(
             sudo=True, cmd="ceph config set mgr mgr/volumes/snapshot_clone_no_wait true"
         )
-        for p in write_procs:
-            if p.is_alive():
-                proc_stop = 0
-                io_run_time_secs = io_run_time_mins * 4 * 60
-                log.info("IO is running after clone test")
-                end_time = datetime.datetime.now() + datetime.timedelta(
-                    seconds=io_run_time_secs
+        if isinstance(mnt_list, list):
+            for mnt_path in mnt_list:
+                client1.exec_command(
+                    sudo=True, cmd=f"umount {mnt_path}", check_ec=False
                 )
-                while (datetime.datetime.now() < end_time) and (proc_stop == 0):
-                    if p.is_alive():
-                        time.sleep(10)
-                    else:
-                        proc_stop = 1
-                if proc_stop == 1:
-                    log.info("IO completed")
-                elif proc_stop == 0:
-                    log.error("IO has NOT completed")
         if test_status == 1:
             for clonevolume in rmclone_list:
                 fs_util.remove_subvolume(
@@ -472,15 +481,27 @@ def run(ceph_cluster, **kw):
 
         log.info("Clean Up in progess")
 
-        client1.exec_command(
-            sudo=True,
-            cmd=f"ceph nfs cluster delete {setup_params['nfs_name']}",
-            check_ec=False,
-        )
+        if setup_params:
+            client1.exec_command(
+                sudo=True,
+                cmd=f"ceph nfs cluster delete {setup_params['nfs_name']}",
+                check_ec=False,
+            )
         for sv_snap in snap_list:
             fs_util.remove_snapshot(client1, **sv_snap, validate=False, check_ec=False)
         for sv in sv_list:
             fs_util.remove_subvolume(client1, **sv, validate=False, check_ec=False)
-        fs_util.remove_subvolumegroup(
-            client1, default_fs, "subvolgroup_1", validate=True
-        )
+        if default_fs:
+            fs_util.remove_subvolumegroup(
+                client1, default_fs, "subvolgroup_1", validate=True
+            )
+        if cephfs_common_utils.wait_for_healthy_ceph(client1, wait_time_secs):
+            test_fail = 1
+        if default_fs:
+            fs_util.remove_fs(client1, default_fs)
+        if test_fail == 1:
+            log.error(
+                "Cluster health is not OK even after waiting for %s secs ",
+                wait_time_secs,
+            )
+            return 1

@@ -1,3 +1,4 @@
+import base64
 import datetime
 import getpass
 import json
@@ -5,6 +6,7 @@ import os
 import random
 import re
 import smtplib
+import subprocess
 import time
 import traceback
 from copy import deepcopy
@@ -12,8 +14,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from ipaddress import ip_address
 from string import ascii_uppercase, digits
-from typing import Dict, Optional, Tuple
-from urllib import request
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 import yaml
@@ -24,7 +25,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja_markdown import MarkdownExtension
+from packaging.version import InvalidVersion, Version
 
+from cli.exceptions import ConfigError
 from utility.log import Log
 
 log = Log(__name__)
@@ -51,6 +54,9 @@ magna_server = "http://magna002.ceph.redhat.com"
 magna_url = f"{magna_server}/cephci-jenkins/"
 magna_rhcs_artifacts = f"{magna_server}/cephci-jenkins/latest-rhceph-container-info/"
 KAFKA_HOME = "/usr/local/kafka"
+MANIFEST_URL = (
+    "https://raw.githubusercontent.com/ibmstorage/qe-ceph-manifest/refs/heads/main/"
+)
 
 
 class TestSetupFailure(Exception):
@@ -989,6 +995,52 @@ def yaml_to_dict(file_name):
     return content
 
 
+# -----------------------------------------------------------------------------
+# Custom config helpers (--custom-config key=value)
+# Used by run.py and any caller that needs to resolve options from CLI custom_config.
+# -----------------------------------------------------------------------------
+
+
+def parse_custom_config_list(custom_config):
+    """
+    Parse a list of 'key=value' strings (from --custom-config) into a dict.
+
+    Args:
+        custom_config: List of strings like ["use_ipv6=true", "k=v"].
+
+    Returns:
+        Dict of key -> value. Empty dict if custom_config is None or empty.
+    """
+    if not custom_config:
+        return {}
+    return dict(item.split("=", 1) for item in custom_config if "=" in item)
+
+
+def resolve_use_ipv6(custom_config, cloud_type=None, osp_cred=None):
+    """
+    Resolve whether to use IPv6 from custom_config and optionally from infra credentials.
+
+    Uses --custom-config use_ipv6=true (or 1/yes). Works for any infrastructure;
+    custom_config overrides credentials when both are present.
+
+    Args:
+        custom_config: List of key=value strings from CLI (--custom-config).
+        cloud_type: Optional; e.g. "openstack". If "openstack", cred use_ipv6 is used as base.
+        osp_cred: Optional; global creds dict. For openstack, openstack-credentials.use_ipv6 is read.
+
+    Returns:
+        bool: True if IPv6 should be used, else False.
+    """
+    use_ipv6 = False
+    if cloud_type == "openstack" and osp_cred:
+        os_cred = osp_cred.get("globals", {}).get("openstack-credentials", {})
+        use_ipv6 = os_cred.get("use_ipv6", False)
+    overrides = parse_custom_config_list(custom_config)
+    if overrides.get("use_ipv6", "").lower() in ("true", "1", "yes"):
+        use_ipv6 = True
+    return use_ipv6
+
+
 def custom_ceph_config(suite_config, custom_config, custom_config_file):
     """
     Combines and returns custom configuration overrides for ceph.
@@ -1075,7 +1127,7 @@ def email_results(test_result):
     run_status = get_run_status(results_list)
     msg["Subject"] = "[{run_status}]  Suite:{suite}  Build:{compose}  ID:{id}".format(
         suite=results_list[0]["suite-name"],
-        compose=results_list[0]["compose-id"],
+        compose=results_list[0]["ceph-version"],
         run_status=run_status,
         id=run_id,
     )
@@ -1087,7 +1139,7 @@ def email_results(test_result):
 
     props_content = f"""
     run_status=\"{run_status}\"
-    compose=\"{results_list[0]['compose-id']}\"
+    compose=\"{results_list[0]['ceph-version']}\"
     suite=\"{results_list[0]['suite-name']}\"
     """
 
@@ -1353,26 +1405,57 @@ def generate_node_name(cluster_name, instance_name, run_id, node, role):
     return node_name
 
 
-def get_cephqe_ca() -> Optional[Tuple]:
-    """Retrieve CephCI QE CA certificate and key."""
-    base_uri = (
-        get_cephci_config()
-        .get("root-ca-location", "http://magna002.ceph.redhat.com/cephci-jenkins")
-        .rstrip("/")
-    )
-    ca_cert = None
-    ca_key = None
+def get_cephqe_ca() -> Tuple[Optional[Any], Optional[Any]]:
+    """Retrieve CephCI QE CA certificate and key from the cloned configs repo."""
+    try:
+        repo_dict = get_cephci_config()["repos"]["rgw_configs"]
+    except KeyError:
+        log.debug("Repo details are missing for rgw_configs in ~/.cephci.yaml")
+        return None, None
+
+    path_to_clone = os.path.expanduser(repo_dict["dest"])
+    repo_url = repo_dict["git_url"]
+    repo_dir_name = repo_url.rstrip("/").split("/")[-1]
+    if repo_dir_name.endswith(".git"):
+        repo_dir_name = repo_dir_name[:-4]
+    final_repo_path = os.path.join(path_to_clone, repo_dir_name)
 
     try:
-        with request.urlopen(url=f"{base_uri}/.cephqe-ca.pem") as fd:
-            ca_cert = x509.load_pem_x509_certificate(fd.read())
+        os.makedirs(path_to_clone, exist_ok=True)
+        if not os.path.exists(final_repo_path):
+            clone_url = repo_url
+            oauth_token = repo_dict.get("oauth_token")
+            if oauth_token:
+                clone_url = clone_url.replace(
+                    "https://", f"https://oauth2:{oauth_token}@"
+                )
+            subprocess.run(
+                ["git", "clone", "--depth", "1", clone_url, final_repo_path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+    except BaseException as be:
+        log.debug(be)
+        return None, None
 
-        with request.urlopen(url=f"{base_uri}/.cephqe-ca.key") as fd:
-            ca_key = serialization.load_pem_private_key(fd.read(), None)
+    repo_ca_cert_path = os.path.join(final_repo_path, "rgw", "certs", ".ca.crt")
+    repo_ca_key_path = os.path.join(final_repo_path, "rgw", "certs", ".ca.key")
+
+    try:
+        with open(repo_ca_cert_path, "rb") as fd:
+            cert_pem = base64.b64decode(fd.read().strip())
+            ca_cert = x509.load_pem_x509_certificate(cert_pem)
+
+        with open(repo_ca_key_path, "rb") as fd:
+            key_pem = base64.b64decode(fd.read().strip())
+            ca_key = serialization.load_pem_private_key(key_pem, None)
+
+        return ca_key, ca_cert
     except BaseException as be:
         log.debug(be)
 
-    return ca_key, ca_cert
+    return None, None
 
 
 def generate_self_signed_certificate(subject: Dict) -> Tuple:
@@ -1434,19 +1517,57 @@ def generate_self_signed_certificate(subject: Dict) -> Tuple:
         (
             ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
             if ca_cert
-            else None
+            else ""
         ),
     )
+
+
+def get_build_details(product: str, release: str, build_type: str) -> dict[str, Any]:
+    """Retrieves the build details based on the provided input.
+
+    The build details are stored in qe-ceph-manifest repository. It
+    contains test artifact information for various supported releases
+    and ceph version.
+
+    Args:
+        product:    The type of Ceph version required. Supported types are
+                    ceph, redhat, ibm
+        release:    The product version that needs to queried. Ex. 9.0
+        platform:   The test platform operating systems. Ex. rhel-9
+        build_type: The section or build details that needs to be queried.
+
+    Returns:
+        A dict holding the build details.
+    """
+    try:
+        _url = MANIFEST_URL
+        if product == "upstream" or product == "community" or product == "ceph":
+            _url += "ceph/"
+        elif product == "redhat":
+            _url += "redhat/"
+        else:
+            _url += "ibm/"
+
+        _url += f"{release}"
+
+        release_details = requests.get(_url, verify=False)
+        build_details = yaml.safe_load(release_details.text)
+
+        return build_details[build_type]
+
+    except requests.RequestException as e:
+        raise RuntimeError("Resource not found. %s threw \n%s", _url, e)
+    except yaml.YAMLError as e:
+        raise RuntimeError("Unexpected error encountered during reterival. \n%s", e)
 
 
 def fetch_build_artifacts(
     build, ceph_version, platform, upstream_build=None, ibm_build=False
 ):
-    """Retrieves build details from magna002.ceph.redhat.com.
+    """Retrieves build details from qe-ceph-manifest.
 
     if "{build}" is "upstream"  "{build}.yaml" would be file name
-    else its "RHCEPH-{ceph_version}.yaml" which is
-    searched in magna002 Ceph artifacts location.
+    else its redhat/{ceph_version}.yaml" from the repository.
 
     Args:
         ceph_version: RHCS version
@@ -1454,45 +1575,42 @@ def fetch_build_artifacts(
         platform: OS distribution name with major Version(ex., rhel-8)
         upstream_build: upstream build(ex., pacific/quincy)
         ibm_build: flag to decide if IBM artifact needs to be fetched
+
     Returns:
         base_url, container_registry, image-name, image-tag
     """
-    try:
-        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
-        filename = f"RHCEPH-{ceph_version}.yaml"
-        if ibm_build:
-            filename = f"IBMCEPH-{ceph_version}.yaml"
-        if build == "upstream":
-            version = str(upstream_build).upper() if upstream_build else "MAIN"
-            filename = f"UPSTREAM-{version}.yaml"
+    log.warning(
+        "[Deprecated] This method is deprecated in favor of CephTestManifest object."
+    )
 
-        url = f"{recipe_url}{filename}"
-        data = requests.get(url, verify=False)
-        yml_data = yaml.safe_load(data.text)
+    datacenter = get_cephci_config().get("datacenter", "default")
+    if datacenter == "redhat":
+        datacenter = "default"
 
-        build_info = yml_data["latest"] if build == "upstream" else yml_data[build]
+    product = "redhat"
+    if ibm_build:
+        product = "ibm"
 
-        container_image = build_info["repository"]
+    if build == "upstream":
+        product = "ceph"
+        build = "nightly"
+        ceph_version = "main"
 
-        registry, image_name = container_image.split(":")[0].split("/", 1)
-        image_tag = container_image.split(":")[-1]
-        base_url = build_info["composes"][platform]
+    if upstream_build:
+        product = "ceph"
 
-        # Todo: Extend the support for RH builds if RH staging repos
-        # are no longer maintained in future
-        if ibm_build:
-            _release = str(ceph_version)[0]
-            ibm_cdn_repo = (
-                f"https://public.dhe.ibm.com/ibmdl/export/pub/"
-                f"storage/ceph/ibm-storage-ceph-{_release}-{platform}.repo"
-            )
-            repo_data = requests.get(base_url)
-            if repo_data.status_code != 200:
-                base_url = ibm_cdn_repo
+    build_details: dict[str, Any] = get_build_details(product, ceph_version, build)
+    ceph_image: str = build_details["images"]["ceph-base"]
+    _dtr: str = ceph_image.split("/", 1)[0]
+    _tag: str = ceph_image.split(":")[-1]
+    _image_path: str = ceph_image.split("/", 1)[-1].split(":")[0]
 
-        return base_url, registry, image_name, image_tag
-    except Exception as e:
-        raise TestSetupFailure(f"Could not fetch build details of : {e}")
+    return (
+        build_details["repositories"][datacenter][platform],
+        _dtr,
+        _image_path,
+        _tag,
+    )
 
 
 def fetch_image_manifest(
@@ -1512,60 +1630,27 @@ def fetch_image_manifest(
     Returns:
         Tuple: (build_info_dict, custom_images_dict)
     """
-    try:
-        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
+    log.warning(
+        "[Deprecated] This method is deprecated in favor of CephTestManifest object."
+    )
+    log.warning("[UnSupported]: platform is not used - %s", platform)
 
-        # Determine filename
-        if ibm_build:
-            filename = f"IBMCEPH-{ceph_version}.yaml"
-        elif build == "upstream":
-            version = str(upstream_build).upper() if upstream_build else "MAIN"
-            filename = f"UPSTREAM-{version}.yaml"
-        else:
-            filename = f"RHCEPH-{ceph_version}.yaml"
+    datacenter = get_cephci_config().get("datacenter", "default")
+    if datacenter == "redhat":
+        datacenter = "default"
 
-        url = f"{recipe_url}{filename}"
-        response = requests.get(url, verify=False)
-        if response.status_code != 200:
-            raise TestSetupFailure(
-                f"Failed to fetch: {url} [HTTP {response.status_code}]"
-            )
+    product = "redhat"
+    if ibm_build:
+        product = "ibm"
 
-        yml_data = yaml.safe_load(response.text)
+    if upstream_build:
+        product = "ceph"
 
-        # Fetch the dictionary for the specific build tag
-        build_info = yml_data.get(build)
-        if not build_info:
-            raise TestSetupFailure(f"Build tag '{build}' not found in {filename}")
+    build_details: dict[str, Any] = get_build_details(product, ceph_version, build)
+    _custom_images = deepcopy(build_details["images"])
+    del _custom_images["ceph-base"]
 
-        # For IBM builds, handle fallback logic for repo URL
-        if (
-            ibm_build
-            and "composes" in build_info
-            and platform in build_info["composes"]
-        ):
-            base_url = build_info["composes"][platform]
-            repo_data = requests.get(base_url)
-            if repo_data.status_code != 200:
-                release_major = str(ceph_version).split(".")[0]
-                build_info["composes"][platform] = (
-                    f"https://public.dhe.ibm.com/ibmdl/export/pub/"
-                    f"storage/ceph/ibm-storage-ceph-{release_major}-{platform}.repo"
-                )
-
-        # Extract all custom image URLs
-        custom_images = {}
-
-        custom_configs = build_info.get("custom-configs", {})
-        if isinstance(custom_configs, dict):
-            custom_images = deepcopy(custom_configs)
-        elif isinstance(custom_configs, list):
-            custom_images = dict(item.split("=") for item in custom_configs)
-
-        return build_info, custom_images
-
-    except Exception as e:
-        raise TestSetupFailure(f"Could not fetch build details: {e}")
+    return build_details, _custom_images
 
 
 def check_build_overrides(
@@ -1610,10 +1695,7 @@ def install_start_kafka(rgw_node, cloud_type):
 def install_kafka(rgw_node, cloud_type):
     """Install kafka package"""
     log.info("install kafka broker for bucket notification tests")
-    if cloud_type == "ibmc":
-        wget_cmd = "curl -o /tmp/kafka.tgz https://10.245.4.89/kafka_2.13-2.8.0.tgz"
-    else:
-        wget_cmd = "curl -o /tmp/kafka.tgz http://magna002.ceph.redhat.com/cephci-jenkins/kafka_2.13-2.8.0.tgz"
+    wget_cmd = "cp /home/cephuser/configs/rgw/kafka/kafka_2.13-2.8.0.tgz /tmp/kafka.tgz"
 
     tar_cmd = "tar -zxvf /tmp/kafka.tgz -C /usr/local/"
     rename_cmd = "mv /usr/local/kafka_2.13-2.8.0 /usr/local/kafka"
@@ -1699,13 +1781,7 @@ def configure_kafka_security(rgw_node, cloud_type):
 
 def setup_server_properties_security_configs(rgw_node, cloud_type):
     """append security types configuration into server.properties"""
-    if cloud_type == "ibmc":
-        curl_server_properties = "curl -o /tmp/kafka_server.properties https://10.245.4.89/kafka_server.properties"
-    else:
-        curl_server_properties = (
-            "curl -o /tmp/kafka_server.properties http://magna002.ceph.redhat.com/cephci-jenkins"
-            + "/kafka_server.properties"
-        )
+    curl_server_properties = "cp /home/cephuser/configs/rgw/kafka/kafka_server.properties /tmp/kafka_server.properties"
     rgw_node.exec_command(
         sudo=True,
         cmd=curl_server_properties,
@@ -1734,15 +1810,9 @@ def setup_server_properties_security_configs(rgw_node, cloud_type):
 
 def setup_keystore_certs(rgw_node, cloud_type):
     """download kafka_security.sh script, create certs and store them in keystore and truststore"""
-    if cloud_type == "ibmc":
-        curl_security_sh = (
-            "curl -o /tmp/kafka-security.sh https://10.245.4.89/kafka-security.sh"
-        )
-    else:
-        curl_security_sh = (
-            "curl -o /tmp/kafka-security.sh http://magna002.ceph.redhat.com/cephci-jenkins"
-            + "/kafka-security.sh"
-        )
+    curl_security_sh = (
+        "cp /home/cephuser/configs/rgw/kafka/kafka-security.sh /tmp/kafka-security.sh"
+    )
     rgw_node.exec_command(
         sudo=True,
         cmd=curl_security_sh,
@@ -1807,8 +1877,8 @@ def redeploy_rgw_service_for_kafka_security(rgw_node):
     out, _ = rgw_node.exec_command(sudo=True, cmd="cat /root/rgw_spec.yaml")
     log.info(out)
     rgw_node.exec_command(sudo=True, cmd="ceph orch apply -i /root/rgw_spec.yaml")
-    log.info("sleeping for 20 seconds")
-    time.sleep(20)
+    log.info("sleeping for 60 seconds")
+    time.sleep(60)
 
 
 def firewalld_add_public_ports_for_kafka(node):
@@ -1860,7 +1930,7 @@ def configure_kafka_cluster_with_security(ceph_cluster, cloud_type):
         log.info(f"installing kafka on node {rgw_node.ip_address}")
         rgw_node.exec_command(
             sudo=True,
-            cmd="yum install -y https://download.oracle.com/java/24/latest/jdk-24_linux-x64_bin.rpm",
+            cmd="yum install -y https://download.oracle.com/java/25/latest/jdk-25_linux-x64_bin.rpm",
         )
         install_kafka(rgw_node, cloud_type)
         rgw_node.exec_command(
@@ -1970,8 +2040,20 @@ def configure_kafka_cluster_with_security(ceph_cluster, cloud_type):
 
 def config_keystone_ldap(rgw_node, cloud_type):
     """Set the keystone config option on the cluster at startup"""
-    keystone_server = get_cephci_config()["keystone"][cloud_type].get("url")
-    ldap_url = get_cephci_config()["ldap"][cloud_type].get("url")
+    cephci_config = get_cephci_config()
+    keystone_cfg = cephci_config.get("keystone", {})
+    ldap_cfg = cephci_config.get("ldap", {})
+    # OneCloud may share keystone/ldap with openstack; fallback if onecloud not configured
+    lookup = cloud_type if cloud_type in keystone_cfg else "openstack"
+    keystone_server = keystone_cfg.get(lookup, keystone_cfg.get("openstack", {})).get(
+        "url"
+    )
+    ldap_url = ldap_cfg.get(lookup, ldap_cfg.get("openstack", {})).get("url")
+    if not keystone_server or not ldap_url:
+        raise ConfigError(
+            f"keystone/ldap config missing for cloud_type '{cloud_type}'. "
+            "Add keystone.{cloud} and ldap.{cloud} to cephci config."
+        )
 
     out = rgw_node.exec_command(sudo=True, cmd="ceph orch ls | grep rgw")
     rgw_name = out[0].split()[0]
@@ -2064,6 +2146,34 @@ def clone_the_repo(config, node, path_to_clone):
     log.info(f"repo_url: {repo_url}")
     git_clone_cmd = f"sudo git clone {repo_url} -b {branch}"
     node.exec_command(cmd=f"cd {path_to_clone} ; {git_clone_cmd}")
+
+
+def clone_configs_repo(node, repo_name=None):
+    """clone the repo on to test node.
+
+    Args:
+        node: ceph node
+        repo_name: fetches the git repo details based on this repo_name from .cephci.yaml
+
+    """
+    try:
+        repo_dict = get_cephci_config()["repos"][repo_name]
+    except KeyError:
+        raise Exception(
+            f"Repo details are missing for the key {repo_name} in ~/.cephci.yaml to clone it on the node."
+        )
+    repo_url = repo_dict["git_url"]
+    log.info(f"cloning the repo {repo_url}")
+    path_to_clone = repo_dict["dest"]
+    repo_name = repo_url.split("/")[-1][:-4]
+    final_repo_path = f"{path_to_clone}/{repo_name}"
+    oauth_token = repo_dict.get("oauth_token")
+    if oauth_token:
+        repo_url = repo_url.replace("https://", f"https://oauth2:{oauth_token}@")
+    git_clone_cmd = f"git clone --depth 1 {repo_url}"
+    node.exec_command(
+        cmd=f"test -e {final_repo_path} || (cd {path_to_clone} ; {git_clone_cmd})"
+    )
 
 
 def calculate_available_storage(node):
@@ -2273,6 +2383,8 @@ def run_fio(**fio_args):
             fio_file = f"{fio_args['output_dir']}/{fio_file}"
         cmd_args.update({"output-format": output_fmt, "output": fio_file})
 
+    if fio_args.get("output"):
+        cmd_args.update({"output": True})
     # Execute FIO
     exec_args = {
         "cmd": f"fio {config_dict_to_string(cmd_args)}",
@@ -2315,8 +2427,8 @@ def fetch_image_tag(rhbuild):
         raise TestSetupFailure(f"Could not fetch image tag : {e}")
 
 
-def fetch_build_version(rhbuild, version, ibm_build=None):
-    """Retrieves ceph-version from magna002 artifacts
+def fetch_build_version(rhbuild, version, upstream_build=None, ibm_build=None):
+    """Retrieves ceph-version from the manifest artifacts
     for a particular build
 
         Args:
@@ -2327,21 +2439,26 @@ def fetch_build_version(rhbuild, version, ibm_build=None):
             ceph-version from recipe file
             e.g. - 19.2.1-230 | 18.2.1-340
     """
-    try:
-        # Todo: add support for Upstream build if necessary
-        _ver = str(rhbuild).split("-")[0]
-        recipe_url = get_cephci_config().get("build-url", magna_rhcs_artifacts)
-        filename = f"RHCEPH-{_ver}.yaml"
-        if ibm_build:
-            filename = f"IBMCEPH-{_ver}.yaml"
+    log.warning(
+        "[Deprecated] This method is deprecated in favor of CephTestManifest object."
+    )
 
-        url = f"{recipe_url}{filename}"
-        data = requests.get(url, verify=False)
-        yml_data = yaml.safe_load(data.text)
+    datacenter: str = get_cephci_config().get("datacenter", "default")
+    if datacenter == "redhat":
+        datacenter = "default"
 
-        return yml_data[version]["ceph-version"]
-    except Exception as e:
-        raise TestSetupFailure(f"Could not fetch build details of : {e}")
+    product: str = "redhat"
+    if ibm_build:
+        product = "ibm"
+
+    if upstream_build:
+        product = "ceph"
+
+    ceph_version: str = rhbuild.split("-", 1)[0]
+
+    build_details: dict[str, Any] = get_build_details(product, ceph_version, version)
+
+    return build_details["version"]
 
 
 def validate_conf(conf):
@@ -2841,3 +2958,42 @@ def setup_gklm_prereq(ceph_cluster, cloud_type, custom_config):
     client_node.exec_command(sudo=True, cmd="ceph orch apply -i /root/rgw_spec.yaml")
     log.info("sleeping for 20 seconds")
     time.sleep(20)
+
+
+def extract_version(text: str) -> str:
+    """
+    Extract the first valid version token from a text string.
+
+    Args:
+        text: Command output string containing a version value.
+
+    Returns:
+        First token that parses as a packaging.version ``Version``; empty string if none.
+        e.g. 9.9.1.0 or 9.9.2.0
+    """
+    log.debug("Extracting version token from text: %s", text)
+
+    for token in text.split():
+        try:
+            Version(token)
+            _msg = f"Extracted version token: {token}"
+            log.debug(_msg)
+            return token
+        except InvalidVersion:
+            continue
+    log.warning("No valid version token found in text: %s", text)
+    return ""
+
+
+def extract_ceph_version(text: str) -> str:
+    """
+    Extract 'ceph' version from a text string.
+    Args:
+        text: Command output string containing a version value.
+
+    Returns:
+        19.2.1 or 20.2.1
+    """
+    match = re.search(r"\d+\.\d+\.\d+", text)
+
+    return match.group() if match else ""

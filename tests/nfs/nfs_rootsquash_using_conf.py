@@ -75,6 +75,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs_name,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create export
@@ -128,7 +130,7 @@ def run(ceph_cluster, **kw):
         if "squashuser" not in out:
             raise OperationFailedError("File is not created by squashed user")
         log.info("File created by squashed user")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to validate export rootsquash: {e}")
         return 1
@@ -146,6 +148,7 @@ def run(ceph_cluster, **kw):
         Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_squash)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients[0], nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients[0], nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successfull")
-    return 0

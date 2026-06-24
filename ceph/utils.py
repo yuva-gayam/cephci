@@ -8,6 +8,7 @@ import traceback
 from json import loads
 from pathlib import Path
 from time import mktime, sleep
+from typing import Tuple
 
 import requests
 import yaml
@@ -15,14 +16,32 @@ from htmllistparse import fetch_listing
 from libcloud.common.exceptions import BaseHTTPError
 from libcloud.compute.providers import get_driver
 from libcloud.compute.types import Provider
+from packaging.version import Version
 
 from cli.utilities.configure import add_centos_epel_repo
 from compute.baremetal import CephBaremetalNode
 from compute.ibm_vpc import CephVMNodeIBM, get_ibm_service
+from compute.onecloud import (
+    CephVMNodeOneCloud,
+    generate_onecloud_node_name,
+    get_onecloud_client,
+    get_vlan_for_site,
+    get_vm_ip,
+    get_vm_name,
+    parse_vm_list_from_response,
+    process_onecloud_custom_config,
+    resolve_image_for_site,
+    resolve_project_for_site,
+)
 from compute.openstack import CephVMNodeV2, NetworkOpFailure, NodeError, VolumeOpFailure
 from utility.log import Log
 from utility.retry import retry
-from utility.utils import generate_node_name
+from utility.utils import (
+    extract_ceph_version,
+    extract_version,
+    generate_node_name,
+    parse_custom_config_list,
+)
 
 from .ceph import Ceph, CommandFailed, RolesContainer
 from .parallel import parallel
@@ -363,8 +382,345 @@ def setup_vm_node_ibm(node, ceph_nodes, **params):
         raise
 
 
+def create_onecloud_ceph_nodes(
+    cluster_conf,
+    inventory,
+    onecloud_creds,
+    run_id,
+    instances_name=None,
+    custom_config=None,
+    platform=None,
+):
+    """
+    Create OneCloud cluster (group of VMs) via POST /clusters.
+
+    Args:
+        cluster_conf: Configuration of cluster.
+        inventory: Instance configuration file.
+        onecloud_creds: Global config with globals["onecloud-credentials"].
+        run_id: Unique id for the run.
+        instances_name: Optional name prefix.
+        custom_config: CLI options (e.g. onecloud_site=POK).
+        platform: RHEL platform (e.g. rhel-9, rhel-10) for image selection; filters
+            images by OS version when set.
+    """
+    from compute.onecloud import VM_POLL_INTERVAL, VM_POLL_TIMEOUT, VM_READY_STATES
+
+    log.info("Creating OneCloud instances")
+    glbs = onecloud_creds.get("globals") or {}
+    cred = glbs.get("onecloud-credentials")
+    if not cred:
+        raise NodeError("Missing 'onecloud-credentials' in globals")
+
+    api_key = cred.get("api_key")
+    base_url = cred.get("base_url")
+    verify_ssl = cred.get("verify_ssl", False)
+    if not api_key:
+        raise NodeError("Missing 'api_key' in onecloud-credentials")
+    if not base_url:
+        raise NodeError(
+            "Missing 'base_url' in onecloud-credentials. "
+            "Set it in osp-cred or cephci.yaml."
+        )
+
+    platform_conf = process_onecloud_custom_config(custom_config)
+    ceph_cluster = cluster_conf.get("ceph-cluster")
+    if not ceph_cluster:
+        raise NodeError("OneCloud: invalid cluster config - missing ceph-cluster")
+
+    inventory = inventory or {}
+    if ceph_cluster.get("inventory"):
+        inventory_path = os.path.abspath(ceph_cluster.get("inventory"))
+        with open(inventory_path, "r") as fh:
+            inventory = yaml.safe_load(fh) or {}
+
+    inv_create = inventory.get("instance", {}).get("create") or {}
+    # Priority: cred (osp-cred) > inventory > platform (optional conf/onecloud/X.yaml)
+    preferred_project_id = (
+        cred.get("project_id")
+        or inv_create.get("projectID")
+        or inv_create.get("project_id")
+        or platform_conf.get("project_id")
+    )
+    try:
+        preferred_project_id = (
+            int(preferred_project_id) if preferred_project_id is not None else None
+        )
+    except (TypeError, ValueError):
+        preferred_project_id = None
+
+    site = (
+        cred.get("site") or inv_create.get("site") or platform_conf.get("site") or "POK"
+    )
+    group_id = (
+        cred.get("group_id")
+        or inv_create.get("groupID")
+        or platform_conf.get("group_id")
+        or 1
+    )
+    vlan = (
+        cred.get("default_vlan")
+        or inv_create.get("VLAN")
+        or platform_conf.get("vlan")
+        or 2231
+    )
+    preferred_image_id = (
+        cred.get("default_image_id")
+        or inv_create.get("imageID")
+        or inv_create.get("image_id")
+        or platform_conf.get("image_id")
+    )
+    try:
+        preferred_image_id = (
+            int(preferred_image_id) if preferred_image_id is not None else None
+        )
+    except (TypeError, ValueError):
+        preferred_image_id = None
+
+    resources = (
+        cred.get("default_resources")
+        or inv_create.get("resources")
+        or platform_conf.get("resources")
+        or "small"
+    )
+    arch = (
+        cred.get("default_arch") or inv_create.get("arch") or platform_conf.get("arch")
+    )
+    # Default to x86_64 for RHEL platforms when not specified
+    if not arch and platform and str(platform).lower().startswith("rhel"):
+        arch = "x86_64"
+    cluster_name = ceph_cluster.get("name", "ceph")
+    try:
+        _inst_name = instances_name or os.getlogin()
+    except OSError:
+        _inst_name = instances_name or "cephci"
+
+    # Build virtualMachines array from cluster nodes
+    virtual_machines = []
+    node_specs = {}  # vmname -> (node_key, node_dict, role, id, ...)
+
+    for i in range(1, 100):
+        node_key = "node" + str(i)
+        if not ceph_cluster.get(node_key):
+            break
+
+        node_dict = ceph_cluster.get(node_key)
+        role = RolesContainer(node_dict.get("role") or ["pool"])
+        # OneCloud API: VM names must be 1-25 chars, alphanumeric + hyphens only
+        node_name = generate_onecloud_node_name(run_id, node_key, role)
+        virtual_machines.append(
+            {
+                "vmname": node_name,
+                "vmnotes": f"CephCI node {node_key}",
+            }
+        )
+        # OneCloud does not support custom disk provisioning; ignore no-of-volumes/disk-size
+        node_specs[node_name] = {
+            "node_key": node_key,
+            "node_dict": node_dict,
+            "role": role,
+            "id": node_dict.get("id") or node_key,
+            "location": node_dict.get("location"),
+            "root_login": node_dict.get("root-login", True),
+            "no_of_volumes": 0,
+            "disk_size": 0,
+        }
+
+    if not virtual_machines:
+        raise NodeError("OneCloud: no nodes in cluster config")
+
+    client = get_onecloud_client(api_key, base_url, verify_ssl=verify_ssl)
+    vlan = get_vlan_for_site(client, site, vlan)
+    os_hint = inv_create.get("os") or platform_conf.get("os") or "RedHat"
+    # Prefer images matching inventory version_id (e.g. 9.7) when specified
+    version_preference = inventory.get("version_id")
+    if version_preference is not None:
+        version_preference = str(version_preference).strip() or None
+    excluded_images = []
+    resp = None
+    for _ in range(5):  # Max 5 image attempts
+        image_id = resolve_image_for_site(
+            client,
+            site,
+            preferred_image_id,
+            arch=arch,
+            os_hint=os_hint,
+            exclude_image_ids=excluded_images or None,
+            platform_filter=platform,
+            version_preference=version_preference,
+        )
+        project_id = resolve_project_for_site(client, site, preferred_project_id)
+
+        body = {
+            "name": f"{cluster_name}-{_inst_name}-{run_id}"[:64],
+            "virtualMachines": virtual_machines,
+            "imageID": int(image_id),
+            "resources": resources,
+            "projectID": int(project_id),
+            "site": site,
+            "groupID": int(group_id),
+        }
+        # VLAN is optional—when portal uses "Default" network, omitting VLAN may use it
+        if vlan is not None:
+            body["VLAN"] = int(vlan)
+        # OneCloud API only accepts arch for s390x/ppc64le; omit for x86_64 (default)
+        if arch and arch.lower() in ("s390x", "ppc64le"):
+            body["arch"] = arch
+
+        log.info("Deploying OneCloud cluster with %d VMs", len(virtual_machines))
+        resp = client.post("/clusters", json=body)
+        if resp.status_code in (200, 201):
+            break
+        err_text = resp.text.lower()
+        is_image_site_error = (
+            resp.status_code == 400
+            and "image" in err_text
+            and ("not available" in err_text or "given site" in err_text)
+        )
+        if is_image_site_error and image_id not in excluded_images:
+            excluded_images.append(image_id)
+            log.warning(
+                "OneCloud: image_id %s rejected at site %s, trying another image",
+                image_id,
+                site,
+            )
+            continue
+        log.error(
+            "OneCloud deploy failed. Request body: %s. Response: %s",
+            body,
+            resp.text[:1000],
+        )
+        raise NodeError(
+            f"OneCloud deploy failed: {resp.status_code} {resp.text[:500]}. "
+            "Verify image_id, project_id, site, groupID, VLAN in osp-cred or inventory."
+        )
+
+    if resp is None or resp.status_code not in (200, 201):
+        raise NodeError(
+            "OneCloud deploy failed: no image available at site. "
+            "Try a different site or set image_id in osp-cred/inventory."
+        )
+
+    result = resp.json()
+    if isinstance(result, dict):
+        cluster_id = result.get("clusterid") or (result.get("data") or {}).get(
+            "clusterID"
+        )
+    else:
+        cluster_id = result
+    if cluster_id is None:
+        raise NodeError("OneCloud deploy: no clusterid in response")
+
+    # Poll for VMs to be ready (immediate first poll, then sleep between polls)
+    start = time.time()
+    vms_by_name = {}
+    first_poll = True
+    tried_cluster_id_param = False
+    logged_empty_structure = False
+    while time.time() - start < VM_POLL_TIMEOUT:
+        if not first_poll:
+            sleep(VM_POLL_INTERVAL)
+        first_poll = False
+
+        # Try clusterid first; some APIs expect clusterID (camelCase)
+        vm_resp = client.get(f"/vm?clusterid={cluster_id}")
+        if not tried_cluster_id_param:
+            tried_cluster_id_param = True
+            needs_retry = vm_resp.status_code != 200 or not parse_vm_list_from_response(
+                vm_resp.json()
+            )
+            if needs_retry:
+                vm_resp = client.get(f"/vm?clusterID={cluster_id}")
+        if vm_resp.status_code != 200:
+            log.warning("OneCloud: failed to list VMs: %s", vm_resp.status_code)
+            continue
+
+        vm_data = vm_resp.json()
+        vms = parse_vm_list_from_response(vm_data)
+        vms_by_name = {}
+        for v in vms:
+            name = get_vm_name(v)
+            if name:
+                vms_by_name[name] = v
+
+        # Debug: response structure not recognized (log once)
+        if not vms and isinstance(vm_data, dict) and not logged_empty_structure:
+            logged_empty_structure = True
+            log.info(
+                "OneCloud: GET /vm response top-level keys: %s",
+                list(vm_data.keys())[:15],
+            )
+        # Debug: API returned VMs but none had recognizable names
+        if vms and not vms_by_name:
+            sample = vms[0]
+            keys = list(sample.keys()) if isinstance(sample, dict) else []
+            log.warning(
+                "OneCloud: GET /vm returned %d VM(s) but no vmname/vmName found. "
+                "First VM keys: %s",
+                len(vms),
+                keys[:20],
+            )
+        ready_count = sum(
+            1
+            for v in vms_by_name.values()
+            if (v.get("state") or "").lower() in VM_READY_STATES and get_vm_ip(v)
+        )
+        if ready_count >= len(virtual_machines) and len(vms_by_name) >= len(
+            virtual_machines
+        ):
+            break
+        log.info(
+            "OneCloud: waiting for VMs (%d/%d ready, %d/%d found)",
+            ready_count,
+            len(virtual_machines),
+            len(vms_by_name),
+            len(virtual_machines),
+        )
+
+    if time.time() - start >= VM_POLL_TIMEOUT and len(vms_by_name) < len(
+        virtual_machines
+    ):
+        raise NodeError(
+            f"OneCloud: VMs not ready within {VM_POLL_TIMEOUT}s "
+            f"({len(vms_by_name)}/{len(virtual_machines)} found)"
+        )
+
+    ceph_nodes = {}
+    for vmname, spec in node_specs.items():
+        vm_data = vms_by_name.get(vmname)
+        if not vm_data:
+            log.warning("OneCloud: VM %s not found in cluster response", vmname)
+            continue
+
+        vm = CephVMNodeOneCloud(
+            node=vm_data,
+            api_key=api_key,
+            base_url=base_url,
+            verify_ssl=verify_ssl,
+        )
+        vm.role = spec["role"]
+        vm.root_login = spec["root_login"]
+        vm.id = spec["id"]
+        vm.location = spec["location"]
+        ceph_nodes[spec["node_key"]] = vm
+
+    if len(ceph_nodes) != len(node_specs):
+        raise NodeError(
+            f"OneCloud: mismatch - expected {len(node_specs)} nodes, got {len(ceph_nodes)}"
+        )
+
+    log.info("Done creating OneCloud nodes")
+    return ceph_nodes
+
+
 def create_ceph_nodes(
-    cluster_conf, inventory, osp_cred, run_id, instances_name=None, enable_eus=False
+    cluster_conf,
+    inventory,
+    osp_cred,
+    run_id,
+    instances_name=None,
+    enable_eus=False,
+    custom_config=None,
 ):
     log.info("Creating osp instances")
     osp_glbs = osp_cred.get("globals")
@@ -376,6 +732,7 @@ def create_ceph_nodes(
         inventory_path = os.path.abspath(ceph_cluster.get("inventory"))
         with open(inventory_path, "r") as inventory_stream:
             inventory = yaml.safe_load(inventory_stream)
+
     node_count = 0
     params["cloud-data"] = inventory.get("instance").get("setup")
     params["username"] = os_cred["username"]
@@ -399,8 +756,22 @@ def create_ceph_nodes(
             )
 
         params["cluster-name"] = ceph_cluster.get("name")
-        params["vm-size"] = inventory.get("instance").get("create").get("vm-size")
         params["vm-network"] = inventory.get("instance").get("create").get("vm-network")
+
+        # Process the VM flavor and network. Highest precedence goes to custom-config
+        params["vm-size"] = inventory.get("instance").get("create").get("vm-size")
+        overrides = parse_custom_config_list(custom_config)
+        if overrides.get("openstack_vm_profile"):
+            params["vm-size"] = overrides["openstack_vm_profile"]
+        openstack_network_override = None
+        if overrides.get("openstack_networks"):
+            _nets = [
+                n.strip()
+                for n in overrides["openstack_networks"].split(",")
+                if n.strip()
+            ]
+            if _nets:
+                openstack_network_override = _nets
 
         if params.get("root-login") is False:
             params["root-login"] = False
@@ -428,7 +799,11 @@ def create_ceph_nodes(
                     node_params["role"],
                 )
 
-                node_params["networks"] = node_dict.get("networks", [])
+                node_params["networks"] = (
+                    openstack_network_override
+                    if openstack_network_override is not None
+                    else node_dict.get("networks", [])
+                )
                 if node_dict.get("no-of-volumes"):
                     node_params["no-of-volumes"] = node_dict.get("no-of-volumes")
                     node_params["size-of-disks"] = node_dict.get("disk-size")
@@ -500,6 +875,186 @@ def setup_vm_node(node, ceph_nodes, **params):
         if vm is not None:
             vm.delete()
 
+        raise
+    except BaseException as be:  # noqa
+        log.error(be, exc_info=True)
+        raise
+
+
+def create_aws_ceph_nodes(
+    cluster_conf,
+    inventory,
+    aws_creds,
+    run_id,
+    instances_name=None,
+    custom_config=None,
+):
+    """
+    Create EC2 instances in AWS (existing VPC/subnet).
+
+    Args:
+        cluster_conf: Configuration of cluster.
+        inventory: Instance configuration file (or path resolved from cluster).
+        aws_creds: Global configuration file with globals["aws-credentials"].
+        run_id: Unique id for the run.
+        instances_name: Optional name prefix for instances.
+        custom_config: CLI options (e.g. aws_vpc=default).
+    """
+    from compute.aws_ec2 import process_aws_custom_config
+
+    log.info("Creating AWS instances")
+    glbs = aws_creds.get("globals")
+    aws_cred = glbs.get("aws-credentials")
+    ceph_cluster = cluster_conf.get("ceph-cluster")
+    platform = process_aws_custom_config(custom_config)
+
+    params = dict()
+    ceph_nodes = dict()
+
+    if ceph_cluster.get("inventory"):
+        inventory_path = os.path.abspath(ceph_cluster.get("inventory"))
+        with open(inventory_path, "r") as inventory_stream:
+            inventory = yaml.safe_load(inventory_stream)
+
+    node_count = 0
+
+    params["cloud-data"] = inventory.get("instance").get("setup", "")
+    params["region"] = aws_cred["region"]
+    # Strip whitespace from credentials
+    access_key = aws_cred.get("access_key")
+    secret_key = aws_cred.get("secret_key")
+    params["access_key"] = access_key.strip() if access_key else None
+    params["secret_key"] = secret_key.strip() if secret_key else None
+    params["subnet_id"] = platform.get("subnet_id") or aws_cred["subnet_id"]
+    params["security_group_ids"] = (
+        platform.get("security_group_ids") or aws_cred["security_group_ids"]
+    )
+    if isinstance(params["security_group_ids"], str):
+        params["security_group_ids"] = [params["security_group_ids"]]
+    params["key_name"] = platform.get("key_name") or aws_cred["key_name"]
+    # Prefer instance type from platform/custom_config (--custom-config aws_instance_type=...),
+    # then inventory (instance.create.instance_type or vm-size),
+    # then osp-cred, then default
+    inv_create = inventory.get("instance", {}).get("create") or {}
+    params["instance_type"] = (
+        platform.get("instance_type")
+        or inv_create.get("instance_type")
+        or inv_create.get("vm-size")
+        or aws_cred.get("instance_type")
+        or "t3.medium"
+    )
+
+    if inventory.get("instance", {}).get("create"):
+        if ceph_cluster.get("image-name"):
+            params["image-id"] = ceph_cluster.get("image-name")
+        else:
+            params["image-id"] = (
+                inventory.get("instance").get("create").get("image-name")
+            )
+        if not params["image-id"]:
+            raise NodeError(
+                "AWS create: image-name (AMI id) is required in inventory or cluster"
+            )
+
+        params["cluster-name"] = ceph_cluster.get("name")
+        if params.get("root-login") is False:
+            params["root-login"] = False
+        else:
+            params["root-login"] = True
+
+        with parallel() as p:
+            for node in range(1, 100):
+                node_key = "node" + str(node)
+                if not ceph_cluster.get(node_key):
+                    break
+
+                node_dict = ceph_cluster.get(node_key)
+                node_params = params.copy()
+                node_params["role"] = RolesContainer(node_dict.get("role"))
+                node_params["id"] = node_dict.get("id") or node_key
+                node_params["location"] = node_dict.get("location")
+                node_params["node-name"] = generate_node_name(
+                    node_params.get("cluster-name", "ceph"),
+                    instances_name or os.getlogin(),
+                    run_id,
+                    node_key,
+                    node_params["role"],
+                )
+
+                if node_dict.get("no-of-volumes"):
+                    node_params["no-of-volumes"] = node_dict.get("no-of-volumes")
+                    node_params["size-of-disks"] = node_dict.get("disk-size")
+                    node_params["osd-scenario"] = node_dict.get("osd-scenario")
+                else:
+                    node_params["no-of-volumes"] = 0
+                    node_params["size-of-disks"] = 0
+
+                if node_dict.get("image-name"):
+                    node_params["image-id"] = node_dict["image-name"].get(
+                        "aws", node_params["image-id"]
+                    )
+
+                if node_dict.get("cloud-data"):
+                    node_params["cloud-data"] = node_dict.get("cloud-data")
+
+                sleep(node_count * 5)
+                node_count += 1
+                p.spawn(setup_vm_node_aws, node_key, ceph_nodes, **node_params)
+
+    if node_count and len(ceph_nodes) != node_count:
+        log.error(
+            "Mismatch error in number of VMs creation. Initiated: %s  Spawned: %s",
+            node_count,
+            len(ceph_nodes),
+        )
+        raise NodeError("Required number of nodes not created")
+
+    log.info("Done creating AWS nodes")
+    return ceph_nodes
+
+
+@retry(RETRY_EXCEPTIONS, tries=3, delay=10)
+def setup_vm_node_aws(node, ceph_nodes, **params):
+    """
+    Create the VM node using AWS EC2 API.
+
+    The retry decorator will trigger a rerun when a soft error is encountered. The VM
+    node is removed in exception scope before re-raising.
+    """
+    from compute.aws_ec2 import CephVMNodeAWS
+
+    vm = None
+    try:
+        vm = CephVMNodeAWS(
+            aws_cred={
+                "region": params["region"],
+                "access_key": params.get("access_key"),
+                "secret_key": params.get("secret_key"),
+            }
+        )
+
+        vm.create(
+            node_name=params["node-name"],
+            image_id=params["image-id"],
+            subnet_id=params["subnet_id"],
+            security_group_ids=params["security_group_ids"],
+            key_name=params["key_name"],
+            instance_type=params["instance_type"],
+            userdata=params.get("cloud-data", ""),
+            size_of_disks=params.get("size-of-disks", 0),
+            no_of_volumes=params.get("no-of-volumes", 0),
+        )
+
+        vm.role = params["role"]
+        vm.root_login = params["root-login"]
+        vm.osd_scenario = params.get("osd-scenario")
+        vm.location = params.get("location")
+        vm.id = params.get("id")
+        ceph_nodes[node] = vm
+    except RETRY_EXCEPTIONS as retry_except:
+        log.warning(retry_except, exc_info=True)
+        if vm is not None:
+            vm.delete()
         raise
     except BaseException as be:  # noqa
         log.error(be, exc_info=True)
@@ -609,11 +1164,11 @@ def setup_repos(
     base_url,
     platform=None,
     installer_url=None,
-    repos=None,
+    repos=["MON", "OSD", "Tools"],
     cloud_type="openstack",
     ibm_build=False,
 ):
-    if base_url.endswith(".repo") or ibm_build:
+    if base_url.endswith(".repo"):
         cmd = f"yum-config-manager --add-repo {base_url}"
         ceph.exec_command(sudo=True, cmd=cmd)
 
@@ -625,11 +1180,9 @@ def setup_repos(
             add_centos_epel_repo(ceph, platform)
 
     else:
-        if not repos:
-            repos = ["MON", "OSD", "Tools"]
         base_repo = generate_repo_file(base_url, repos, cloud_type)
         base_file = ceph.remote_file(
-            sudo=True, file_name="/etc/yum.repos.d/rh_ceph.repo", file_mode="w"
+            sudo=True, file_name="/etc/yum.repos.d/ceph_build.repo", file_mode="w"
         )
         base_file.write(base_repo)
         base_file.flush()
@@ -643,6 +1196,35 @@ def setup_repos(
         )
         inst_file.write(inst_repo)
         inst_file.flush()
+
+
+def remove_repos(
+    ceph_node,
+    exclude_repos=[
+        "hashicorp.repo",
+        "redhat.repo",
+        "appstream.repo",
+        "baseos.repo",
+        "crb.repo",
+    ],
+    repo_dir="/etc/yum.repos.d/",
+):
+    """Method to remove all repos from a desired directory except 'exclude_repos' entries
+    This method can also be used to remove general files from any directory on input node
+    Args:
+        ceph_node: node on which repos should be removed
+        exclude_repos: list of repos that will be excluded and retained
+        repo_dir: repo directory defaulted to '/etc/yum.repos.d/'
+    """
+    rm_repo_cmd = f"find {repo_dir} -type f -delete"
+    if exclude_repos:
+        rm_repo_cmd = (
+            f"find {repo_dir} -type f ! -name "
+            + " ! -name ".join(exclude_repos)
+            + " -delete"
+        )
+    for _cmd in [rm_repo_cmd, "yum clean all"]:
+        ceph_node.exec_command(sudo=True, cmd=_cmd)
 
 
 def check_ceph_healthly(
@@ -1059,6 +1641,24 @@ def get_public_network(nodes):
     return ",".join(subnets)
 
 
+def get_public_network_ipv6(nodes):
+    """Get IPv6 public network subnet(s) from nodes that have ipv6_subnet.
+    Used only when cluster.use_ipv6 is True (OpenStack dual-stack).
+
+    Args:
+        nodes: cluster nodes (CephNode with optional ipv6_subnet)
+
+    Returns:
+        (str) comma-separated IPv6 CIDRs, or empty string if none
+    """
+    subnets = []
+    for node in nodes:
+        ipv6_sub = getattr(node, "ipv6_subnet", None)
+        if ipv6_sub and ipv6_sub not in subnets:
+            subnets.append(ipv6_sub)
+    return ",".join(subnets)
+
+
 def get_disk_info(node):
     """
     Get node disk(s) info
@@ -1397,3 +1997,143 @@ def is_client(ceph_node):
     Return True if client node else False
     """
     return len(ceph_node.role.role_list) == 1 and "client" in ceph_node.role.role_list
+
+
+def enable_coredump(node):
+    """
+    Method to enable coredump collection
+    Refer: https://bugzilla.redhat.com/show_bug.cgi?id=2170213#c1
+    Args:
+        node: ceph node object
+    Returns:
+        None
+    """
+    log.info("Enabling coredump collection on %s" % node.hostname)
+    log.debug("Ensure /etc/systemd/system.conf file exists or create it")
+    _, _, rc, _ = node.exec_command(
+        sudo=True, cmd="test -e /etc/systemd/system.conf", verbose=True
+    )
+    if rc:
+        log.debug("File /etc/systemd/system.conf does not exist, creating..")
+        node.exec_command(sudo=True, cmd="touch /etc/systemd/system.conf")
+    sys_cmds = [
+        "echo 'fs.suid_dumpable = 2' >> /etc/sysctl.conf",
+        "sysctl -p",
+        "sed -i '/DefaultLimitCORE/d' /etc/systemd/system.conf",
+        "echo 'DefaultLimitCORE=infinity' >> /etc/systemd/system.conf",
+        "systemctl daemon-reexec",
+    ]
+
+    for _cmd in sys_cmds:
+        out, err = node.exec_command(cmd=_cmd, sudo=True)
+        log.info("Out: %s \n Err: %s" % (out, err))
+
+
+def get_daemon_versions(
+    node, daemon_type: str, daemon_id: str = None
+) -> Tuple[str, str]:
+    """
+    Method to get a ceph daemon's versions.
+    This function requires a CephAdmin node object
+    instead of a generic ceph node object.
+    Use node.shell() method instead of exec_command().
+    Note that in case multiple versions of input daemon type exist, \
+    this method returns version of the first entry.
+    Args:
+        node: cephAdmin node object having cephadm package
+        daemon_type: The type of ceph daemon e.g. mgr, mon, osd, etc
+        daemon_id: name or id of ceph daemon e.g. 0, ceph-name-dc0dxh-node2
+    Returns:
+        a tuple of (common_version, downstream_version)
+        e.g. 20.2.1,9.9.1.0
+    """
+    if daemon_id:
+        out = get_daemon_metadata(node, daemon_type, daemon_id)
+    else:
+        out, _ = node.shell(args=["ceph versions -f json"])
+    try:
+        ceph_versions = json.loads(out)
+    except json.JSONDecodeError as e:
+        log.exception(e)
+        raise
+
+    if daemon_id and ceph_versions.get("ceph_version"):
+        daemon_ver_text = ceph_versions["ceph_version"]
+        return extract_ceph_version(daemon_ver_text), extract_version(daemon_ver_text)
+    if ceph_versions.get(daemon_type):
+        daemon_ver_text = next(iter(ceph_versions[daemon_type]))
+        return extract_ceph_version(daemon_ver_text), extract_version(daemon_ver_text)
+
+    log.warning("No versions found for %s", daemon_type)
+    return "", ""
+
+
+def get_daemon_metadata(node, daemon_type: str, daemon_id: str = None):
+    """
+    Method to fetch the metadata for any daemon
+    If daemon id is not provided, return complete output of
+    ceph <daemon_type> metadata
+    Args:
+        node: ceph node object having cephadm package
+        daemon_type: The type of ceph daemon e.g. mgr, mon, osd, etc
+        daemon_id: name or id of ceph daemon e.g. 0, ceph-name-dc0dxh-node2
+    Returns:
+        metadata (List) -> If daemon_id is not provided
+        metadata (Dict) -> If daemon_id is provided
+        None if metadata is not found
+    """
+    log.debug("Passed daemon type : %s, Daemon ID : %s", daemon_type, daemon_id)
+    base_cmd = f"ceph {daemon_type} metadata "
+    if daemon_id is not None:
+        base_cmd += daemon_id
+
+    for _ in range(3):
+        try:
+            out, _ = node.shell(args=[base_cmd])
+            break
+        except Exception as e:
+            debug_msg = f"Passed daemon type : {daemon_type}, Daemon ID : {daemon_id}, Error : {e}"
+            log.debug(debug_msg)
+            log.warning("ceph metadata command failed. retrying after 30 seconds.")
+            time.sleep(30)
+    else:
+        log.debug("Metadata command execution failed 3 consecutive tries")
+        return None
+
+    if out is None:
+        log.error(
+            "Metadata info for the input daemon: %s.%s not found",
+            daemon_type,
+            daemon_id,
+        )
+    return out
+
+
+def mgr_accept_license(node, img):
+    """
+    Method to accept IBM ceph license
+    Args:
+        node: cephadm(CephAdmin) node object
+        img: ibm ceph image for which license is to be accepted
+    Returns: None
+    """
+    mgr_version_common, mgr_version_downstream = get_daemon_versions(
+        node=node, daemon_type="mgr"
+    )
+    log.debug("MGR common version: %s", mgr_version_common)
+    log.debug("MGR downstream version: %s", mgr_version_downstream)
+    common_ver_check = mgr_version_common and Version(mgr_version_common) >= Version(
+        "20.2.1"
+    )
+    downstream_ver_check = mgr_version_downstream and Version(
+        mgr_version_downstream
+    ) >= Version("9.9.1.0")
+    if common_ver_check or downstream_ver_check:
+        license_cmd = f"ceph orch accept-license --image {img}"
+        try:
+            out, _ = node.shell(args=[license_cmd])
+            log.debug(out)
+            log.info("Successfully accepted license for image: %s", img)
+        except Exception as e:
+            log.error("Failed to accept license for image %s: %s", img, e)
+            raise

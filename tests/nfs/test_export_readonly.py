@@ -16,6 +16,7 @@ def run(ceph_cluster, **kw):
     config = kw.get("config")
     nfs_nodes = ceph_cluster.get_nodes("nfs")
     clients = ceph_cluster.get_nodes("client")
+    sudo = kw.get("sudo", True)
 
     port = config.get("port", "2049")
     version = config.get("nfs_version")
@@ -49,6 +50,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs_name,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create export with RO permission
@@ -75,7 +78,7 @@ def run(ceph_cluster, **kw):
 
         # Test writes on Readonly export
         _, rc = clients[0].exec_command(
-            sudo=True, cmd=f"touch {nfs_readonly_mount}/file_ro", check_ec=False
+            sudo=sudo, cmd=f"touch {nfs_readonly_mount}/file_ro", check_ec=False
         )
         # Ignore the "Read-only file system" error and consider it as a successful execution
         if "touch: cannot touch" in str(rc) and "Read-only file system" in str(rc):
@@ -86,9 +89,11 @@ def run(ceph_cluster, **kw):
 
         # Test writes on RW export
         clients[0].exec_command(
-            sudo=True,
+            sudo=sudo,
             cmd=f"touch {nfs_mount}/file_rw",
         )
+        return 0
+
     except Exception as e:
         log.error(f"Failed to validate export readonly: {e}")
         return 1
@@ -106,6 +111,7 @@ def run(ceph_cluster, **kw):
         Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_export_readonly)
 
         # Cleaning up the remaining export and deleting the nfs cluster
-        cleanup_cluster(clients[0], nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients[0], nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successfull")
-    return 0

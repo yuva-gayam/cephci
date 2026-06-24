@@ -72,6 +72,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
     except Exception as e:
         log.error(f"Failed to setup nfs cluster {e}")
@@ -158,5 +160,5 @@ def run(ceph_cluster, **kw):
         log.info("Removing nfs-ganesha lock mount dir on client:")
         client.exec_command(sudo=True, cmd=f"rm -rf  {nfs_lock_mount}")
     Ceph(clients[0]).nfs.export.delete(nfs_name, nfs_lock_export)
-    cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+    cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)
     return 0

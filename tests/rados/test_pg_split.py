@@ -7,6 +7,7 @@ from ceph.rados import utils
 from ceph.rados.core_workflows import RadosOrchestrator
 from ceph.rados.pool_workflows import PoolFunctions
 from ceph.rados.serviceability_workflows import ServiceabilityMethods
+from ceph.rados.utils import get_cluster_timestamp
 from tests.rados.rados_test_util import (
     create_pools,
     get_device_path,
@@ -46,7 +47,8 @@ def run(ceph_cluster, **kw):
     cluster_nodes = ceph_cluster.get_nodes()
     timeout = config.get("timeout", 10800)
     add_network_delay = config.get("add_network_delay", False)
-
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
         if add_network_delay:
             for host in cluster_nodes:
@@ -64,6 +66,13 @@ def run(ceph_cluster, **kw):
         method_should_succeed(
             wait_for_clean_pg_sets, rados_obj, timeout=timeout, test_pool=pool_name
         )
+        # Due to below tracker, suppressing few heath warnings when fast ec is enabled on pools.
+        # https://tracker.ceph.com/issues/71645 . ( bugzilla to be raised soon )
+        fast_ec_enabled = any(
+            pool.get("create_pool", {}).get("enable_fast_ec_features", False)
+            for pool in config.get("create_pools", [])
+        )
+        warning_ignore_list = []
 
         init_pg_count = rados_obj.get_pool_property(
             pool=pool["pool_name"], props="pg_num"
@@ -155,7 +164,7 @@ def run(ceph_cluster, **kw):
                 daemon_type="osd",
                 daemon_id=target_osd,
                 status="running",
-                timeout=60,
+                timeout=300,
             )
             assert service_obj.add_osds_to_managed_service(
                 osds=[target_osd], spec=target_osd_spec_name
@@ -301,7 +310,9 @@ def run(ceph_cluster, **kw):
         )
 
         # Checking cluster health after OSD removal
-        method_should_succeed(rados_obj.run_pool_sanity_check)
+        method_should_succeed(
+            rados_obj.run_pool_sanity_check, ignore_list=warning_ignore_list
+        )
         log.info("Sanity check post test execution, Test complete, Pass")
 
         if add_network_delay:
@@ -335,20 +346,20 @@ def run(ceph_cluster, **kw):
                     daemon_type="osd",
                     daemon_id=target_osd,
                     status="running",
-                    timeout=60,
+                    timeout=300,
                 )
             assert service_obj.add_osds_to_managed_service()
             rados_obj.set_service_managed_type(service_type="osd", unmanaged=False)
 
-        if config.get("delete_pools"):
-            for name in config["delete_pools"]:
-                method_should_succeed(rados_obj.delete_pool, name)
-            log.info("deleted all the given pools successfully")
-
+        rados_obj.rados_pool_cleanup()
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
     return 0

@@ -58,6 +58,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Mount NFS-Ganesha V3 to window
@@ -90,7 +92,7 @@ def run(ceph_cluster, **kw):
                     log.info(f"File win_file{i} is present.")
             except Exception:
                 raise OperationFailedError("File not found on NFS share")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to setup nfs-ganesha cluster {e}")
         # Cleanup
@@ -101,5 +103,6 @@ def run(ceph_cluster, **kw):
         # Cleanup
         log.info("Cleanup")
         linux_clients[0].exec_command(sudo=True, cmd=f"rm -rf  {nfs_mount}/*")
-        cleanup_cluster(linux_clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(
+            linux_clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes
+        )

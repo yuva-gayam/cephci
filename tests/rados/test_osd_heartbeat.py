@@ -4,6 +4,7 @@ import time
 
 from ceph.ceph_admin import CephAdmin
 from ceph.rados.core_workflows import RadosOrchestrator
+from ceph.rados.utils import get_cluster_timestamp, install_package
 from utility.log import Log
 
 log = Log(__name__)
@@ -41,8 +42,16 @@ def run(ceph_cluster, **kw):
     osd_heart_ip = osd_node_heart.ip_address
     heartbeat_log = f"heartbeat_check: no reply from {osd_heart_ip}:68"
     logs_found = False
-
+    start_time = get_cluster_timestamp(rados_obj.node)
+    log.debug(f"Test workflow started. Start time: {start_time}")
     try:
+        # install iptables dependencies
+        for node in ceph_cluster.get_nodes():
+            install_package(
+                node,
+                packages=["iproute", "net-tools", "iptables-services"],
+            )
+
         # Drop connection b/w installer node and obtained osd node
         out, _ = osd_node_2.exec_command(
             sudo=True, cmd=f"iptables -A INPUT -d {osd_heart_ip} -j REJECT"
@@ -70,9 +79,11 @@ def run(ceph_cluster, **kw):
                     cmd=f"ceph orch host ls --host_pattern {osd_node_heart.hostname}"
                 )
                 assert "HEALTH_WARN" in ceph_health
+                assert "Slow OSD heartbeats" in ceph_health
                 assert host_ls[0]["status"] == "Offline"
+                # add buffer of 30 seconds
                 endtime, _ = installer_node.exec_command(
-                    cmd="sudo date '+%Y-%m-%d %H:%M:%S'"
+                    cmd="sudo date '+%Y-%m-%d %H:%M:%S' -d '+30 seconds'"
                 )
                 log.info(endtime)
                 break
@@ -126,7 +137,11 @@ def run(ceph_cluster, **kw):
         # log cluster health
         rados_obj.log_cluster_health()
         # check for crashes after test execution
-        if rados_obj.check_crash_status():
+        test_end_time = get_cluster_timestamp(rados_obj.node)
+        log.debug(
+            f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
+        )
+        if rados_obj.check_crash_status(start_time=start_time, end_time=test_end_time):
             log.error("Test failed due to crash at the end of test")
             return 1
 

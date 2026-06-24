@@ -63,6 +63,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Mount NFS-Ganesha V3 to window
@@ -97,6 +99,7 @@ def run(ceph_cluster, **kw):
                         "Deleted file present in windows client v3"
                     )
                     return 1
+        return 0
 
     except Exception as e:
         log.error(f"Failed to setup nfs-ganesha cluster {e}")
@@ -115,5 +118,6 @@ def run(ceph_cluster, **kw):
             windows_client.exec_command(cmd=cmd)
             cmd = f"umount {window_nfs_mount}"
             windows_client.exec_command(cmd=cmd)
-        cleanup_cluster(linux_clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(
+            linux_clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers
+        )

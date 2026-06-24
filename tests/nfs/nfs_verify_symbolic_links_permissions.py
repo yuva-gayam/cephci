@@ -20,6 +20,7 @@ def run(ceph_cluster, **kw):
     port = config.get("port", "2049")
     version = config.get("nfs_version", "4.0")
     no_clients = int(config.get("clients", "2"))
+    sudo = config.get("sudo", True)
 
     # If the setup doesn't have required number of clients, exit.
     if no_clients > len(clients):
@@ -47,19 +48,21 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create file
         cmd = f"touch {nfs_mount}/test_file"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd, sudo=sudo)
 
         # Remove read and write permission for all other users
         cmd = f"chmod 600 {nfs_mount}/test_file"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd, sudo=sudo)
 
         # Create symbolic link
         cmd = f"ln -s {nfs_mount}/test_file {nfs_mount}/link_file"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd, sudo=sudo)
 
         # Try accessing the file using other user "cephuser"
         try:
@@ -74,12 +77,11 @@ def run(ceph_cluster, **kw):
                 raise OperationFailedError(
                     f"Failed with an error other than permission denied: {e}"
                 )
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
     finally:
         log.info("Cleaning up")
         sleep(3)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successfull")
-    return 0

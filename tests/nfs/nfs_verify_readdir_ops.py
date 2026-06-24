@@ -48,6 +48,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Linux untar on client 1
@@ -55,15 +57,21 @@ def run(ceph_cluster, **kw):
 
         # Test 1: Perform Linux untar from 1 client and do readir operation from other client (ls -lart)
         cmd = f"ls -lart {nfs_mount}"
-        clients[1].exec_command(cmd=cmd, sudo=True)
+        clients[1].exec_command(
+            cmd=cmd,
+        )
 
         # Test 2: Perform Linux untar from 1 client and do readir operation from other client (du -sh)
         cmd = f"du -sh {nfs_mount}"
-        clients[2].exec_command(cmd=cmd, sudo=True)
+        clients[2].exec_command(
+            cmd=cmd,
+        )
 
         # Perform Linux untar from 1 client and do readir operation from other client (finds)
         cmd = f"find {nfs_mount} -name *.txt"
-        clients[3].exec_command(cmd=cmd, sudo=True)
+        clients[3].exec_command(
+            cmd=cmd,
+        )
 
         # Wait for io to complete on all clients
         for th in io:
@@ -72,21 +80,28 @@ def run(ceph_cluster, **kw):
         # Repeat the tests post untar completes
         # Test 1: Perform Linux untar from 1 client and do readir operation from other client (ls -lart)
         cmd = f"ls -lart {nfs_mount}"
-        clients[1].exec_command(cmd=cmd, sudo=True)
+        clients[1].exec_command(
+            cmd=cmd,
+        )
 
         # Test 2: Perform Linux untar from 1 client and do readir operation from other client (du -sh)
         cmd = f"du -sh {nfs_mount}"
-        clients[2].exec_command(cmd=cmd, sudo=True)
+        clients[2].exec_command(
+            cmd=cmd,
+        )
 
         # Perform Linux untar from 1 client and do readir operation from other client (finds)
         cmd = f"find {nfs_mount} -name *.txt"
-        clients[3].exec_command(cmd=cmd, sudo=True)
+        clients[3].exec_command(
+            cmd=cmd,
+        )
+        return 0
+
     except Exception as e:
         log.error(f"Failed to validate read dir operations : {e}")
         return 1
     finally:
         log.info("Cleaning up")
         sleep(30)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

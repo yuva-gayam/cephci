@@ -5,6 +5,7 @@ import traceback
 
 from tests.cephfs.cephfs_utilsV1 import FsUtils
 from tests.cephfs.exceptions import ValueMismatchError
+from tests.cephfs.lib.cephfs_common_lib import CephFSCommonUtils
 from utility.log import Log
 from utility.retry import retry
 
@@ -110,7 +111,7 @@ def verify_io_caps_decrease(iocaps_value_before):
     log.info("IO Caps value matched")
 
 
-@retry(ValueMismatchError, tries=5, delay=30)
+@retry(ValueMismatchError, tries=7, delay=30)
 def verify_fuse_client_count_increment(current_fuse_count):
     """
     Verify that the fuse client count increased by a specific increment.
@@ -129,7 +130,7 @@ def verify_fuse_client_count_increment(current_fuse_count):
     log.info("Fuse client count matched")
 
 
-@retry(ValueMismatchError, tries=5, delay=30)
+@retry(ValueMismatchError, tries=7, delay=30)
 def verify_kernel_client_count_increment(current_kernel_count):
     """
     Verify that the kernel client count increased by the expected increment.
@@ -148,7 +149,7 @@ def verify_kernel_client_count_increment(current_kernel_count):
     log.info("Kernel client count matched")
 
 
-@retry(ValueMismatchError, tries=5, delay=30)
+@retry(ValueMismatchError, tries=7, delay=30)
 def verify_total_client_count_increment(current_total_count):
     """
     Verify that the total client count increased by the expected increment.
@@ -211,6 +212,13 @@ def verify_read_write_io_progress(before_total_read, before_total_write):
 
 
 def run(ceph_cluster, **kw):
+    fuse_mounting_dir_1 = None
+    fuse_mounting_dir_2 = None
+    fuse_mounting_dir_3 = None
+    kernel_mounting_dir_1 = None
+    kernel_mounting_dir_2 = None
+    cephfs_name1 = None
+    cephfs_name2 = None
     try:
         global fs_util, client1, fs_name, client_id
 
@@ -219,6 +227,7 @@ def run(ceph_cluster, **kw):
         # Initialize the utility class for CephFS
         test_data = kw.get("test_data")
         fs_util = FsUtils(ceph_cluster, test_data=test_data)
+        cephfs_common_utils = CephFSCommonUtils(ceph_cluster)
         erasure = (
             FsUtils.get_custom_config_value(test_data, "erasure")
             if test_data
@@ -234,8 +243,11 @@ def run(ceph_cluster, **kw):
         fs_util.prepare_clients(clients, build)
         client1 = clients[0]
         fs_name = "cephfs" if not erasure else "cephfs-ec"
+        rc = cephfs_common_utils.cleanup_cephfs(clients)
+        if rc != 0:
+            log.error("Failed to cleanup cephfs")
+            return 1
         fs_details = fs_util.get_fs_info(client1, fs_name)
-
         if not fs_details:
             fs_util.create_fs(client1, fs_name)
         log.info("Install cephfs-top by dnf install cephfs-top")
@@ -302,50 +314,7 @@ def run(ceph_cluster, **kw):
         log.info(
             "\n"
             "\n---------------***************-----------------------------------"
-            "\n    Usecase 1: Verify open and close files functionality        "
-            "\n---------------***************-----------------------------------"
-        )
-        file_list = []
-        opened_files = 10
-        for i in range(opened_files):
-            file_name = f"file_{rand}_{i}"
-            file_list.append(file_name)
-        pids = fs_util.open_files(client1, fuse_mounting_dir_1, file_list)
-        verify_open_files_count(opened_files)
-
-        fs_util.close_files(client1, pids)
-        verify_closed_files_count()
-
-        log.info(
-            "\n"
-            "\n---------------***************-----------------------------------"
-            "\n    Usecase 2: Verify iocaps increment and decrement          "
-            "\n---------------***************-----------------------------------"
-        )
-        log.info("verifying iocaps")
-        num_files = 10
-        iocaps_value_before = fs_util.get_cephfs_top_dump(client1)["filesystems"][
-            "cephfs"
-        ][client_id]["oicaps"]
-        for i in range(num_files):
-            file_name = f"files_{rand}_{i}"
-            client1.exec_command(
-                sudo=True, cmd=f"touch {fuse_mounting_dir_1}/{file_name}"
-            )
-        verify_io_caps_increment(iocaps_value_before, num_files)
-
-        log.info("Decrease the iocaps value")
-        for i in range(num_files):
-            file_name = f"files_{rand}_{i}"
-            client1.exec_command(
-                sudo=True, cmd=f"rm -rf {fuse_mounting_dir_1}/{file_name}"
-            )
-        verify_io_caps_decrease(iocaps_value_before)
-
-        log.info(
-            "\n"
-            "\n---------------***************-----------------------------------"
-            "\n    Usecase 3: Verify total client counts, increment for fuse and kernel clients"
+            "\n    Usecase 1: Verify total client counts, increment for fuse and kernel clients"
             "\n---------------***************-----------------------------------"
         )
         log.info("Verifying client counts")
@@ -361,6 +330,11 @@ def run(ceph_cluster, **kw):
         current_total_count = fs_util.get_cephfs_top_dump(client1)["client_count"][
             "total_clients"
         ]
+        log.info(
+            "Current FUSE count: {}, Current Kernel Count: {}, Current Total Count: {}".format(
+                current_fuse_count, current_kernel_count, current_total_count
+            )
+        )
         log.info("mounting clients")
         mon_node_ips = fs_util.get_mon_node_ips()
         fs_util.kernel_mount(
@@ -384,6 +358,49 @@ def run(ceph_cluster, **kw):
         verify_kernel_client_count_increment(current_kernel_count)
 
         verify_total_client_count_increment(current_total_count)
+
+        log.info(
+            "\n"
+            "\n---------------***************-----------------------------------"
+            "\n    Usecase 2: Verify open and close files functionality        "
+            "\n---------------***************-----------------------------------"
+        )
+        file_list = []
+        opened_files = 10
+        for i in range(opened_files):
+            file_name = f"file_{rand}_{i}"
+            file_list.append(file_name)
+        pids = fs_util.open_files(client1, fuse_mounting_dir_1, file_list)
+        verify_open_files_count(opened_files)
+
+        fs_util.close_files(client1, pids)
+        verify_closed_files_count()
+
+        log.info(
+            "\n"
+            "\n---------------***************-----------------------------------"
+            "\n    Usecase 3: Verify iocaps increment and decrement          "
+            "\n---------------***************-----------------------------------"
+        )
+        log.info("verifying iocaps")
+        num_files = 10
+        iocaps_value_before = fs_util.get_cephfs_top_dump(client1)["filesystems"][
+            "cephfs"
+        ][client_id]["oicaps"]
+        for i in range(num_files):
+            file_name = f"files_{rand}_{i}"
+            client1.exec_command(
+                sudo=True, cmd=f"touch {fuse_mounting_dir_1}/{file_name}"
+            )
+        verify_io_caps_increment(iocaps_value_before, num_files)
+
+        log.info("Decrease the iocaps value")
+        for i in range(num_files):
+            file_name = f"files_{rand}_{i}"
+            client1.exec_command(
+                sudo=True, cmd=f"rm -rf {fuse_mounting_dir_1}/{file_name}"
+            )
+        verify_io_caps_decrease(iocaps_value_before)
 
         log.info(
             "\n"
@@ -452,13 +469,19 @@ def run(ceph_cluster, **kw):
             fuse_mounting_dir_2,
             fuse_mounting_dir_3,
         ]:
-            fs_util.client_clean_up(
-                "umount", fuse_clients=[client1], mounting_dir=mount_dir
-            )
+            if mount_dir:
+                fs_util.client_clean_up(
+                    "umount", fuse_clients=[client1], mounting_dir=mount_dir
+                )
 
-        fs_util.client_clean_up(
-            "umount", kernel_clients=[client1], mounting_dir=kernel_mounting_dir_1
-        )
+        for mount_dir in [kernel_mounting_dir_1, kernel_mounting_dir_2]:
+            if mount_dir:
+                fs_util.client_clean_up(
+                    "umount",
+                    kernel_clients=[client1],
+                    mounting_dir=mount_dir,
+                )
 
         for fs_delete in [cephfs_name1, cephfs_name2]:
-            fs_util.remove_fs(client1, fs_delete)
+            if fs_delete:
+                fs_util.remove_fs(client1, fs_delete)

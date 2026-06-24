@@ -9,6 +9,7 @@ globals:
           - mgr
           - crash
           - osd
+          - smb
         no-of-volumes: 6
         disk-size: 20
       node2:
@@ -18,6 +19,8 @@ globals:
           - crash
           - rgw
           - osd
+          - nfs
+          - smb
         no-of-volumes: 6
         disk-size: 20
       node3:
@@ -27,6 +30,8 @@ globals:
           - crash
           - mds
           - osd
+          - nfs
+          - smb
         no-of-volumes: 6
         disk-size: 20
       node4:

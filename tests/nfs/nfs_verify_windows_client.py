@@ -68,6 +68,8 @@ def run(ceph_cluster, **kw):
             ha,
             vip,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
         # If windows clients are present, perform mount
         if win_clients:
@@ -77,6 +79,8 @@ def run(ceph_cluster, **kw):
         log.info("Successfully setup NFS HA cluster")
 
         # Mount windows client
+        return 0
+
     except Exception as e:
         log.error(f"Failed to setup nfs ha cluster {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -85,5 +89,4 @@ def run(ceph_cluster, **kw):
         # Unmount windows mount
         cmd = r"umount Z:"
         execute_command_on_windows_node(win_clients[0], cmd)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
-    return 0
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=servers)

@@ -9,7 +9,7 @@ log = Log(__name__)
 def create_file(count, mount_point, filename, client):
     log.info(f"Creating file of : {count}G")
     cmd = f"dd if=/dev/urandom of={mount_point}/{filename} bs=1G count={count}"
-    client.exec_command(cmd=cmd, sudo=True)
+    client.exec_command(cmd=cmd)
 
 
 def verify_disk_usage(client, mount_point, size, filename=None):
@@ -17,7 +17,7 @@ def verify_disk_usage(client, mount_point, size, filename=None):
         cmd = f"du -sh {mount_point}/{filename}"
     else:
         cmd = f"du -sh {mount_point}"
-    out = client.exec_command(cmd=cmd, sudo=True)
+    out = client.exec_command(cmd=cmd)
     size_str = out[0].strip().split()[0]
     numeric_part = size_str.rstrip("G")
     size_rounded = f"{int(float(numeric_part))}G"
@@ -67,6 +67,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # List of files and sizes to create and verify
@@ -86,7 +88,7 @@ def run(ceph_cluster, **kw):
 
         # Validate the total disk usage of mount point
         verify_disk_usage(client=clients[0], mount_point=nfs_mount, size="6G")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to  verify the space allocation test on NFS v4.2 : {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -95,6 +97,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0

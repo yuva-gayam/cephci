@@ -95,6 +95,8 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs_name,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
         # Create files and dirs from client 1 and copy files and dirs from client 2
         client1 = clients[0]
@@ -123,9 +125,11 @@ def run(ceph_cluster, **kw):
             operation.join()
 
         log.info("Successfully completed the copy tests for files and dirs")
+        return 0
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(
+            clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_nodes[0]
+        )
         log.info("Cleaning up successfull")
-    return 0

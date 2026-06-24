@@ -47,22 +47,22 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create file in local file system
         cmd = "touch /tmp/test_file"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd)
 
         # Create symbolic links to files residing on local file systems with NFS
         cmd = f"ln -s /tmp/test_file {nfs_mount}/link_file"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd)
 
         # Check symbolic links created successfully with local file system
         out = (
             clients[0]
-            .exec_command(
-                cmd="ls -l /mnt/nfs/link_file | awk '{print $10}'", sudo=True
-            )[0]
+            .exec_command(cmd="ls -l /mnt/nfs/link_file | awk '{print $10}'")[0]
             .strip()
         )
         if "->" not in out:
@@ -74,12 +74,11 @@ def run(ceph_cluster, **kw):
             log.info(
                 "Successfully created symbolic links to files from local file systems to NFS"
             )
-
+        return 0
     except Exception as e:
         log.error(f"Error : {e}")
     finally:
         log.info("Cleaning up")
         sleep(3)
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successfull")
-    return 0

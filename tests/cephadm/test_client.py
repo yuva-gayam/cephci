@@ -6,6 +6,8 @@ from typing import Dict
 from ceph.ceph_admin.orch import Orch
 from ceph.parallel import parallel
 from ceph.utils import get_node_by_id
+from cephci.utils.build_info import CephTestManifest
+from cli.utilities.configure import setup_ibm_licence
 from utility import utils
 from utility.log import Log
 
@@ -61,17 +63,33 @@ def add(cls, config: Dict) -> None:
         def setup(host):
             name = list(host.keys()).pop()
             _build = list(host.values()).pop()
+            rhcs_version = _build.get("release")
+            _manifest_section = _build.get("tag")
             _node = get_node_by_id(cls.cluster, name)
-            if _build.get("release"):
-                rhcs_version = _build["release"]
-                if not isinstance(rhcs_version, str):
-                    rhcs_version = str(rhcs_version)
+            manifest_obj = None
+            _rpm_version = None
+            if rhcs_version:
+                rhcs_version = str(rhcs_version)
+                if _manifest_section:
+                    _manifest_section = str(_manifest_section)
+                    _platform = _build.get("platform", config["platform"])
+                    _product = config.get("product", "redhat")
+                    manifest_obj = CephTestManifest(
+                        product=_product,
+                        release=rhcs_version,
+                        build_type=_manifest_section,
+                        platform=_platform,
+                    )
+                    _os_major = manifest_obj.platform.split("-")[-1]
+                    _ceph_version = manifest_obj.ceph_version
+                    _rpm_version = f"2:{_ceph_version}.el{_os_major}cp"
+
             elif use_cdn:
                 rhcs_version = default_version
             else:
                 rhcs_version = "default"
 
-            rhel_version = _node.distro_info["VERSION_ID"][0]
+            rhel_version = _node.distro_info["VERSION_ID"].split(".")[0]
             log.debug(
                 f"RHCS version : {rhcs_version} on host {_node.hostname}\n"
                 f"with RHEL major version as : {rhel_version}"
@@ -82,24 +100,6 @@ def add(cls, config: Dict) -> None:
                 r"yum-config-manager --disable \*",
             ]
             cmd = 'subscription-manager repos --list-enabled | grep -i "Repo ID"'
-            # Added downstream test repos for RHEL 8 RHCS 6, Will add live repo once available.
-            cdn_ceph_repo = {
-                "7": {"4": ["rhel-7-server-rhceph-4-tools-rpms"]},
-                "8": {
-                    "4": ["rhceph-4-tools-for-rhel-8-x86_64-rpms"],
-                    "5": ["rhceph-5-tools-for-rhel-8-x86_64-rpms"],
-                    "6": [
-                        "http://download.eng.bos.redhat.com/rhel-8/composes/raw/"
-                        "ceph-6.1-rhel-8/RHCEPH-6.1-RHEL-8-20231004.t.1/compose/Tools/x86_64/os/"
-                    ],
-                },
-                "9": {
-                    "5": ["rhceph-5-tools-for-rhel-9-x86_64-rpms"],
-                    "6": ["rhceph-6-tools-for-rhel-9-x86_64-rpms"],
-                    "7": ["rhceph-7-tools-for-rhel-9-x86_64-rpms"],
-                    "8": ["rhceph-8-tools-for-rhel-9-x86_64-rpms"],
-                },
-            }
 
             rhel_repos = {
                 "7": ["rhel-7-server-rpms", "rhel-7-server-extras-rpms"],
@@ -110,6 +110,10 @@ def add(cls, config: Dict) -> None:
                 "9": [
                     "rhel-9-for-x86_64-appstream-rpms",
                     "rhel-9-for-x86_64-baseos-rpms",
+                ],
+                "10": [
+                    "rhel-10-for-x86_64-appstream-rpms",
+                    "rhel-10-for-x86_64-baseos-rpms",
                 ],
             }
 
@@ -123,7 +127,22 @@ def add(cls, config: Dict) -> None:
                     enabled_repos.append(repo)
             log.debug(f"Enabled repos on the system are : {enabled_repos}")
 
-            if rhcs_version != "default":
+            def enable_cdn_ceph_repo(manifest):
+                if manifest.product == "ibm":
+                    repo_url = manifest.build_info["repositories"]["default"][
+                        manifest.platform
+                    ]
+                    _node.exec_command(
+                        sudo=True,
+                        cmd=f"dnf config-manager --add-repo {repo_url}",
+                    )
+                elif manifest.repo_id:
+                    _node.exec_command(
+                        sudo=True,
+                        cmd=f"{enable_cmd}{manifest.repo_id}",
+                    )
+
+            if rhcs_version != "default" and not _manifest_section:
                 try:
                     # Disabling all the repos and enabling the ones we need to install the ceph client
                     for cmd in disable_all:
@@ -137,14 +156,12 @@ def add(cls, config: Dict) -> None:
                 for repos in rhel_repos[rhel_version]:
                     _node.exec_command(sudo=True, cmd=f"{enable_cmd}{repos}")
 
-                for repos in cdn_ceph_repo[rhel_version][rhcs_version]:
-                    # This is workaround for  RHEL8 RHCS 6. Will remove once live repo available
-                    if rhel_version == "8" and rhcs_version == "6":
-                        _node.exec_command(
-                            sudo=True, cmd=f"yum-config-manager --add-repo={repos}"
-                        )
-                    else:
-                        _node.exec_command(sudo=True, cmd=f"{enable_cmd}{repos}")
+                if manifest_obj:
+                    enable_cdn_ceph_repo(manifest_obj)
+                elif use_cdn:
+                    _manifest = cls.config.get("manifest")
+                    if _manifest:
+                        enable_cdn_ceph_repo(_manifest)
 
                 # Clearing the release preference set and cleaning all yum repos
                 # Observing selinux package dependency issues for ceph-base
@@ -175,7 +192,13 @@ def add(cls, config: Dict) -> None:
 
             # Install ceph-common
             if config.get("install_packages"):
+                _manifest = manifest_obj or cls.config.get("manifest")
+                if _manifest and _manifest.product == "ibm":
+                    setup_ibm_licence(_node, build_type=_manifest.build_type)
+
                 for pkg in config.get("install_packages"):
+                    if _rpm_version:
+                        pkg = f"{pkg}-{_rpm_version}"
                     _node.exec_command(
                         cmd=f"yum install -y --nogpgcheck {pkg}", sudo=True
                     )

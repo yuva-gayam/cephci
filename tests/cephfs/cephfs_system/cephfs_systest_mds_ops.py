@@ -34,10 +34,11 @@ def run(ceph_cluster, **kw):
         fs_util = FsUtilsV1(ceph_cluster)
         config = kw.get("config")
         cephfs_config = {}
-        run_time = config.get("run_time_hrs", 4)
-        replay_interval = config.get("replay_interval_hrs", 4)
-        flush_interval = config.get("flush_interval_hrs", 10)
-        clients = ceph_cluster.get_ceph_objects("client")
+        run_time = config.get("run_time_hrs", 8)
+        replay_interval = config.get("replay_interval_hrs", 1)
+        flush_interval = config.get("flush_interval_secs", 30)
+        clients_orig = ceph_cluster.get_ceph_objects("client")
+        clients = clients_orig[1:11]
         file = "cephfs_systest_data.json"
 
         client1 = clients[0]
@@ -62,7 +63,8 @@ def run(ceph_cluster, **kw):
         proc_status_list = []
         write_procs = []
         mds_test_fail = 0
-        log_base_dir = os.path.dirname(log.logger.handlers[0].baseFilename)
+        # log_base_dir = os.path.dirname(log.logger.handlers[0].baseFilename)
+        log_base_dir = config.get("log-dir")
         log_path = f"{log_base_dir}/mds_subtests"
         try:
             os.mkdir(log_path)
@@ -70,10 +72,10 @@ def run(ceph_cluster, **kw):
             log.info(ex)
             if "File exists" not in str(ex):
                 return 1
-
+        run_time_secs = int(run_time) * 60 * 60
         for mds_test in test_list:
             if (mds_test == "mds_test_workflow_2") and (
-                int(run_time) < int(flush_interval)
+                int(run_time_secs) < int(flush_interval)
             ):
                 log.info("Run time is less than Flush interval,skipping test")
                 continue
@@ -212,12 +214,12 @@ def mds_test_workflow_1(
 
 
 def mds_test_workflow_2(
-    run_time, fs_name, flush_interval, log_path, client, fs_system_utils
+    run_time, fs_name, mds_interval_secs, log_path, client, fs_system_utils
 ):
     log_name = "mds_journal_ops"
+    test_fail = 0
     log1 = fs_system_utils.configure_logger(log_path, log_name)
     end_time = datetime.datetime.now() + datetime.timedelta(hours=run_time)
-    mds_interval_secs = int(flush_interval) * 60 * 60
     cluster_healthy = 1
     log1.info(f"Start {log_name}")
 
@@ -229,12 +231,13 @@ def mds_test_workflow_2(
         out, rc = client.exec_command(
             cmd=f"ceph fs status {fs_name} --f json", client_exec=True
         )
+        log1.info(out)
         mds_out = json.loads(out)
         log1.info("Get the journal stats before flush")
         for mds in mds_out["mdsmap"]:
             if mds["state"] == "active":
                 out, rc = client.exec_command(
-                    cmd=f"ceph tell mds.{mds['rank']} perf dump -f json",
+                    cmd=f"ceph tell mds.{fs_name}:{mds['rank']} perf dump -f json",
                     client_exec=True,
                 )
                 mds_perf = json.loads(out)
@@ -245,21 +248,22 @@ def mds_test_workflow_2(
             wrpos = mds_perf_before_flush[mds_rank]["wrpos"]
             expos = mds_perf_before_flush[mds_rank]["expos"]
             log1.info(
-                f"MDS Rank {mds_rank} : expos - {expos}, wrpos - {wrpos}, rdpos - {rdpos}"
+                f"MDS before flush - Rank {mds_rank} : expos - {expos}, wrpos - {wrpos}, rdpos - {rdpos}"
             )
 
         log1.info("Flush the journal for Active MDS")
         for mds in mds_out["mdsmap"]:
             if mds["state"] == "active":
                 out, rc = client.exec_command(
-                    cmd=f"ceph tell mds.{mds['rank']} flush journal", client_exec=True
+                    cmd=f"ceph tell mds.{fs_name}:{mds['rank']} flush journal",
+                    client_exec=True,
                 )
 
         log1.info("Get the journal stats after flush")
         for mds in mds_out["mdsmap"]:
             if mds["state"] == "active":
                 out, rc = client.exec_command(
-                    cmd=f"ceph tell mds.{mds['rank']} perf dump -f json",
+                    cmd=f"ceph tell mds.{fs_name}:{mds['rank']} perf dump -f json",
                     client_exec=True,
                 )
                 mds_perf = json.loads(out)
@@ -270,7 +274,7 @@ def mds_test_workflow_2(
             wrpos = mds_perf_after_flush[mds_rank]["wrpos"]
             expos = mds_perf_after_flush[mds_rank]["expos"]
             log1.info(
-                f"MDS Rank {mds_rank} : expos - {expos}, wrpos - {wrpos}, rdpos - {rdpos}"
+                f"MDS after flush - Rank {mds_rank} : expos - {expos}, wrpos - {wrpos}, rdpos - {rdpos}"
             )
 
             if (
@@ -279,13 +283,25 @@ def mds_test_workflow_2(
             ):
                 log1.info(f"Journal flush Validated for MDS {mds_rank}")
             else:
+                log1.info(
+                    "After flush expos for rank %s - %s",
+                    mds_rank,
+                    mds_perf_after_flush[mds_rank]["expos"],
+                )
+                log1.info(
+                    "Before flush wrpos for rank %s - %s",
+                    mds_rank,
+                    mds_perf_before_flush[mds_rank]["wrpos"],
+                )
                 log1.error(
                     "Journal flush validation failed, please check journal stats before and after flush above"
                 )
-                return 1
+                test_fail += 1
         cluster_healthy = is_cluster_healthy(client)
 
     log1.info("mds_test_workflow_2 completed")
+    if test_fail > 0:
+        return 1
     return 0
 
 
@@ -302,5 +318,10 @@ def is_cluster_healthy(client):
     cephfs_config = json.load(f)
     if cephfs_config.get("CLUS_MONITOR"):
         if cephfs_config["CLUS_MONITOR"] == "fail":
+            log.info(
+                "Cluster monitor test returned failed status:%s on client %s",
+                cephfs_config["CLUS_MONITOR"],
+                client.node.hostname,
+            )
             return 0
     return 1

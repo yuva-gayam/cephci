@@ -32,7 +32,8 @@ def run(ceph_cluster, **kw):
     filename = "Testfile"
 
     try:
-        # Setup nfs cluster
+        # Setup nfs cluster - use single_export so both clients share the same
+        # export and files created on client1 are visible from client2
         setup_nfs_cluster(
             clients,
             nfs_server_name,
@@ -44,25 +45,28 @@ def run(ceph_cluster, **kw):
             nfs_export,
             fs,
             ceph_cluster=ceph_cluster,
+            single_export=True,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         # Create a file on Mount point from client 1
         cmd = f"touch {nfs_mount}/{filename}"
-        clients[0].exec_command(cmd=cmd, sudo=True)
+        clients[0].exec_command(cmd=cmd)
 
         # Set the selinux context on the file from client 1
         chcon_cmd = f"chcon -t httpd_sys_content_t {nfs_mount}/{filename}"
-        clients[0].exec_command(cmd=chcon_cmd, sudo=True)
+        clients[0].exec_command(cmd=chcon_cmd)
 
         # Verify the selinux label is set on the file from client 2
         cmd = f"ls -Z {nfs_mount}/{filename}"
-        out = clients[1].exec_command(cmd=cmd, sudo=True)
+        out = clients[1].exec_command(cmd=cmd)
 
         if "httpd_sys_content_t" in out[0]:
             log.info(f"selinux lable is set correctly: {out[0]}")
         else:
             raise OperationFailedError("Failed to set/get the selinux context")
-
+        return 0
     except Exception as e:
         log.error(f"Failed to set the selinux label on NFS v4.2 : {e}")
         cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
@@ -71,6 +75,5 @@ def run(ceph_cluster, **kw):
 
     finally:
         log.info("Cleaning up")
-        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export)
+        cleanup_cluster(clients, nfs_mount, nfs_name, nfs_export, nfs_nodes=nfs_node)
         log.info("Cleaning up successful")
-    return 0
