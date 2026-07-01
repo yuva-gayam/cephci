@@ -1,0 +1,279 @@
+# Tier 2: Apple-style RGW SSL — separate deploy per private-key PEM header format.
+#
+# Bootstrap cluster once, then apply one RGW service per key format on a distinct port.
+# Each test validates the service reaches running state via validate-spec-services.
+#
+# global-conf: conf/tentacle/rgw/tier-0_rgw.yaml
+
+tests:
+  - test:
+      abort-on-fail: true
+      desc: Install software pre-requisites for cluster deployment.
+      module: install_prereq.py
+      name: setup pre-requisites
+
+  - test:
+      abort-on-fail: true
+      config:
+        verify_cluster_health: true
+        steps:
+          - config:
+              command: bootstrap
+              service: cephadm
+              args:
+                registry-url: registry.redhat.io
+                mon-ip: node1
+                orphan-initial-daemons: true
+                skip-monitoring-stack: true
+                initial-dashboard-password: admin@123
+                dashboard-password-noupdate: true
+          - config:
+              command: add_hosts
+              service: host
+              args:
+                attach_ip_address: true
+                labels: apply-all-labels
+          - config:
+              command: apply
+              service: mgr
+              args:
+                placement:
+                  label: mgr
+          - config:
+              command: apply
+              service: mon
+              args:
+                placement:
+                  label: mon
+          - config:
+              command: apply
+              service: osd
+              args:
+                all-available-devices: true
+      desc: RHCS cluster bootstrap without RGW.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy cluster
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.pkcs1
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 443
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
+      desc: Deploy RGW with Apple inline PEM (BEGIN RSA PRIVATE KEY / PKCS#1) on port 443.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw apple ssl pkcs1
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.pkcs8
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 444
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#8
+      desc: Deploy RGW with Apple inline PEM (BEGIN PRIVATE KEY / PKCS#8) on port 444.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw apple ssl pkcs8
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.pkcs8_enc
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 445
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#8_enc
+      desc: Deploy RGW with Apple inline PEM (BEGIN ENCRYPTED PRIVATE KEY) on port 445.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw apple ssl pkcs8 encrypted
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.ec
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 8443
+                    rgw_frontend_ssl_certificate: create-cert_apple_EC
+      desc: Deploy RGW with Apple inline PEM (BEGIN EC PRIVATE KEY / SEC1) on port 8443.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw apple ssl ec
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.dsa
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 8444
+                    rgw_frontend_ssl_certificate: create-cert_apple_DSA
+      desc: Deploy RGW with Apple inline PEM (BEGIN DSA PRIVATE KEY) on port 8444.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw apple ssl dsa
+
+  - test:
+      name: verify apple ssl rgw services
+      module: exec.py
+      config:
+        cephadm: true
+        commands:
+          - "ceph orch ls rgw"
+      desc: List all deployed Apple SSL RGW services.
+
+  - test:
+      name: verify pkcs1 rgw running
+      module: apple_rgw_ssl_scenarios.py
+      desc: Verify PKCS#1 RGW 3/3 running.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.pkcs1
+        min_running: 3
+
+  - test:
+      name: verify pkcs1 TLS HTTPS
+      module: apple_rgw_ssl_scenarios.py
+      desc: TLS handshake on PKCS#1 port 443.
+      config:
+        scenario: verify_tls_https
+        service_id: rgw.ssl.pkcs1
+        port: 443
+
+  - test:
+      name: verify pkcs8 TLS HTTPS
+      module: apple_rgw_ssl_scenarios.py
+      desc: TLS handshake on PKCS#8 port 444.
+      config:
+        scenario: verify_tls_https
+        service_id: rgw.ssl.pkcs8
+        port: 444
+
+  - test:
+      name: verify ec TLS HTTPS
+      module: apple_rgw_ssl_scenarios.py
+      desc: TLS handshake on EC port 8443.
+      config:
+        scenario: verify_tls_https
+        service_id: rgw.ssl.ec
+        port: 8443
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node6
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client node for ceph-qe-scripts S3 tests.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: install apple root ca trust
+      module: apple_rgw_ssl_scenarios.py
+      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      name: S3 IO boto3 basic bucket ops
+      desc: M buckets N objects via boto3 on PKCS#1 HTTPS (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects.yaml
+
+  - test:
+      name: S3 IO s3cmd basic operations
+      desc: Basic put/get/delete via s3cmd (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../s3cmd/test_s3cmd.py
+        config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
+
+  - test:
+      name: S3 IO aws cli copy object
+      desc: s3 copy object via aws CLI (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../aws/test_sts_rename_large_object.py
+        config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml

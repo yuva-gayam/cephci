@@ -1,0 +1,30 @@
+# MANUAL ONLY — P0-1 / P0-2 pre-hotfix reproduction (9.0z2 without IBMCEPH15746).
+#
+# These scenarios require images not available in standard CI manifests:
+#   P0-1: BEGIN RSA PRIVATE KEY on 9.0z2 pre-hotfix → parse error, RGW removed
+#   P0-2: BEGIN PRIVATE KEY on 9.0z2 pre-hotfix → apply succeeds (control)
+#
+# Manual steps:
+#   1. openssl genrsa -traditional -out server.key 2048
+#   2. Build rgw.yml with inline PEM (key → leaf → intCA2 → intCA1)
+#   3. Deploy 8.1z3, upgrade to 9.0z2 WITHOUT hotfix
+#   4. ceph orch apply -i rgw.yml
+#   5. ceph orch ps | grep rgw
+#
+# Expected:
+#   P0-1: Parse error; RGW daemons removed
+#   P0-2: Apply succeeds; no issue
+#
+# Automated hotfix coverage: tier-0_apple_ssl_p0_hotfix.yaml
+
+tests:
+  - test:
+      abort-on-fail: false
+      name: manual pre-hotfix placeholder
+      module: exec.py
+      desc: Placeholder — run P0-1/P0-2 manually per header comments.
+      config:
+        cephadm: true
+        check_status: false
+        commands:
+          - "ceph -v"

@@ -1,0 +1,167 @@
+# P0 Apple RGW SSL scenarios on tentacle hotfix (IBMCEPH15746+).
+# Covers: P0-3 hotfix apply, P0-5 export format, P0-6 daemon count baseline.
+#
+# global-conf: conf/tentacle/rgw/tier-0_rgw.yaml
+
+tests:
+  - test:
+      abort-on-fail: true
+      desc: Install software pre-requisites for cluster deployment.
+      module: install_prereq.py
+      name: setup pre-requisites
+
+  - test:
+      abort-on-fail: true
+      config:
+        verify_cluster_health: true
+        steps:
+          - config:
+              command: bootstrap
+              service: cephadm
+              args:
+                registry-url: registry.redhat.io
+                mon-ip: node1
+                orphan-initial-daemons: true
+                skip-monitoring-stack: true
+                initial-dashboard-password: admin@123
+                dashboard-password-noupdate: true
+          - config:
+              command: add_hosts
+              service: host
+              args:
+                attach_ip_address: true
+                labels: apply-all-labels
+          - config:
+              command: apply
+              service: mgr
+              args:
+                placement:
+                  label: mgr
+          - config:
+              command: apply
+              service: mon
+              args:
+                placement:
+                  label: mon
+          - config:
+              command: apply
+              service: osd
+              args:
+                all-available-devices: true
+      desc: Bootstrap cluster without RGW (Apple SSL P0 hotfix).
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy cluster
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.pkcs1
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 443
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
+      desc: "P0-3: Deploy Apple PKCS#1 (BEGIN RSA PRIVATE KEY) on hotfix."
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw apple ssl pkcs1 hotfix
+
+  - test:
+      name: P0-3 verify rgw running 3/3
+      module: apple_rgw_ssl_scenarios.py
+      desc: Verify RGW daemons are running after hotfix apply.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.pkcs1
+        min_running: 3
+
+  - test:
+      name: P0-6 record baseline daemon count
+      module: apple_rgw_ssl_scenarios.py
+      desc: Record RGW daemon count before upgrade.
+      config:
+        scenario: record_baseline_daemon_count
+        service_id: rgw.ssl.pkcs1
+
+  - test:
+      name: P0-5 verify export ssl format
+      module: apple_rgw_ssl_scenarios.py
+      desc: Exported spec has ssl_cert/ssl_key or legacy inline PEM.
+      config:
+        scenario: verify_export_ssl_fields
+        service_id: rgw.ssl.pkcs1
+        allow_either_ssl_format: true
+
+  - test:
+      name: P0-6 verify daemon count unchanged
+      module: apple_rgw_ssl_scenarios.py
+      desc: RGW daemon count unchanged after deploy checks.
+      config:
+        scenario: verify_daemon_count_unchanged
+        service_id: rgw.ssl.pkcs1
+        expected_count: 3
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node6
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client node for ceph-qe-scripts S3 tests.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: install apple root ca trust
+      module: apple_rgw_ssl_scenarios.py
+      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      name: S3 IO boto3 basic bucket ops
+      desc: M buckets N objects via boto3 (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects.yaml
+
+  - test:
+      name: S3 IO s3cmd basic operations
+      desc: Basic put/get/delete via s3cmd (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../s3cmd/test_s3cmd.py
+        config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
+
+  - test:
+      name: S3 IO aws cli copy object
+      desc: s3 copy object via aws CLI (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../aws/test_sts_rename_large_object.py
+        config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml

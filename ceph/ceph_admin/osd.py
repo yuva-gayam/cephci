@@ -79,7 +79,10 @@ class OSD(ApplyMixin, Orch):
             if not node_device_dict:
                 raise DevicesNotFound("No devices available to create OSD(s)")
 
-        if not config.get("args", {}).get("all-available-devices"):
+        if not config.get("args"):
+            config["args"] = {}
+
+        if not config["args"].get("all-available-devices"):
             config["args"]["all-available-devices"] = True
 
         # print out discovered device list

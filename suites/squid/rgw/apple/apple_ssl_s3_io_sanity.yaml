@@ -1,0 +1,63 @@
+# Reusable S3 IO block for Apple RGW SSL suites.
+# Append after RGW deploy + TLS verification. Requires tier-0_rgw.yaml (node6=client).
+#
+# Uses ceph-qe-scripts via sanity_rgw.py (same as tier-1_rgw / sanity_rgw.yaml):
+#   - boto3:  test_Mbuckets_with_Nobjects.py
+#   - s3cmd:  ../s3cmd/test_s3cmd.py
+#   - awscli: ../aws/test_sts_rename_large_object.py + test_s3copyObj_admin_user.yaml
+#
+# Copy the tests below into each Apple SSL suite YAML.
+
+tests:
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node6
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client node for ceph-qe-scripts S3 tests.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: install apple root ca trust
+      module: apple_rgw_ssl_scenarios.py
+      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      name: S3 IO boto3 basic bucket ops
+      desc: M buckets N objects via boto3 (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects.yaml
+
+  - test:
+      name: S3 IO s3cmd basic operations
+      desc: Basic put/get/delete via s3cmd (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../s3cmd/test_s3cmd.py
+        config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
+
+  - test:
+      name: S3 IO aws cli copy object
+      desc: s3 copy object via aws CLI (ceph-qe-scripts).
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../aws/test_sts_rename_large_object.py
+        config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml

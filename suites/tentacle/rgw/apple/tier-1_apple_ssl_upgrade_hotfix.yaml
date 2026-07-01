@@ -1,0 +1,202 @@
+# P0-4 / P1-7: Upgrade 8.1z3 → 9.1 hotfix with Apple PKCS#1 RGW spec preserved.
+#
+# global-conf: conf/tentacle/rgw/tier-0_rgw.yaml
+
+tests:
+  - test:
+      abort-on-fail: true
+      module: install_prereq.py
+      name: setup pre-requisites
+      desc: Install prerequisites.
+
+  - test:
+      abort-on-fail: true
+      config:
+        verify_cluster_health: true
+        steps:
+          - config:
+              command: bootstrap
+              service: cephadm
+              args:
+                rhcs-version: 8.1
+                release: released
+                registry-url: registry.redhat.io
+                mon-ip: node1
+                orphan-initial-daemons: true
+                skip-monitoring-stack: true
+                initial-dashboard-password: admin@123
+                dashboard-password-noupdate: true
+          - config:
+              command: add_hosts
+              service: host
+              args:
+                attach_ip_address: true
+                labels: apply-all-labels
+          - config:
+              command: apply
+              service: mgr
+              args:
+                placement:
+                  label: mgr
+          - config:
+              command: apply
+              service: mon
+              args:
+                placement:
+                  label: mon
+          - config:
+              command: apply
+              service: osd
+              args:
+                all-available-devices: true
+      desc: Bootstrap 8.1z3 cluster.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy 8.1 cluster
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node6
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure client for parallel IO.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.pkcs1
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 443
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
+      desc: Deploy Apple PKCS#1 RGW on 8.1 baseline.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy apple rgw pre upgrade
+
+  - test:
+      name: P0-6 record pre-upgrade daemon count
+      module: apple_rgw_ssl_scenarios.py
+      desc: Baseline RGW count before upgrade.
+      config:
+        scenario: record_baseline_daemon_count
+        service_id: rgw.ssl.pkcs1
+
+  - test:
+      name: P0-6 capture baseline count
+      module: apple_rgw_ssl_scenarios.py
+      desc: Verify 3 RGW daemons before upgrade.
+      config:
+        scenario: verify_daemon_count_unchanged
+        service_id: rgw.ssl.pkcs1
+        expected_count: 3
+
+  - test:
+      name: install apple root ca trust
+      module: apple_rgw_ssl_scenarios.py
+      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      abort-on-fail: true
+      name: P1-7 upgrade with IO parallel
+      desc: Upgrade to hotfix while S3 IO runs.
+      module: test_parallel.py
+      parallel:
+        - test:
+            name: S3 IO boto3 during upgrade
+            module: sanity_rgw.py
+            desc: boto3 bucket ops during upgrade window.
+            config:
+              run-on-rgw: true
+              script-name: test_Mbuckets_with_Nobjects.py
+              config-file-name: test_Mbuckets_with_Nobjects.yaml
+        - test:
+            name: Upgrade cluster to hotfix
+            module: test_cephadm_upgrade.py
+            desc: orch upgrade to 9.1 hotfix image.
+            verify_cluster_health: true
+            config:
+              command: start
+              service: upgrade
+              base_cmd_args:
+                verbose: true
+
+  - test:
+      name: P0-4 verify RGW not removed after upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: RGW 3/3 running post upgrade.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.pkcs1
+        min_running: 3
+
+  - test:
+      name: P0-6 verify daemon count post upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: RGW daemon count unchanged after upgrade.
+      config:
+        scenario: verify_daemon_count_unchanged
+        service_id: rgw.ssl.pkcs1
+        expected_count: 3
+
+  - test:
+      name: P1-3 TLS post upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: HTTPS verification after hotfix upgrade.
+      config:
+        scenario: verify_tls_https
+        service_id: rgw.ssl.pkcs1
+        port: 443
+
+  - test:
+      name: P1-6 S3 IO boto3 post upgrade
+      desc: M buckets N objects via boto3 after upgrade.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects.yaml
+
+  - test:
+      name: P1-6 S3 IO s3cmd post upgrade
+      desc: Basic put/get/delete via s3cmd after upgrade.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../s3cmd/test_s3cmd.py
+        config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
+
+  - test:
+      name: P1-6 S3 IO aws cli post upgrade
+      desc: s3 copy object via aws CLI after upgrade.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        script-name: ../aws/test_sts_rename_large_object.py
+        config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml
