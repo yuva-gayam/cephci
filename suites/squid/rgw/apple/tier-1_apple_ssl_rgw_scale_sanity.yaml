@@ -1,0 +1,284 @@
+# Apple RGW SSL scale sanity: 10-node cluster, 6 RGW daemons, scale to 8, redeploy,
+# export/fetch certs, and S3 IO (boto/s3cmd/aws) on the two new RGW daemons.
+#
+# global-conf: conf/squid/rgw/apple/tier-0_apple_ssl_10node.yaml
+
+tests:
+  - test:
+      abort-on-fail: true
+      module: install_prereq.py
+      name: setup pre-requisites
+      desc: Install prerequisites.
+
+  - test:
+      abort-on-fail: true
+      config:
+        verify_cluster_health: true
+        steps:
+          - config:
+              command: bootstrap
+              service: cephadm
+              args:
+                registry-url: registry.redhat.io
+                mon-ip: node1
+                orphan-initial-daemons: true
+                skip-monitoring-stack: true
+                initial-dashboard-password: admin@123
+                dashboard-password-noupdate: true
+          - config:
+              command: add_hosts
+              service: host
+              args:
+                attach_ip_address: true
+                labels: apply-all-labels
+          - config:
+              command: apply
+              service: mgr
+              args:
+                placement:
+                  label: mgr
+          - config:
+              command: apply
+              service: mon
+              args:
+                placement:
+                  label: mon
+          - config:
+              command: apply
+              service: osd
+              args:
+                all-available-devices: true
+      desc: Bootstrap 10-node cluster without RGW.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy cluster
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.scale
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                      - node6
+                      - node7
+                      - node8
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 443
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
+      desc: Deploy Apple PKCS#1 RGW on 6 nodes (node3-node8).
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy rgw ssl 6 daemons
+
+  - test:
+      name: verify 6 rgw daemons running
+      module: apple_rgw_ssl_scenarios.py
+      desc: All 6 initial RGW daemons reach running state.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.scale
+        min_running: 6
+        expected_count: 6
+
+  - test:
+      name: export and fetch ssl certs initial 6
+      module: apple_rgw_ssl_scenarios.py
+      desc: Export RGW spec and fetch TLS certs from all 6 RGW frontends.
+      config:
+        scenario: get_rgw_ssl_certs
+        service_id: rgw.ssl.scale
+        port: 443
+        allow_either_ssl_format: true
+        expected_cert_count: 3
+
+  - test:
+      name: verify TLS on initial 6 rgw nodes
+      module: apple_rgw_ssl_scenarios.py
+      desc: HTTPS handshake on node3-node8.
+      config:
+        scenario: verify_tls_https
+        service_id: rgw.ssl.scale
+        port: 443
+        nodes:
+          - node3
+          - node4
+          - node5
+          - node6
+          - node7
+          - node8
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.scale
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                      - node6
+                      - node7
+                      - node8
+                      - node9
+                      - node10
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 443
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
+      desc: Scale RGW placement to 8 nodes (add node9, node10) and redeploy.
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: scale rgw to 8 daemons
+
+  - test:
+      name: orch redeploy scaled rgw service
+      module: apple_rgw_ssl_scenarios.py
+      desc: Redeploy RGW after placement scale-out.
+      config:
+        scenario: orch_redeploy_rgw
+        service_id: rgw.ssl.scale
+        min_running: 8
+        expected_count: 8
+        port: 443
+        verify_tls: false
+        wait_seconds: 120
+
+  - test:
+      name: verify 8 rgw daemons running
+      module: apple_rgw_ssl_scenarios.py
+      desc: All 8 RGW daemons running after scale-out.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.scale
+        min_running: 8
+        expected_count: 8
+
+  - test:
+      name: export and fetch ssl certs on new rgw nodes
+      module: apple_rgw_ssl_scenarios.py
+      desc: Export spec and fetch TLS certs from scaled RGW daemons on node9-node10.
+      config:
+        scenario: get_rgw_ssl_certs
+        service_id: rgw.ssl.scale
+        port: 443
+        allow_either_ssl_format: true
+        expected_cert_count: 3
+        nodes:
+          - node9
+          - node10
+
+  - test:
+      name: verify TLS on new rgw nodes
+      module: apple_rgw_ssl_scenarios.py
+      desc: HTTPS on the two newly added RGW daemons.
+      config:
+        scenario: verify_tls_on_nodes
+        service_id: rgw.ssl.scale
+        port: 443
+        nodes:
+          - node9
+          - node10
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node10
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client on node10 for ceph-qe-scripts.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: install apple root ca trust
+      module: apple_rgw_ssl_scenarios.py
+      desc: Trust Apple PKI root CA on RGW and client nodes.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      name: S3 IO boto3 on new rgw node9
+      desc: boto3 bucket ops via node9 RGW frontend.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        rgw-hostname: node9
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects.yaml
+
+  - test:
+      name: S3 IO s3cmd on new rgw node9
+      desc: s3cmd ops via node9 RGW frontend.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        rgw-hostname: node9
+        script-name: ../s3cmd/test_s3cmd.py
+        config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
+
+  - test:
+      name: S3 IO aws cli on new rgw node9
+      desc: aws CLI ops via node9 RGW frontend.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        rgw-hostname: node9
+        script-name: ../aws/test_sts_rename_large_object.py
+        config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml
+
+  - test:
+      name: S3 IO boto3 on new rgw node10
+      desc: boto3 bucket ops via node10 RGW frontend.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        rgw-hostname: node10
+        script-name: test_Mbuckets_with_Nobjects.py
+        config-file-name: test_Mbuckets_with_Nobjects.yaml
+
+  - test:
+      name: S3 IO s3cmd on new rgw node10
+      desc: s3cmd ops via node10 RGW frontend.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        rgw-hostname: node10
+        script-name: ../s3cmd/test_s3cmd.py
+        config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
+
+  - test:
+      name: S3 IO aws cli on new rgw node10
+      desc: aws CLI ops via node10 RGW frontend.
+      module: sanity_rgw.py
+      config:
+        run-on-rgw: true
+        rgw-hostname: node10
+        script-name: ../aws/test_sts_rename_large_object.py
+        config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml

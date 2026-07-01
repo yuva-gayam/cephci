@@ -1,0 +1,80 @@
+# 10-node Apple RGW SSL scale sanity cluster.
+#   node1-node2: mon/mgr/osd
+#   node3-node8: initial 6 RGW daemons (osd + rgw)
+#   node9-node10: scale-out RGW hosts (osd; node10 also client)
+globals:
+  - ceph-cluster:
+      name: ceph
+
+      node1:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - _admin
+          - installer
+          - mgr
+          - mon
+          - osd
+
+      node2:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - mgr
+          - mon
+          - osd
+
+      node3:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
+
+      node4:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
+
+      node5:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
+
+      node6:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
+
+      node7:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
+
+      node8:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - rgw
+
+      node9:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+
+      node10:
+        disk-size: 15
+        no-of-volumes: 3
+        role:
+          - osd
+          - client

@@ -109,12 +109,22 @@ def verify_export_ssl_fields(cluster, config: Dict[str, Any]) -> None:
         )
 
 
+def _daemons_on_nodes(
+    daemons: List[Dict[str, Any]], nodes: Optional[List[str]]
+) -> List[Dict[str, Any]]:
+    if not nodes:
+        return daemons
+    node_set = set(nodes)
+    return [d for d in daemons if d.get("hostname") in node_set]
+
+
 def verify_tls_https(cluster, config: Dict[str, Any]) -> None:
     """P1-3: HTTPS responds on all RGW nodes (curl + openssl s_client)."""
     service_id = config["service_id"]
     port = config.get("port", 443)
     installer = _installer(cluster)
     daemons = _rgw_daemons(installer, service_id)
+    daemons = _daemons_on_nodes(daemons, config.get("nodes"))
     assert daemons, f"No RGW daemons for {service_id}"
 
     for daemon in daemons:
@@ -163,6 +173,69 @@ def verify_fullchain_pem_order(cluster, config: Dict[str, Any]) -> None:
     assert cert_count >= expected_certs, (
         f"Expected >= {expected_certs} certs in chain, got {cert_count}"
     )
+
+
+def verify_tls_on_nodes(cluster, config: Dict[str, Any]) -> None:
+    """TLS verification on a subset of RGW nodes (e.g. newly scaled daemons)."""
+    assert config.get("nodes"), "config.nodes is required for verify_tls_on_nodes"
+    verify_tls_https(cluster, config)
+
+
+def get_rgw_ssl_certs(cluster, config: Dict[str, Any]) -> None:
+    """Export RGW spec and fetch served TLS certs from RGW frontends."""
+    service_id = config["service_id"]
+    port = config.get("port", 443)
+    installer = _installer(cluster)
+    svc_name = _service_name(installer, service_id)
+
+    exported = _ceph_cmd(installer, f"ceph orch ls {svc_name} --export")
+    export_path = f"/tmp/rgw-apple-export-{service_id}.yaml"
+    export_file = installer.remote_file(
+        sudo=True, file_name=export_path, file_mode="w"
+    )
+    export_file.write(exported)
+    export_file.flush()
+    export_file.close()
+    LOG.info("Exported RGW spec to %s (%s bytes)", export_path, len(exported))
+
+    verify_export_ssl_fields(cluster, config)
+
+    daemons = _rgw_daemons(installer, service_id)
+    daemons = _daemons_on_nodes(daemons, config.get("nodes"))
+    assert daemons, f"No RGW daemons to fetch certs for {service_id}"
+
+    for daemon in daemons:
+        hostname = daemon["hostname"]
+        node = cluster.get_node_by_hostname(hostname)
+        ip = node.ip_address
+        cmd = (
+            f"echo | timeout 15 openssl s_client -connect {ip}:{port} -showcerts "
+            f"2>/dev/null"
+        )
+        out, _ = node.exec_command(sudo=True, cmd=cmd)
+        cert_count = out.count("-----BEGIN CERTIFICATE-----")
+        subject_cmd = (
+            f"echo | timeout 15 openssl s_client -connect {ip}:{port} "
+            f"2>/dev/null | openssl x509 -noout -subject -issuer"
+        )
+        cert_meta, _ = node.exec_command(sudo=True, cmd=subject_cmd, check_ec=False)
+        cert_path = f"/tmp/rgw-apple-cert-{hostname}.pem"
+        cert_file = node.remote_file(sudo=True, file_name=cert_path, file_mode="w")
+        cert_file.write(out)
+        cert_file.flush()
+        cert_file.close()
+        LOG.info(
+            "RGW SSL cert on %s (%s:%s): chain=%s meta=%s saved=%s",
+            hostname,
+            ip,
+            port,
+            cert_count,
+            (cert_meta or "").strip(),
+            cert_path,
+        )
+        assert cert_count >= config.get("expected_cert_count", 1), (
+            f"No certificate served on {hostname} ({ip}:{port})"
+        )
 
 
 def install_apple_root_ca(cluster, config: Dict[str, Any]) -> None:
@@ -306,7 +379,9 @@ SCENARIOS = {
     "verify_daemon_count_unchanged": verify_daemon_count_unchanged,
     "verify_export_ssl_fields": verify_export_ssl_fields,
     "verify_tls_https": verify_tls_https,
+    "verify_tls_on_nodes": verify_tls_on_nodes,
     "verify_fullchain_pem_order": verify_fullchain_pem_order,
+    "get_rgw_ssl_certs": get_rgw_ssl_certs,
     "install_apple_root_ca": install_apple_root_ca,
     "orch_redeploy_rgw": orch_redeploy_rgw,
     "certificate_rotation": certificate_rotation,

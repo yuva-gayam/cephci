@@ -105,7 +105,11 @@ def run(ceph_cluster, **kw):
     cloud_type = config.get("cloud-type")
     log.info(f"Cloud Type is {cloud_type}")
     test_config = {"config": config.get("test-config", {})}
-    rgw_node = rgw_ceph_object.node
+    rgw_hostname = config.get("rgw-hostname")
+    if rgw_hostname:
+        rgw_node = ceph_cluster.get_node_by_hostname(rgw_hostname)
+    else:
+        rgw_node = rgw_ceph_object.node
     client_node = client_ceph_object.node
     run_on_rgw = (
         True
