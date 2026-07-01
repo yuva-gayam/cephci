@@ -19,7 +19,7 @@ tests:
               service: cephadm
               args:
                 rhcs-version: 8.1
-                release: released
+                release: z3
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
@@ -146,6 +146,17 @@ tests:
               service: upgrade
               base_cmd_args:
                 verbose: true
+
+  - test:
+      name: verify upgrade to hotfix completed
+      module: exec.py
+      desc: Confirm orch upgrade finished on hotfix.
+      config:
+        cephadm: true
+        commands:
+          - ceph -v
+          - ceph orch upgrade status
+          - ceph -s
 
   - test:
       name: P0-4 verify RGW not removed after upgrade

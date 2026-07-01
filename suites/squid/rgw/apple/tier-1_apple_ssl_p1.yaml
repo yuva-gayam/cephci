@@ -1,7 +1,7 @@
-# P2 Apple RGW SSL scenarios on tentacle hotfix.
-# Path: 8.1z3 bootstrap → deploy RGW on 8.1z3 → upgrade to hotfix → P2 tests.
+# P1 Apple RGW SSL scenarios on tentacle hotfix.
+# Path: 8.1z3 bootstrap → deploy RGW on 8.1z3 → upgrade to hotfix → P1 tests.
 #
-# global-conf: conf/tentacle/rgw/tier-0_rgw.yaml
+# global-conf: conf/squid/rgw/tier-0_rgw.yaml
 
 tests:
   - test:
@@ -50,10 +50,26 @@ tests:
               service: osd
               args:
                 all-available-devices: true
-      desc: Bootstrap 8.1z3 cluster for Apple SSL P2 tests.
+      desc: Bootstrap 8.1z3 cluster for Apple SSL P1 tests.
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy 8.1 cluster
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node6
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client node.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
 
   - test:
       abort-on-fail: true
@@ -75,10 +91,10 @@ tests:
                     ssl: true
                     rgw_frontend_port: 443
                     rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
-      desc: Deploy Apple PKCS#1 RGW for P2 tests.
+      desc: "P1-5: Apple customer spec PKCS#1 inline PEM on 8.1z3."
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy apple rgw on 8.1
+      name: deploy apple pkcs1 spec on 8.1
 
   - test:
       name: verify rgw running pre upgrade
@@ -88,6 +104,16 @@ tests:
         scenario: verify_rgw_running
         service_id: rgw.ssl.pkcs1
         min_running: 3
+
+  - test:
+      name: install apple root ca trust pre upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: Install Apple PKI root CA before hotfix upgrade.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
 
   - test:
       abort-on-fail: true
@@ -122,74 +148,38 @@ tests:
         min_running: 3
 
   - test:
-      name: P2-1 certificate rotation redeploy
+      name: P1-3 TLS HTTPS verification
       module: apple_rgw_ssl_scenarios.py
-      desc: Redeploy RGW after cert generation (rotation path).
+      desc: curl and openssl s_client on all RGW nodes.
       config:
-        scenario: certificate_rotation
+        scenario: verify_tls_https
+        service_id: rgw.ssl.pkcs1
+        port: 443
+
+  - test:
+      name: P1-4 fullchain PEM order
+      module: apple_rgw_ssl_scenarios.py
+      desc: Verify 3 certs served (leaf + 2 intermediate).
+      config:
+        scenario: verify_fullchain_pem_order
+        service_id: rgw.ssl.pkcs1
+        port: 443
+        expected_cert_count: 3
+
+  - test:
+      name: P1-2 orch redeploy rgw
+      module: apple_rgw_ssl_scenarios.py
+      desc: Redeploy RGW service on hotfix.
+      config:
+        scenario: orch_redeploy_rgw
         service_id: rgw.ssl.pkcs1
         min_running: 3
-        wait_seconds: 60
+        port: 443
+        verify_tls: true
+        wait_seconds: 90
 
   - test:
-      name: P2-4 export import roundtrip
-      module: apple_rgw_ssl_scenarios.py
-      desc: Export RGW spec and re-apply.
-      config:
-        scenario: export_import_roundtrip
-        service_id: rgw.ssl.pkcs1
-        min_running: 3
-        wait_seconds: 45
-
-  - test:
-      name: P2-5 idempotent orch apply
-      module: apple_rgw_ssl_scenarios.py
-      desc: Apply exported spec 3 times without flapping.
-      config:
-        scenario: idempotent_apply
-        service_id: rgw.ssl.pkcs1
-        min_running: 3
-        repeat: 3
-        wait_seconds: 20
-
-  - test:
-      abort-on-fail: false
-      name: P2-3 negative invalid PEM
-      module: apple_rgw_ssl_scenarios.py
-      desc: Invalid PEM must fail apply without removing existing RGW.
-      config:
-        scenario: negative_invalid_pem
-        service_id: rgw.ssl.pkcs1
-        expect_apply_failure: true
-
-  - test:
-      abort-on-fail: true
-      config:
-        command: add
-        id: client.1
-        node: node6
-        install_packages:
-          - ceph-common
-        copy_admin_keyring: true
-        git_clone: true
-        git_node_role: rgw
-      desc: Configure RGW client node for ceph-qe-scripts S3 tests.
-      destroy-cluster: false
-      module: test_client.py
-      name: configure client
-
-  - test:
-      name: install apple root ca trust
-      module: apple_rgw_ssl_scenarios.py
-      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
-      config:
-        scenario: install_apple_root_ca
-        roles:
-          - rgw
-          - client
-
-  - test:
-      name: S3 IO boto3 basic bucket ops
+      name: P1-6 S3 IO boto3 basic bucket ops
       desc: M buckets N objects via boto3 (ceph-qe-scripts).
       module: sanity_rgw.py
       config:
@@ -198,7 +188,7 @@ tests:
         config-file-name: test_Mbuckets_with_Nobjects.yaml
 
   - test:
-      name: S3 IO s3cmd basic operations
+      name: P1-6 S3 IO s3cmd basic operations
       desc: Basic put/get/delete via s3cmd (ceph-qe-scripts).
       module: sanity_rgw.py
       config:
@@ -207,10 +197,45 @@ tests:
         config-file-name: ../../s3cmd/configs/test_s3cmd.yaml
 
   - test:
-      name: S3 IO aws cli copy object
+      name: P1-6 S3 IO aws cli copy object
       desc: s3 copy object via aws CLI (ceph-qe-scripts).
       module: sanity_rgw.py
       config:
         run-on-rgw: true
         script-name: ../aws/test_sts_rename_large_object.py
         config-file-name: ../../aws/configs/test_s3copyObj_admin_user.yaml
+
+  - test:
+      abort-on-fail: true
+      config:
+        steps:
+          - config:
+              command: apply_spec
+              service: orch
+              validate-spec-services: true
+              specs:
+                - service_type: rgw
+                  service_id: rgw.ssl.split
+                  placement:
+                    nodes:
+                      - node3
+                      - node4
+                      - node5
+                  spec:
+                    ssl: true
+                    rgw_frontend_port: 446
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
+                    use_ssl_cert_ssl_key: true
+      desc: "P1-1: Direct apply ssl_cert/ssl_key format."
+      destroy-cluster: false
+      module: test_cephadm.py
+      name: deploy ssl_cert ssl_key format
+
+  - test:
+      name: P1-1 verify ssl_cert ssl_key export
+      module: apple_rgw_ssl_scenarios.py
+      desc: Exported spec contains ssl_cert and ssl_key.
+      config:
+        scenario: verify_export_ssl_fields
+        service_id: rgw.ssl.split
+        require_ssl_cert_ssl_key: true

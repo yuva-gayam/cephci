@@ -1,5 +1,5 @@
-# Apple RGW SSL scale sanity: 10-node cluster, 6 RGW daemons, scale to 8, redeploy,
-# export/fetch certs, and S3 IO (boto/s3cmd/aws) on the two new RGW daemons.
+# Apple RGW SSL scale sanity: 8.1z3 → hotfix upgrade path. 10-node cluster,
+# 6→8 RGW scale (pre-upgrade), hotfix upgrade, then cert fetch + S3 IO on new daemons.
 #
 # global-conf: conf/squid/rgw/apple/tier-0_apple_ssl_10node.yaml
 
@@ -19,6 +19,8 @@ tests:
               command: bootstrap
               service: cephadm
               args:
+                rhcs-version: 8.1
+                release: z3
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
@@ -48,10 +50,10 @@ tests:
               service: osd
               args:
                 all-available-devices: true
-      desc: Bootstrap 10-node cluster without RGW.
+      desc: Bootstrap 8.1z3 10-node cluster without RGW.
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy cluster
+      name: deploy 8.1 cluster
 
   - test:
       abort-on-fail: true
@@ -76,7 +78,7 @@ tests:
                     ssl: true
                     rgw_frontend_port: 443
                     rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
-      desc: Deploy Apple PKCS#1 RGW on 6 nodes (node3-node8).
+      desc: Deploy Apple PKCS#1 RGW on 6 nodes on 8.1 baseline.
       destroy-cluster: false
       module: test_cephadm.py
       name: deploy rgw ssl 6 daemons
@@ -172,6 +174,87 @@ tests:
         expected_count: 8
 
   - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node10
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client on node10 for ceph-qe-scripts.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: install apple root ca trust pre upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: Trust Apple PKI root CA before upgrade.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      name: record pre-upgrade rgw daemon count
+      module: apple_rgw_ssl_scenarios.py
+      desc: Baseline 8 RGW daemons before hotfix upgrade.
+      config:
+        scenario: record_baseline_daemon_count
+        service_id: rgw.ssl.scale
+
+  - test:
+      abort-on-fail: true
+      name: upgrade to hotfix with parallel S3 IO
+      desc: Upgrade 8.1z3 to 9.1 hotfix while boto3 IO runs.
+      module: test_parallel.py
+      parallel:
+        - test:
+            name: S3 IO boto3 during upgrade
+            module: sanity_rgw.py
+            desc: boto3 bucket ops during upgrade window.
+            config:
+              run-on-rgw: true
+              rgw-hostname: node9
+              script-name: test_Mbuckets_with_Nobjects.py
+              config-file-name: test_Mbuckets_with_Nobjects.yaml
+        - test:
+            name: Upgrade cluster to hotfix
+            module: test_cephadm_upgrade.py
+            desc: orch upgrade to 9.1 hotfix image.
+            verify_cluster_health: true
+            config:
+              command: start
+              service: upgrade
+              base_cmd_args:
+                verbose: true
+
+  - test:
+      name: verify upgrade to hotfix completed
+      module: exec.py
+      desc: Confirm orch upgrade finished on hotfix.
+      config:
+        cephadm: true
+        commands:
+          - ceph -v
+          - ceph orch upgrade status
+          - ceph -s
+
+  - test:
+      name: verify 8 rgw daemons post upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: All 8 RGW daemons running after hotfix upgrade.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.scale
+        min_running: 8
+        expected_count: 8
+
+  - test:
       name: export and fetch ssl certs on new rgw nodes
       module: apple_rgw_ssl_scenarios.py
       desc: Export spec and fetch TLS certs from scaled RGW daemons on node9-node10.
@@ -196,32 +279,6 @@ tests:
         nodes:
           - node9
           - node10
-
-  - test:
-      abort-on-fail: true
-      config:
-        command: add
-        id: client.1
-        node: node10
-        install_packages:
-          - ceph-common
-        copy_admin_keyring: true
-        git_clone: true
-        git_node_role: rgw
-      desc: Configure RGW client on node10 for ceph-qe-scripts.
-      destroy-cluster: false
-      module: test_client.py
-      name: configure client
-
-  - test:
-      name: install apple root ca trust
-      module: apple_rgw_ssl_scenarios.py
-      desc: Trust Apple PKI root CA on RGW and client nodes.
-      config:
-        scenario: install_apple_root_ca
-        roles:
-          - rgw
-          - client
 
   - test:
       name: S3 IO boto3 on new rgw node9

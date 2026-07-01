@@ -1,4 +1,5 @@
-# P0 Apple RGW SSL on squid (deploy + verify). Hotfix upgrade: use tentacle tier-1_apple_ssl_upgrade_hotfix.yaml.
+# P0 Apple RGW SSL on squid.
+# Path: 8.1z3 bootstrap → deploy RGW on 8.1z3 → upgrade to hotfix → verify + S3.
 #
 # global-conf: conf/squid/rgw/tier-0_rgw.yaml
 
@@ -18,6 +19,8 @@ tests:
               command: bootstrap
               service: cephadm
               args:
+                rhcs-version: 8.1
+                release: z3
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
@@ -47,10 +50,10 @@ tests:
               service: osd
               args:
                 all-available-devices: true
-      desc: Bootstrap squid cluster for Apple SSL P0.
+      desc: Bootstrap 8.1z3 cluster for Apple SSL P0.
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy cluster
+      name: deploy 8.1 cluster
 
   - test:
       abort-on-fail: true
@@ -72,13 +75,69 @@ tests:
                     ssl: true
                     rgw_frontend_port: 443
                     rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
-      desc: Deploy Apple PKCS#1 RGW on squid.
+      desc: Deploy Apple PKCS#1 RGW on 8.1z3 baseline.
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy apple pkcs1
+      name: deploy apple pkcs1 on 8.1
 
   - test:
-      name: P0-3 verify rgw running
+      name: P0-3 verify rgw running pre upgrade
+      module: apple_rgw_ssl_scenarios.py
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.pkcs1
+        min_running: 3
+
+  - test:
+      abort-on-fail: true
+      config:
+        command: add
+        id: client.1
+        node: node6
+        install_packages:
+          - ceph-common
+        copy_admin_keyring: true
+        git_clone: true
+        git_node_role: rgw
+      desc: Configure RGW client node for ceph-qe-scripts S3 tests.
+      destroy-cluster: false
+      module: test_client.py
+      name: configure client
+
+  - test:
+      name: install apple root ca trust pre upgrade
+      module: apple_rgw_ssl_scenarios.py
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      abort-on-fail: true
+      name: upgrade 8.1z3 to hotfix
+      desc: Upgrade cluster from 8.1z3 to 9.1 hotfix.
+      module: test_cephadm_upgrade.py
+      verify_cluster_health: true
+      config:
+        command: start
+        service: upgrade
+        base_cmd_args:
+          verbose: true
+
+  - test:
+      name: verify upgrade to hotfix completed
+      module: exec.py
+      desc: Confirm orch upgrade finished on hotfix.
+      config:
+        cephadm: true
+        commands:
+          - ceph -v
+          - ceph orch upgrade status
+          - ceph -s
+
+  - test:
+      name: P0-3 verify rgw running post upgrade
       module: apple_rgw_ssl_scenarios.py
       config:
         scenario: verify_rgw_running
@@ -100,32 +159,6 @@ tests:
         scenario: verify_fullchain_pem_order
         service_id: rgw.ssl.pkcs1
         port: 443
-
-  - test:
-      abort-on-fail: true
-      config:
-        command: add
-        id: client.1
-        node: node6
-        install_packages:
-          - ceph-common
-        copy_admin_keyring: true
-        git_clone: true
-        git_node_role: rgw
-      desc: Configure RGW client node for ceph-qe-scripts S3 tests.
-      destroy-cluster: false
-      module: test_client.py
-      name: configure client
-
-  - test:
-      name: install apple root ca trust
-      module: apple_rgw_ssl_scenarios.py
-      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
-      config:
-        scenario: install_apple_root_ca
-        roles:
-          - rgw
-          - client
 
   - test:
       name: S3 IO boto3 basic bucket ops

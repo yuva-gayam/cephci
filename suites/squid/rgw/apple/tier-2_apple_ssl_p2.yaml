@@ -1,7 +1,7 @@
 # P2 Apple RGW SSL scenarios on tentacle hotfix.
 # Path: 8.1z3 bootstrap → deploy RGW on 8.1z3 → upgrade to hotfix → P2 tests.
 #
-# global-conf: conf/tentacle/rgw/tier-0_rgw.yaml
+# global-conf: conf/squid/rgw/tier-0_rgw.yaml
 
 tests:
   - test:

@@ -1,5 +1,5 @@
 # P1 Apple RGW SSL scenarios on tentacle hotfix.
-# Covers: P1-1 ssl_cert/ssl_key, P1-2 redeploy, P1-3 TLS, P1-4 fullchain, P1-5 Apple spec, P1-6 S3.
+# Path: 8.1z3 bootstrap → deploy RGW on 8.1z3 → upgrade to hotfix → P1 tests.
 #
 # global-conf: conf/tentacle/rgw/tier-0_rgw.yaml
 
@@ -19,6 +19,8 @@ tests:
               command: bootstrap
               service: cephadm
               args:
+                rhcs-version: 8.1
+                release: z3
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
@@ -48,10 +50,10 @@ tests:
               service: osd
               args:
                 all-available-devices: true
-      desc: Bootstrap cluster for Apple SSL P1 tests.
+      desc: Bootstrap 8.1z3 cluster for Apple SSL P1 tests.
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy cluster
+      name: deploy 8.1 cluster
 
   - test:
       abort-on-fail: true
@@ -89,10 +91,61 @@ tests:
                     ssl: true
                     rgw_frontend_port: 443
                     rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
-      desc: "P1-5: Apple customer spec PKCS#1 inline PEM."
+      desc: "P1-5: Apple customer spec PKCS#1 inline PEM on 8.1z3."
       destroy-cluster: false
       module: test_cephadm.py
-      name: deploy apple pkcs1 spec
+      name: deploy apple pkcs1 spec on 8.1
+
+  - test:
+      name: verify rgw running pre upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: Verify RGW 3/3 on 8.1z3 before hotfix upgrade.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.pkcs1
+        min_running: 3
+
+  - test:
+      name: install apple root ca trust pre upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: Install Apple PKI root CA before hotfix upgrade.
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+
+  - test:
+      abort-on-fail: true
+      name: upgrade 8.1z3 to hotfix
+      desc: Upgrade cluster from 8.1z3 to 9.1 hotfix.
+      module: test_cephadm_upgrade.py
+      verify_cluster_health: true
+      config:
+        command: start
+        service: upgrade
+        base_cmd_args:
+          verbose: true
+
+  - test:
+      name: verify upgrade to hotfix completed
+      module: exec.py
+      desc: Confirm orch upgrade finished on hotfix.
+      config:
+        cephadm: true
+        commands:
+          - ceph -v
+          - ceph orch upgrade status
+          - ceph -s
+
+  - test:
+      name: verify rgw running post upgrade
+      module: apple_rgw_ssl_scenarios.py
+      desc: Verify RGW 3/3 after hotfix upgrade.
+      config:
+        scenario: verify_rgw_running
+        service_id: rgw.ssl.pkcs1
+        min_running: 3
 
   - test:
       name: P1-3 TLS HTTPS verification
@@ -124,16 +177,6 @@ tests:
         port: 443
         verify_tls: true
         wait_seconds: 90
-
-  - test:
-      name: install apple root ca trust
-      module: apple_rgw_ssl_scenarios.py
-      desc: Install Apple PKI root CA on RGW and client for HTTPS S3.
-      config:
-        scenario: install_apple_root_ca
-        roles:
-          - rgw
-          - client
 
   - test:
       name: P1-6 S3 IO boto3 basic bucket ops
