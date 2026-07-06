@@ -19,7 +19,7 @@ tests:
               service: cephadm
               args:
                 rhcs-version: 8.1
-                release: released
+                release: z3
                 registry-url: registry.redhat.io
                 mon-ip: node1
                 orphan-initial-daemons: true
@@ -62,7 +62,8 @@ tests:
                       - node5
                   spec:
                     ssl: true
-                    generate_cert: true
+                    rgw_frontend_port: 443
+                    rgw_frontend_ssl_certificate: create-cert_apple_PKCS#1
       desc: bootstrap and deployment services with label placements.
       polarion-id: CEPH-83573777
       destroy-cluster: false
@@ -89,12 +90,13 @@ tests:
   - test:
       abort-on-fail: true
       config:
+        scenario: install_apple_root_ca
         roles:
           - rgw
           - client
-      desc: Copy cephadm root CA cert to rgw and client nodes
-      module: copy_cephadm_root_ca_cert.py
-      name: copy cephadm root ca cert
+      desc: Install Apple PKI root CA on RGW and client nodes
+      module: apple_rgw_ssl_scenarios.py
+      name: install apple root ca
       polarion-id: CEPH-10362
   - test:
       name: Mbuckets_with_Nobjects with etag verification pre upgrade
@@ -144,12 +146,13 @@ tests:
   - test:
       abort-on-fail: true
       config:
+        scenario: install_apple_root_ca
         roles:
           - rgw
           - client
-      desc: Copy cephadm root CA cert to rgw and client nodes post upgrade
-      module: copy_cephadm_root_ca_cert.py
-      name: copy cephadm root ca cert post upgrade
+      desc: Install Apple PKI root CA on RGW and client nodes post upgrade
+      module: apple_rgw_ssl_scenarios.py
+      name: install apple root ca post upgrade
       polarion-id: CEPH-10362
 
 # Post Upgrade tests
