@@ -332,22 +332,36 @@ tests:
 
   - test:
       abort-on-fail: true
-      name: RGW MS upgrade
-      desc: RGW MS upgrade
-      module: test_cephadm_upgrade.py
-      clusters:
-        ceph-sec:
-          config:
-            command: start
-            service: upgrade
-            verify_cluster_health: true
-        ceph-pri:
-          config:
-            command: start
-            service: upgrade
-            verify_cluster_health: true
-      polarion-id: CEPH-83574647
-      # Upgrade may fail if nightly and stable build paths are incorrect, identical, or if the nightly build version is lower than the stable build.
+      name: RGW MS upgrade with IO parallel
+      desc: Run multisite IO parallelly during cluster upgrade
+      module: test_parallel.py
+      parallel:
+        - test:
+            name: Mbuckets_with_Nobjects during upgrade
+            desc: test to create M buckets and N objects during upgrade
+            module: sanity_rgw_multisite.py
+            polarion-id: CEPH-14237
+            clusters:
+              ceph-pri:
+                config:
+                  script-name: test_Mbuckets_with_Nobjects.py
+                  config-file-name: test_Mbuckets_with_Nobjects_download.yaml
+        - test:
+            name: RGW MS upgrade
+            desc: RGW MS upgrade
+            module: test_cephadm_upgrade.py
+            polarion-id: CEPH-83574647
+            clusters:
+              ceph-sec:
+                config:
+                  command: start
+                  service: upgrade
+                  verify_cluster_health: true
+              ceph-pri:
+                config:
+                  command: start
+                  service: upgrade
+                  verify_cluster_health: true
 
   - test:
       abort-on-fail: true
