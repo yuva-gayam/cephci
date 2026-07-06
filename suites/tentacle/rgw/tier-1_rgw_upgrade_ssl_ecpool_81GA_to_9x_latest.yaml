@@ -207,14 +207,18 @@ tests:
 
 # Post Upgrade tests
   - test:
-      desc: Retrieve the versions of the cluster
+      abort-on-fail: true
+      desc: Verify cluster version, status, and RGW orch export after upgrade
       module: exec.py
-      name: post upgrade gather version
+      name: post upgrade cluster health and rgw export
       polarion-id: CEPH-83575200
       config:
         cephadm: true
         commands:
-          - "ceph versions"
+          - ceph versions
+          - ceph -v
+          - ceph -s
+          - ceph orch ls rgw --export
 
   - test:
       name: NFS export delete
