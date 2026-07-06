@@ -195,19 +195,6 @@ tests:
 
   - test:
       abort-on-fail: true
-      config:
-        scenario: install_apple_root_ca
-        roles:
-          - rgw
-          - client
-      desc: Install Apple PKI root CA on RGW and client nodes post upgrade
-      module: apple_rgw_ssl_scenarios.py
-      name: install apple root ca post upgrade
-      polarion-id: CEPH-10362
-
-# Post Upgrade tests
-  - test:
-      abort-on-fail: true
       desc: Verify cluster version, status, and RGW orch export after upgrade
       module: exec.py
       name: post upgrade cluster health and rgw export
@@ -219,6 +206,20 @@ tests:
           - ceph -v
           - ceph -s
           - ceph orch ls rgw --export
+
+  - test:
+      abort-on-fail: true
+      config:
+        scenario: install_apple_root_ca
+        roles:
+          - rgw
+          - client
+      desc: Install Apple PKI root CA on RGW and client nodes post upgrade
+      module: apple_rgw_ssl_scenarios.py
+      name: install apple root ca post upgrade
+      polarion-id: CEPH-10362
+
+# Post Upgrade tests
 
   - test:
       name: NFS export delete

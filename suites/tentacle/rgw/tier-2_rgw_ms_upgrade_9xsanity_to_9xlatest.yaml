@@ -365,6 +365,30 @@ tests:
 
   - test:
       abort-on-fail: true
+      name: post upgrade cluster health and rgw export
+      desc: Verify cluster version, status, and RGW orch export after upgrade on all sites
+      module: exec.py
+      polarion-id: CEPH-83575200
+      clusters:
+        ceph-pri:
+          config:
+            cephadm: true
+            commands:
+              - ceph versions
+              - ceph -v
+              - ceph -s
+              - ceph orch ls rgw --export
+        ceph-sec:
+          config:
+            cephadm: true
+            commands:
+              - ceph versions
+              - ceph -v
+              - ceph -s
+              - ceph orch ls rgw --export
+
+  - test:
+      abort-on-fail: true
       name: download objects post upgrade
       desc: test to create "M" no of buckets and "N" no of objects with download
       module: sanity_rgw_multisite.py
@@ -374,37 +398,3 @@ tests:
             script-name: test_Mbuckets_with_Nobjects.py
             config-file-name: test_Mbuckets_with_Nobjects_download.yaml
       polarion-id: CEPH-14237
-
-  - test:
-      abort-on-fail: true
-      name: post upgrade cluster health and rgw export
-      desc: Verify cluster version, status, and RGW orch export after upgrade on all sites
-      module: test_parallel.py
-      polarion-id: CEPH-83575200
-      parallel:
-        - test:
-            name: post upgrade health primary
-            desc: Post upgrade health checks on primary
-            module: exec.py
-            clusters:
-              ceph-pri:
-                config:
-                  cephadm: true
-                  commands:
-                    - ceph versions
-                    - ceph -v
-                    - ceph -s
-                    - ceph orch ls rgw --export
-        - test:
-            name: post upgrade health secondary
-            desc: Post upgrade health checks on secondary
-            module: exec.py
-            clusters:
-              ceph-sec:
-                config:
-                  cephadm: true
-                  commands:
-                    - ceph versions
-                    - ceph -v
-                    - ceph -s
-                    - ceph orch ls rgw --export

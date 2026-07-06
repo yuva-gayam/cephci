@@ -554,6 +554,38 @@ tests:
 
   - test:
       abort-on-fail: true
+      name: post upgrade cluster health and rgw export
+      desc: Verify cluster version, status, and RGW orch export after upgrade on all sites
+      module: exec.py
+      polarion-id: CEPH-83575200
+      clusters:
+        ceph-pri:
+          config:
+            cephadm: true
+            commands:
+              - ceph versions
+              - ceph -v
+              - ceph -s
+              - ceph orch ls rgw --export
+        ceph-sec:
+          config:
+            cephadm: true
+            commands:
+              - ceph versions
+              - ceph -v
+              - ceph -s
+              - ceph orch ls rgw --export
+        ceph-arc:
+          config:
+            cephadm: true
+            commands:
+              - ceph versions
+              - ceph -v
+              - ceph -s
+              - ceph orch ls rgw --export
+
+  - test:
+      abort-on-fail: true
       clusters:
         ceph-arc:
           config:
@@ -577,53 +609,6 @@ tests:
       module: apple_rgw_ssl_scenarios.py
       name: install apple root ca post upgrade
       polarion-id: CEPH-10362
-
-  - test:
-      abort-on-fail: true
-      name: post upgrade cluster health and rgw export
-      desc: Verify cluster version, status, and RGW orch export after upgrade on all sites
-      module: test_parallel.py
-      polarion-id: CEPH-83575200
-      parallel:
-        - test:
-            name: post upgrade health primary
-            desc: Post upgrade health checks on primary
-            module: exec.py
-            clusters:
-              ceph-pri:
-                config:
-                  cephadm: true
-                  commands:
-                    - ceph versions
-                    - ceph -v
-                    - ceph -s
-                    - ceph orch ls rgw --export
-        - test:
-            name: post upgrade health secondary
-            desc: Post upgrade health checks on secondary
-            module: exec.py
-            clusters:
-              ceph-sec:
-                config:
-                  cephadm: true
-                  commands:
-                    - ceph versions
-                    - ceph -v
-                    - ceph -s
-                    - ceph orch ls rgw --export
-        - test:
-            name: post upgrade health archive
-            desc: Post upgrade health checks on archive
-            module: exec.py
-            clusters:
-              ceph-arc:
-                config:
-                  cephadm: true
-                  commands:
-                    - ceph versions
-                    - ceph -v
-                    - ceph -s
-                    - ceph orch ls rgw --export
 
   - test:
       name: Verify DBR feature enabled on upgraded cluster
