@@ -18,6 +18,13 @@ from ceph.ceph import CommandFailed
 from ceph.utils import get_node_by_id, get_nodes_by_ids
 from utility.log import Log
 from utility.ssl_certs import CertificateGenerator
+from tests.rgw.apple_rgw_ssl_certs import (
+    APPLE_RGW_DEFAULT_PORTS,
+    format_inline_pem_for_rgw_spec,
+    generate_apple_rgw_ssl_certificate,
+    resolve_apple_rgw_key_format,
+    split_inline_pem_for_ssl_cert_ssl_key,
+)
 from utility.utils import generate_self_signed_certificate
 
 LOG = Log(__name__)
@@ -199,6 +206,75 @@ class GenerateServiceSpec:
         with open(path) as fd:
             template = fd.read()
         return Template(template)
+
+
+    def _get_rgw_ssl_placement_nodes(self, placement):
+        """Return cluster nodes targeted by an RGW placement block."""
+        if placement.get("hosts"):
+            return [
+                self.cluster.get_node_by_hostname(hostname)
+                for hostname in placement["hosts"]
+            ]
+
+        label = placement.get("label")
+        if label:
+            return self.cluster.get_nodes(role=label)
+
+        raise ValueError(
+            "RGW SSL certificate generation requires placement hosts, nodes, or label"
+        )
+
+    def _inject_rgw_ssl_certificate(self, spec):
+        """Expand create-cert sentinels into inline PEM for RGW specs."""
+        cert_mode = spec["spec"].get("rgw_frontend_ssl_certificate")
+        if not cert_mode:
+            return
+
+        if cert_mode == "create-cert":
+            placement_nodes = self._get_rgw_ssl_placement_nodes(spec["placement"])
+            subject = {
+                "common_name": placement_nodes[0].hostname,
+                "ip_address": placement_nodes[0].ip_address,
+            }
+            key, cert, ca = generate_self_signed_certificate(subject=subject)
+            pem = key + cert + ca
+            spec["spec"]["rgw_frontend_ssl_certificate"] = format_inline_pem_for_rgw_spec(
+                pem
+            )
+            LOG.debug(pem)
+            return
+
+        if cert_mode == "create-cert_apple" or resolve_apple_rgw_key_format(cert_mode):
+            key_format = resolve_apple_rgw_key_format(cert_mode) or "PKCS#1"
+            placement_nodes = self._get_rgw_ssl_placement_nodes(spec["placement"])
+            rgw_spec = spec["spec"]
+            rgw_spec.setdefault("ssl", True)
+            rgw_spec.setdefault("rgw_frontend_port", APPLE_RGW_DEFAULT_PORTS[key_format])
+            common_name = rgw_spec.get("ssl_common_name", placement_nodes[0].hostname)
+            dns_names = [node.hostname for node in placement_nodes]
+            ip_addresses = [
+                node.ip_address for node in placement_nodes if node.ip_address
+            ]
+            inline_pem, root_ca_pem = generate_apple_rgw_ssl_certificate(
+                common_name=common_name,
+                dns_names=dns_names,
+                ip_addresses=ip_addresses,
+                key_format=key_format,
+            )
+            if rgw_spec.pop("use_ssl_cert_ssl_key", False):
+                ssl_key, ssl_cert = split_inline_pem_for_ssl_cert_ssl_key(inline_pem)
+                rgw_spec["ssl_key"] = format_inline_pem_for_rgw_spec(ssl_key)
+                rgw_spec["ssl_cert"] = format_inline_pem_for_rgw_spec(ssl_cert)
+                rgw_spec.pop("rgw_frontend_ssl_certificate", None)
+            else:
+                spec["spec"]["rgw_frontend_ssl_certificate"] = (
+                    format_inline_pem_for_rgw_spec(inline_pem)
+                )
+            rgw_spec.pop("ssl_common_name", None)
+            LOG.debug(
+                "Apple RGW root CA PEM (key_format=%s):\n%s", key_format, root_ca_pem
+            )
+            return
 
     def generate_host_spec(self, spec):
         """
@@ -565,7 +641,7 @@ class GenerateServiceSpec:
                   rgw_frontend_port: 8080
                   rgw_realm: east
                   rgw_zone: india
-                  rgw_frontend_ssl_certificate: create-cert | <contents of crt>
+                  rgw_frontend_ssl_certificate: create-cert | create-cert_apple | create-cert_apple_PKCS#1 | create-cert_apple_PKCS#8 | create-cert_apple_EC | create-cert_apple_DSA | <contents of crt>
 
             contents of rgw_spec.yaml file
 
@@ -589,21 +665,7 @@ class GenerateServiceSpec:
             spec["placement"]["hosts"] = self.get_hostnames(node_names)
 
         if spec.get("spec", False):
-            if spec["spec"].get("rgw_frontend_ssl_certificate", False):
-                if spec["spec"].get("rgw_frontend_ssl_certificate") == "create-cert":
-                    subject = {
-                        "common_name": spec["placement"]["hosts"][0],
-                        "ip_address": self.cluster.get_node_by_hostname(
-                            spec["placement"]["hosts"][0]
-                        ).ip_address,
-                    }
-                    key, cert, ca = generate_self_signed_certificate(subject=subject)
-                    pem = key + cert + ca
-                    cert_value = "|\n" + pem
-                    spec["spec"]["rgw_frontend_ssl_certificate"] = "\n    ".join(
-                        cert_value.split("\n")
-                    )
-                    LOG.debug(pem)
+            self._inject_rgw_ssl_certificate(spec)
 
         LOG.info(f"Generated rgw specification : {spec}")
 
@@ -742,7 +804,7 @@ class GenerateServiceSpec:
                   virtual_ip: 10.0.208.0/22
                   frontend_port: 8000
                   monitor_port: 1967
-                  ssl_cert: create-cert | <contents of crt>
+                  ssl_cert: create-cert | create-cert_apple_PKCS#1 | <contents of crt>
 
         :Note: make sure rgw service is already created.
 
@@ -766,6 +828,40 @@ class GenerateServiceSpec:
             LOG.debug(pem)
             vip_node = get_node_by_id(self.cluster, node_names[0])
             _, vip_cidr = self.get_gateway_cidr(vip_node)
+
+        else:
+            ssl_cert_mode = spec["spec"].get("ssl_cert")
+            if ssl_cert_mode == "create-cert_apple" or resolve_apple_rgw_key_format(
+                ssl_cert_mode
+            ):
+                key_format = resolve_apple_rgw_key_format(ssl_cert_mode) or "PKCS#1"
+                placement_hosts = spec["placement"]["hosts"]
+                placement_nodes = [
+                    self.cluster.get_node_by_hostname(hostname)
+                    for hostname in placement_hosts
+                ]
+                ip_addresses = [
+                    node.ip_address for node in placement_nodes if node.ip_address
+                ]
+                virtual_ip = spec["spec"].get("virtual_ip")
+                if virtual_ip:
+                    vip_ip = virtual_ip.split("/")[0]
+                    if vip_ip not in ip_addresses:
+                        ip_addresses.append(vip_ip)
+                inline_pem, root_ca_pem = generate_apple_rgw_ssl_certificate(
+                    common_name=placement_hosts[0],
+                    dns_names=placement_hosts,
+                    ip_addresses=ip_addresses,
+                    key_format=key_format,
+                )
+                spec["spec"]["ssl_cert"] = format_inline_pem_for_rgw_spec(inline_pem)
+                spec["spec"].setdefault("ssl", True)
+                spec["spec"].pop("certificate_source", None)
+                LOG.debug(
+                    "Apple ingress root CA PEM (key_format=%s):\n%s",
+                    key_format,
+                    root_ca_pem,
+                )
 
         return template.render(spec=spec)
 
