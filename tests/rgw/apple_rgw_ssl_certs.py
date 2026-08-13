@@ -10,9 +10,8 @@ Supported server private-key PEM headers (sentinel suffix after create-cert_appl
   PKCS#1     -----BEGIN RSA PRIVATE KEY-----        (PKCS#1 / legacy RSA)
   PKCS#8     -----BEGIN PRIVATE KEY-----            (unencrypted PKCS#8)
   EC         -----BEGIN EC PRIVATE KEY-----         (SEC1 / EC leaf key)
-  DSA        -----BEGIN DSA PRIVATE KEY-----         (OpenSSL legacy DSA)
 
-Encrypted PKCS#8 (BEGIN ENCRYPTED PRIVATE KEY) is not supported.
+DSA and encrypted PKCS#8 (BEGIN ENCRYPTED PRIVATE KEY) are not supported.
 
 The root CA is returned separately for client trust and is NOT included in the
 inline bundle served by RGW.
@@ -28,7 +27,7 @@ from typing import List, Optional, Tuple
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import dsa, ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
@@ -50,14 +49,12 @@ APPLE_RGW_CERT_SENTINELS = {
     "create-cert_apple_PKCS#1": "PKCS#1",
     "create-cert_apple_PKCS#8": "PKCS#8",
     "create-cert_apple_EC": "EC",
-    "create-cert_apple_DSA": "DSA",
 }
 
 APPLE_RGW_DEFAULT_PORTS = {
     "PKCS#1": 443,
     "PKCS#8": 444,
     "EC": 8443,
-    "DSA": 8444,
 }
 
 
@@ -85,7 +82,7 @@ def _serialize_server_private_key(
         pem_format = serialization.PrivateFormat.TraditionalOpenSSL
     elif key_format == "PKCS#8":
         pem_format = serialization.PrivateFormat.PKCS8
-    elif key_format in ("EC", "DSA"):
+    elif key_format == "EC":
         pem_format = serialization.PrivateFormat.TraditionalOpenSSL
     else:
         raise ValueError(f"Unsupported Apple RGW key format: {key_format}")
@@ -100,8 +97,6 @@ def _serialize_server_private_key(
 def _generate_server_private_key(key_format: str) -> PrivateKeyTypes:
     if key_format == "EC":
         return ec.generate_private_key(ec.SECP256R1(), default_backend())
-    if key_format == "DSA":
-        return dsa.generate_private_key(key_size=2048, backend=default_backend())
     return rsa.generate_private_key(
         public_exponent=65537, key_size=2048, backend=default_backend()
     )
@@ -139,18 +134,6 @@ def _leaf_key_usage(key_format: str) -> x509.KeyUsage:
             key_encipherment=False,
             data_encipherment=False,
             key_agreement=True,
-            key_cert_sign=False,
-            crl_sign=False,
-            encipher_only=False,
-            decipher_only=False,
-        )
-    if key_format == "DSA":
-        return x509.KeyUsage(
-            digital_signature=True,
-            content_commitment=False,
-            key_encipherment=False,
-            data_encipherment=False,
-            key_agreement=False,
             key_cert_sign=False,
             crl_sign=False,
             encipher_only=False,
@@ -299,7 +282,7 @@ def generate_apple_rgw_ssl_certificate(
         common_name: Leaf certificate CN.
         dns_names: Hostnames for the leaf SAN extension.
         ip_addresses: IP addresses for the leaf SAN extension.
-        key_format: One of PKCS#1, PKCS#8, EC, DSA.
+        key_format: One of PKCS#1, PKCS#8, EC.
 
     Returns:
         Tuple of (inline_pem, root_ca_pem).

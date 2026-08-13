@@ -641,7 +641,7 @@ class GenerateServiceSpec:
                   rgw_frontend_port: 8080
                   rgw_realm: east
                   rgw_zone: india
-                  rgw_frontend_ssl_certificate: create-cert | create-cert_apple | create-cert_apple_PKCS#1 | create-cert_apple_PKCS#8 | create-cert_apple_EC | create-cert_apple_DSA | <contents of crt>
+                  rgw_frontend_ssl_certificate: create-cert | create-cert_apple | create-cert_apple_PKCS#1 | create-cert_apple_PKCS#8 | create-cert_apple_EC | <contents of crt>
 
             contents of rgw_spec.yaml file
 

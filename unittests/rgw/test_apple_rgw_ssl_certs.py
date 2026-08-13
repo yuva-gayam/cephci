@@ -55,7 +55,6 @@ def test_key_format_pem_headers():
         "PKCS#1": "-----BEGIN RSA PRIVATE KEY-----",
         "PKCS#8": "-----BEGIN PRIVATE KEY-----",
         "EC": "-----BEGIN EC PRIVATE KEY-----",
-        "DSA": "-----BEGIN DSA PRIVATE KEY-----",
     }
     for key_format, header in expected_headers.items():
         inline_pem, _ = generate_apple_rgw_ssl_certificate(
@@ -71,9 +70,11 @@ def test_key_format_pem_headers():
 def test_sentinel_mapping():
     assert resolve_apple_rgw_key_format("create-cert_apple_PKCS#8") == "PKCS#8"
     assert resolve_apple_rgw_key_format("create-cert_apple") == "PKCS#1"
+    assert resolve_apple_rgw_key_format("create-cert_apple_EC") == "EC"
     assert resolve_apple_rgw_key_format("create-cert_apple_PKCS#8_enc") is None
+    assert resolve_apple_rgw_key_format("create-cert_apple_DSA") is None
     assert resolve_apple_rgw_key_format("create-cert") is None
-    assert len(APPLE_RGW_CERT_SENTINELS) == 5
+    assert len(APPLE_RGW_CERT_SENTINELS) == 4
 
 
 def test_get_last_generated_root_ca_returns_latest_value():
