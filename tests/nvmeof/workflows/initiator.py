@@ -240,14 +240,42 @@ class NVMeInitiator(Initiator):
         LOG.debug(targets)
         return targets
 
+    def stop_fio(self):
+        """Stop any running FIO processes on the client node.
+
+        Sends SIGTERM first to allow fio to flush, then SIGKILL after 5 seconds
+        if any processes remain.
+        """
+        LOG.info(f"Stopping FIO on node {self.node.hostname}")
+        try:
+            self.node.exec_command(cmd="pkill -SIGTERM fio", sudo=True)
+            sleep(5)
+        except Exception:
+            # pkill exits non-zero when no matching process is found; that is fine.
+            pass
+        try:
+            self.node.exec_command(cmd="pkill -9 fio", sudo=True)
+        except Exception:
+            pass
+        LOG.info(f"FIO stopped on node {self.node.hostname}")
+
     def start_fio(self, io_size="100%", runtime=None, paths=None, **kwargs):
         """Start FIO on the all targets on client node.
 
         Args:
             io_size: Size of the IO to be performed
+            runtime: Optional runtime in seconds; if None and io_size is set,
+                     FIO runs until io_size is fully written.
             paths: List of paths to perform IO on
+            stop_io (bool): When True, stop any running FIO processes on this
+                            node and return immediately without starting new IO.
             **kwargs: Additional arguments for FIO
         """
+        # Handle stop_io before any IO is set up.
+        if kwargs.get("stop_io"):
+            self.stop_fio()
+            return []
+
         if not paths:
             LOG.info("No paths provided, fetching all devices")
             paths = self.list_devices()
