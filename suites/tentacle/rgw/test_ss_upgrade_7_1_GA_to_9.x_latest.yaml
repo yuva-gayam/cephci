@@ -1,6 +1,7 @@
-#Objective: Testing single site single zone upgrade from RHCS 7.1 ga to 9.x latest build
-#platform : RHEL-9
-#conf: conf/tentacle/rgw/tier-0_rgw.yaml
+# Objective: P0 singlesite SSL upgrade from RHCS 7.1z(GA) to 9.x latest.
+# Cluster: EC 2+2 @4 nodes + SSL + haproxy + min 3 RGW daemons (ss + ssl)
+# platform: RHEL-9
+# global-conf: conf/tentacle/rgw/ec-profile-2+2@4nodes.yaml
 
 tests:
   - test:
@@ -49,17 +50,36 @@ tests:
               args:
                 all-available-devices: true
           - config:
-              command: apply
-              service: rgw
-              pos_args:
-                - shared.pri
               args:
-                placement:
-                  label: rgw
-                  nodes:
-                    - node3
-                    - node4
-                    - node5
+                - "ceph osd erasure-code-profile set rgwec22_4 k=2 m=2"
+                - "crush-failure-domain=host crush-device-class=hdd"
+              command: shell
+          - config:
+              args:
+                - "ceph osd pool create primary.rgw.buckets.data 32 32"
+                - "erasure rgwec22_4"
+              command: shell
+          - config:
+              args:
+                - "ceph osd pool application enable"
+                - "primary.rgw.buckets.data rgw"
+              command: shell
+          - config:
+              command: apply_spec
+              service: orch
+              specs:
+                - service_type: rgw
+                  service_id: shared.pri
+                  placement:
+                    nodes:
+                      - node2
+                      - node3
+                      - node4
+                  spec:
+                    ssl: true
+                    rgw_frontend_ssl_certificate: create-cert
+                    rgw_frontend_extra_args:
+                      - "port=80"
       desc: bootstrap and deployment services with label placements.
       polarion-id: CEPH-83573777
       destroy-cluster: false
@@ -73,25 +93,25 @@ tests:
         commands:
           - "sleep 120"
           - "radosgw-admin realm create --rgw-realm india --default"
-          - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints http://{node_ip:node5}:80 --master --default"
-          - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints http://{node_ip:node5}:80 --master --default"
+          - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node2},https://{node_ip:node3},https://{node_ip:node4} --master --default"
+          - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node2},https://{node_ip:node3},https://{node_ip:node4} --master --default"
           - "radosgw-admin period update --rgw-realm india --commit"
           - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_realm india"
           - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zonegroup shared"
           - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_zone primary"
+          - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
           - "ceph orch restart {service_name:shared.pri}"
       desc: Setting single zone environment
       module: exec.py
       name: Setting single zone environment
       polarion-id: CEPH-10362
 
-
   - test:
       abort-on-fail: true
       config:
         command: add
         id: client.1
-        node: node6
+        node: node4
         install_packages:
           - ceph-common
         copy_admin_keyring: true
@@ -101,18 +121,17 @@ tests:
       name: configure client
       polarion-id: CEPH-83573758
 
-  # configuring HAproxy on the client node 'node4' and port '5000'
   - test:
       abort-on-fail: true
       clusters:
         ceph:
           config:
             haproxy_clients:
-              - node6
+              - node4
             rgw_endpoints:
+              - node2:80
               - node3:80
               - node4:80
-              - node5:80
       desc: "Configure HAproxy"
       module: haproxy.py
       name: "Configure HAproxy"

@@ -1,6 +1,7 @@
-#Objective: Testing single site ssl setup upgrade from RHCS 8.1 G.A latest to 9.x latest build
-#platform : RHEL-9
-#conf: conf/tentacle/rgw/ec-profile-4+2-cluster.yaml
+# Objective: P0 singlesite SSL upgrade from RHCS 8.1z(GA) to 9.x latest.
+# Cluster: EC 2+2 @4 nodes + SSL + haproxy + min 3 RGW daemons (ss + ssl)
+# platform: RHEL-9
+# global-conf: conf/tentacle/rgw/ec-profile-2+2@4nodes.yaml
 
 tests:
   - test:
@@ -51,13 +52,13 @@ tests:
                 all-available-devices: true
           - config:
               args:
-                - "ceph osd erasure-code-profile set rgwecprofile01 k=4 m=2"
+                - "ceph osd erasure-code-profile set rgwec22_4 k=2 m=2"
                 - "crush-failure-domain=host crush-device-class=hdd"
               command: shell
           - config:
               args:
                 - "ceph osd pool create default.rgw.buckets.data 32 32"
-                - "erasure rgwecprofile01"
+                - "erasure rgwec22_4"
               command: shell
           - config:
               args:
@@ -81,10 +82,14 @@ tests:
                   service_id: rgw.ssl
                   placement:
                     nodes:
-                      - node7
+                      - node2
+                      - node3
+                      - node4
                   spec:
                     ssl: true
                     generate_cert: true
+                    rgw_frontend_extra_args:
+                      - "port=80"
       desc: bootstrap and deployment services with label placements.
       polarion-id: CEPH-83573777
       destroy-cluster: false
@@ -96,7 +101,7 @@ tests:
       config:
         command: add
         id: client.1
-        node: node8
+        node: node4
         install_packages:
           - ceph-common
         copy_admin_keyring: true
@@ -106,6 +111,18 @@ tests:
       name: Configure client
       polarion-id: CEPH-83573758
 
+  - test:
+      abort-on-fail: true
+      config:
+        haproxy_clients:
+          - node4
+        rgw_endpoints:
+          - node2:80
+          - node3:80
+          - node4:80
+      desc: Configure HAproxy
+      module: haproxy.py
+      name: Configure HAproxy
 
   - test:
       abort-on-fail: true
