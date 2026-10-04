@@ -576,6 +576,45 @@ def check_ceph_status(site):
         )
 
 
+def _wait_for_osd_and_rgw_ready(node, timeout=360, interval=10):
+    """Wait until all OSDs are up and RGW daemons are running.
+
+    ``set_config_param`` restarts RGW and OSD services. With ODF defaults
+    (``ms_bind_msgr1=false``, OSD memory autotune) OSDs reconnect slowly;
+    running user-create / sync immediately then fails with RGW error 2200
+    (failed to fetch master sync status).
+    """
+    end = time.time() + timeout
+    last_msg = ""
+    while time.time() < end:
+        try:
+            osd_out, _ = node.exec_command(cmd="ceph osd stat --format json")
+            stats = json.loads(osd_out)
+            up = int(stats.get("num_up_osds", 0))
+            total = int(stats.get("num_osds", 0))
+            rgw_out, _ = node.exec_command(
+                cmd="ceph orch ps --daemon-type rgw --format json"
+            )
+            rgws = json.loads(rgw_out) if str(rgw_out).strip() else []
+            rgw_ready = bool(rgws) and all(
+                d.get("status_desc") == "running" or d.get("status") == 1 for d in rgws
+            )
+            last_msg = f"OSDs {up}/{total} up; RGW running={rgw_ready}"
+            log.info(last_msg)
+            if total > 0 and up == total and rgw_ready:
+                # Beast frontend may still be binding after the container is running.
+                time.sleep(15)
+                log.info("OSDs and RGW recovered after config restart")
+                return
+        except Exception as exc:  # noqa: BLE001
+            last_msg = str(exc)
+            log.warning("Waiting for OSD/RGW readiness: %s", exc)
+        time.sleep(interval)
+    raise Exception(
+        f"OSDs/RGW did not recover within {timeout}s after set_config_param: {last_msg}"
+    )
+
+
 def set_config_param(node):
     """
     To set configuration parameters across sites
@@ -611,6 +650,7 @@ def set_config_param(node):
     # restart osd service
     node.exec_command(cmd=f"ceph orch restart {osd_process_name}")
     node.exec_command(cmd="ceph config dump")
+    _wait_for_osd_and_rgw_ready(node)
 
 
 def kernel_mount(mounting_dir, mon_node_ip, kernel_clients):
