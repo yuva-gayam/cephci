@@ -28,6 +28,8 @@ tests:
                     initial-dashboard-password: admin@123
                     dashboard-password-noupdate: true
                     skip-monitoring-stack: true
+                  base_cmd_args:
+                    verbose: true
               - config:
                   command: add_hosts
                   service: host
@@ -94,6 +96,8 @@ tests:
                     initial-dashboard-password: admin@123
                     dashboard-password-noupdate: true
                     skip-monitoring-stack: true
+                  base_cmd_args:
+                    verbose: true
               - config:
                   command: add_hosts
                   service: host
@@ -160,6 +164,8 @@ tests:
                     initial-dashboard-password: admin@123
                     dashboard-password-noupdate: true
                     skip-monitoring-stack: true
+                  base_cmd_args:
+                    verbose: true
               - config:
                   command: add_hosts
                   service: host
@@ -380,7 +386,6 @@ tests:
               - "ceph config set client.rgw.shared.pri rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
               - "sleep 120"
-              - "sleep 20"
         ceph-sec:
           config:
             commands:
@@ -394,7 +399,6 @@ tests:
               - "ceph config set client.rgw.shared.sec rgw_zone secondary"
               - "ceph orch restart {service_name:shared.sec}"
               - "sleep 120"
-              - "sleep 20"
         ceph-arc:
           config:
             commands:
@@ -409,7 +413,6 @@ tests:
               - "ceph config set client.rgw.shared.arc rgw_zone archive"
               - "ceph orch restart {service_name:shared.arc}"
               - "sleep 120"
-              - "sleep 20"
       desc: Setting up RGW multisite replication environment with archive zone
       module: exec.py
       name: setup multisite

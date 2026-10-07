@@ -192,7 +192,7 @@ tests:
               - "ceph config set client.rgw rgw_verify_ssl False"
               - "ceph config set client.rgw.{daemon_id:shared.pri} rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
-              - "sleep 20"
+              - "sleep 120"
         ceph-sec:
           config:
             commands:
