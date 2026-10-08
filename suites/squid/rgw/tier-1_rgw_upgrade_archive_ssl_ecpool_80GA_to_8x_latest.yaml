@@ -94,8 +94,6 @@ tests:
                     initial-dashboard-password: admin@123
                     dashboard-password-noupdate: true
                     skip-monitoring-stack: true
-                  base_cmd_args:
-                    verbose: true
               - config:
                   command: add_hosts
                   service: host
@@ -162,8 +160,6 @@ tests:
                     initial-dashboard-password: admin@123
                     dashboard-password-noupdate: true
                     skip-monitoring-stack: true
-                  base_cmd_args:
-                    verbose: true
               - config:
                   command: add_hosts
                   service: host
@@ -371,9 +367,6 @@ tests:
         ceph-pri:
           config:
             commands:
-              - "ceph -v"
-              - "ceph orch ls"
-              - "ceph orch ps"
               - "radosgw-admin realm create --rgw-realm india --default"
               - "radosgw-admin zonegroup create --rgw-realm india --rgw-zonegroup shared --endpoints https://{node_ip:node3} --master --default"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone primary --endpoints https://{node_ip:node3} --master --default"
@@ -387,60 +380,36 @@ tests:
               - "ceph config set client.rgw.shared.pri rgw_verify_ssl False"
               - "ceph orch restart {service_name:shared.pri}"
               - "sleep 120"
-              - "ceph -v"
-              - "ceph orch ls"
-              - "ceph orch ps"
+              - "sleep 20"
         ceph-sec:
           config:
             commands:
-              - "ceph -v"
-              - "ceph orch ls"
-              - "ceph orch ps"
-              - "ceph config get client.admin rgw_verify_ssl"
-              - "ceph config get client.rgw.shared.sec rgw_verify_ssl"
-              - "curl -sv --max-time 20 https://{node_ip:ceph-pri#node3}/ 2>&1 || true"
-              - "curl -svk --max-time 20 https://{node_ip:ceph-pri#node3}/ 2>&1 || true"
-              - "ceph config set client.rgw rgw_verify_ssl False"
-              - "ceph config set client.admin rgw_verify_ssl false"
               - "ceph config set client.rgw.shared.sec rgw_verify_ssl False"
-              - "radosgw-admin --rgw_verify_ssl=false realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin --rgw_verify_ssl=false period pull --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
+              - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone secondary --endpoints https://{node_ip:node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
-              - "radosgw-admin --rgw_verify_ssl=false period update --rgw-realm india --commit"
+              - "radosgw-admin period update --rgw-realm india --commit"
               - "ceph config set client.rgw.shared.sec rgw_realm india"
               - "ceph config set client.rgw.shared.sec rgw_zonegroup shared"
               - "ceph config set client.rgw.shared.sec rgw_zone secondary"
               - "ceph orch restart {service_name:shared.sec}"
               - "sleep 120"
-              - "ceph -v"
-              - "ceph orch ls"
-              - "ceph orch ps"
+              - "sleep 20"
         ceph-arc:
           config:
             commands:
-              - "ceph -v"
-              - "ceph orch ls"
-              - "ceph orch ps"
-              - "ceph config get client.admin rgw_verify_ssl"
-              - "ceph config get client.rgw.shared.arc rgw_verify_ssl"
-              - "curl -sv --max-time 20 https://{node_ip:ceph-pri#node3}/ 2>&1 || true"
-              - "curl -svk --max-time 20 https://{node_ip:ceph-pri#node3}/ 2>&1 || true"
-              - "ceph config set client.rgw rgw_verify_ssl False"
-              - "ceph config set client.admin rgw_verify_ssl false"
               - "ceph config set client.rgw.shared.arc rgw_verify_ssl False"
-              - "radosgw-admin --rgw_verify_ssl=false realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
-              - "radosgw-admin --rgw_verify_ssl=false period pull --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
+              - "radosgw-admin realm pull --rgw-realm india --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --default"
+              - "radosgw-admin period pull --url https://{node_ip:ceph-pri#node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d"
               - "radosgw-admin zone create --rgw-realm india --rgw-zonegroup shared --rgw-zone archive --endpoints https://{node_ip:node3} --access-key 21e86bce636c3aa0 --secret cf764951f1fdde5d --tier-type=archive"
               - "radosgw-admin zone modify  --rgw-realm india --rgw-zonegroup shared --rgw-zone archive  --sync-from-all false --sync-from-rm secondary --sync-from primary"
-              - "radosgw-admin --rgw_verify_ssl=false period update --rgw-realm india --commit"
+              - "radosgw-admin period update --rgw-realm india --commit"
               - "ceph config set client.rgw.shared.arc rgw_realm india"
               - "ceph config set client.rgw.shared.arc rgw_zonegroup shared"
               - "ceph config set client.rgw.shared.arc rgw_zone archive"
               - "ceph orch restart {service_name:shared.arc}"
               - "sleep 120"
-              - "ceph -v"
-              - "ceph orch ls"
-              - "ceph orch ps"
+              - "sleep 20"
       desc: Setting up RGW multisite replication environment with archive zone
       module: exec.py
       name: setup multisite
