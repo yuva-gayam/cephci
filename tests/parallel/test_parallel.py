@@ -142,22 +142,34 @@ def execute(test, args, results, parallel_tcs):
         }
         start = datetime.datetime.now()
 
-        # Merging configurations safely
+        # Merging configurations safely. A child that names one cluster runs
+        # against that cluster instead of the wrapper's cluster.
+        ceph_cluster = args.get("ceph_cluster")
+        ceph_nodes = args.get("ceph_nodes")
+        cluster_dict = args.get("ceph_cluster_dict") or {}
         test_config = args.get("config", {}).copy()
         test_config.update(test.get("config", {}))
-        if "clusters" in test:
-            clusters_config = test.get("clusters", {})
-            for cluster_name, cluster_data in clusters_config.items():
-                # Extract and merge the cluster-specific configurations into the root
-                if "config" in cluster_data:
-                    test_config.update(cluster_data["config"])
+        clusters_config = test.get("clusters") or {}
+        if len(clusters_config) == 1:
+            cluster_name = next(iter(clusters_config))
+            selected = cluster_dict.get(cluster_name)
+            if selected is None:
+                raise CommandFailed(
+                    f"Cluster {cluster_name} was not found for test {test_name}"
+                )
+            ceph_cluster = selected
+            ceph_nodes = selected
+            test_logger.info(f"Running {test_name} on cluster {cluster_name}")
+        for cluster_data in clusters_config.values():
+            if isinstance(cluster_data, dict) and "config" in cluster_data:
+                test_config.update(cluster_data["config"])
         test_logger.info(test_config)
         tc["name"] = test.get("name")
         tc["desc"] = test.get("desc")
         tc["log-link"] = log_url
         rc = test_mod.run(
-            ceph_cluster=args.get("ceph_cluster"),
-            ceph_nodes=args.get("ceph_nodes"),
+            ceph_cluster=ceph_cluster,
+            ceph_nodes=ceph_nodes,
             config=test_config,
             parallel=args.get("parallel"),
             test_data=args.get("test_data"),
